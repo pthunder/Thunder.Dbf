@@ -4,6 +4,7 @@
 //    / / / / /        passed on a Windows 95 box in 1997.
 //   / / / / /
 
+using System.Buffers.Binary;
 using System.Text;
 
 namespace Thunder.Dbf.Tests;
@@ -18,9 +19,9 @@ public class DbfHeaderTests
 
         bytes[0] = version;
         bytes[1] = 126; bytes[2] = 10; bytes[3] = 30; // 2026-10-30
-        BitConverter.TryWriteBytes(bytes.AsSpan(4, 4), 42u);
-        BitConverter.TryWriteBytes(bytes.AsSpan(8, 2), (ushort)headerLength);
-        BitConverter.TryWriteBytes(bytes.AsSpan(10, 2), (ushort)recordLength);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4, 4), 42u);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(8, 2), (ushort)headerLength);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(10, 2), (ushort)recordLength);
         bytes[28] = productionMdx ? (byte)1 : (byte)0;
         bytes[29] = 0x57;
 
@@ -70,5 +71,103 @@ public class DbfHeaderTests
         Assert.False(header.HasProductionMdx);
         Assert.Single(header.Fields);
         Assert.Equal(1, header.Fields[0].Offset);
+    }
+
+    // Regressions from the Codex audit of 730d7c0.
+
+    private static byte[] OneCharField() => BuildHeader(0x03, productionMdx: false, ("A", 'C', 1, 0));
+
+    [Fact]
+    public void Missing_terminator_is_rejected()
+    {
+        var bytes = OneCharField()[..^1];
+        Assert.Throws<InvalidDataException>(() => DbfHeader.Read(new MemoryStream(bytes)));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(32)]
+    [InlineData(34)]
+    [InlineData(64)]
+    public void Header_length_too_short_for_the_descriptors_is_rejected(int headerLength)
+    {
+        var bytes = OneCharField();
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(8, 2), (ushort)headerLength);
+        Assert.Throws<InvalidDataException>(() => DbfHeader.Read(new MemoryStream(bytes)));
+    }
+
+    [Fact]
+    public void Fields_wider_than_the_record_are_rejected()
+    {
+        var bytes = OneCharField();
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(10, 2), 1);
+        Assert.Throws<InvalidDataException>(() => DbfHeader.Read(new MemoryStream(bytes)));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(10)]
+    [InlineData(31)]
+    public void Truncated_fixed_header_is_rejected(int length)
+    {
+        Assert.Throws<InvalidDataException>(() => DbfHeader.Read(new MemoryStream(OneCharField()[..length])));
+    }
+
+    [Theory]
+    [InlineData(0x02)]
+    [InlineData(0x04)]
+    [InlineData(0x8C)]
+    public void dBASE_II_and_7_layouts_are_refused(byte version)
+    {
+        var bytes = OneCharField();
+        bytes[0] = version;
+        Assert.Throws<NotSupportedException>(() => DbfHeader.Read(new MemoryStream(bytes)));
+    }
+
+    [Fact]
+    public void Header_can_start_mid_stream_and_leaves_stream_after_terminator()
+    {
+        var header = OneCharField();
+        var bytes = new byte[128 + header.Length];
+        header.CopyTo(bytes, 128);
+        var stream = new MemoryStream(bytes) { Position = 128 };
+
+        var read = DbfHeader.Read(stream);
+
+        Assert.Single(read.Fields);
+        Assert.Equal(bytes.Length, stream.Position);
+    }
+
+    [Theory]
+    [InlineData(126, 0, 0)]
+    [InlineData(126, 13, 1)]
+    [InlineData(126, 2, 30)]
+    public void Impossible_update_dates_read_as_null(byte year, byte month, byte day)
+    {
+        var bytes = OneCharField();
+        (bytes[1], bytes[2], bytes[3]) = (year, month, day);
+        Assert.Null(DbfHeader.Read(new MemoryStream(bytes)).LastUpdate);
+    }
+
+    [Fact]
+    public void Visual_FoxPro_flags_mean_cdx_and_memo_not_mdx()
+    {
+        var bytes = OneCharField();
+        bytes[0] = 0x30;
+        bytes[28] = 0x03; // structural CDX + memo
+
+        var header = DbfHeader.Read(new MemoryStream(bytes));
+
+        Assert.True(header.IsVisualFoxPro);
+        Assert.True(header.HasStructuralCdx);
+        Assert.True(header.HasMemo);
+        Assert.False(header.HasProductionMdx);
+    }
+
+    [Fact]
+    public void Fields_cannot_be_mutated_through_a_cast()
+    {
+        var header = DbfHeader.Read(new MemoryStream(OneCharField()));
+        Assert.IsNotType<List<DbfField>>(header.Fields);
     }
 }

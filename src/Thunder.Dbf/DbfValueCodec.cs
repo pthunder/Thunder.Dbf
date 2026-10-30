@@ -1,0 +1,238 @@
+//    _
+//   / |__     ProjectThunder :: Thunder.Dbf
+//  /_   /     Bytes in, values out (and back again).
+//    | /
+//    |/
+//
+// +------+-----------------------+---------------------------+
+// | type | on disk               | in .NET                   |
+// +------+-----------------------+---------------------------+
+// |  C   | text, space padded    | string (trailing trimmed) |
+// | N  F | ASCII, right aligned  | decimal?                  |
+// |  D   | YYYYMMDD              | DateOnly?                 |
+// |  L   | T F Y N ?             | bool?                     |
+// | MGPB | memo block, 10 ASCII  | int? (block number)       |
+// +------+-----------------------+---------------------------+
+// |  Visual FoxPro binary types, all little-endian           |
+// +------+-----------------------+---------------------------+
+// | MGP  | 4-byte block number   | int?                      |
+// |  I   | int32                 | int                       |
+// |  Y   | int64 / 10,000        | decimal                   |
+// |  B   | IEEE double           | double                    |
+// |  T   | Julian day + millis   | DateTime?                 |
+// +------+-----------------------+---------------------------+
+// |  ??  | whatever it is        | byte[] (untouched)        |
+// +------+-----------------------+---------------------------+
+
+using System.Buffers.Binary;
+using System.Globalization;
+using System.Text;
+
+namespace Thunder.Dbf;
+
+/// <summary>Converts field bytes to .NET values and back.</summary>
+internal static class DbfValueCodec
+{
+    private const byte Space = (byte)' ';
+    private const int UnixEpochJulianDay = 2440588;
+    private const decimal CurrencyScale = 10_000m;
+
+    // Visual FoxPro stores memo pointers as 4-byte integers; every other dialect uses 10 ASCII digits.
+    private static bool IsBinaryMemo(DbfField field) => field.Type is 'M' or 'G' or 'P' && field.Length == 4;
+
+    public static object? Decode(DbfField field, ReadOnlySpan<byte> raw, Encoding encoding)
+    {
+        if (IsBinaryMemo(field))
+        {
+            var block = BinaryPrimitives.ReadInt32LittleEndian(raw);
+            return block == 0 ? null : block;
+        }
+
+        switch (field.Type)
+        {
+            case 'I' when field.Length == 4:
+                return BinaryPrimitives.ReadInt32LittleEndian(raw);
+
+            case 'Y' when field.Length == 8:
+                return BinaryPrimitives.ReadInt64LittleEndian(raw) / CurrencyScale;
+
+            case 'B' when field.Length == 8:
+                return BinaryPrimitives.ReadDoubleLittleEndian(raw);
+
+            case 'T' when field.Length == 8:
+            {
+                var julianDay = BinaryPrimitives.ReadInt32LittleEndian(raw);
+                if (julianDay == 0)
+                    return null;
+                var millis = BinaryPrimitives.ReadInt32LittleEndian(raw[4..]);
+                return DateTime.UnixEpoch.AddDays(julianDay - UnixEpochJulianDay).AddMilliseconds(millis);
+            }
+
+            case 'C':
+                return encoding.GetString(raw).TrimEnd(' ', '\0');
+
+            case 'N' or 'F':
+            {
+                var text = Ascii(raw);
+                if (text.Length == 0 || text.All(c => c == '*'))
+                    return null;
+                if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+                    return number;
+                throw new FormatException($"Field {field.Name} holds '{text}', which isn't a number.");
+            }
+
+            case 'D':
+            {
+                var text = Ascii(raw);
+                if (text.Length == 0 || text == "00000000")
+                    return null;
+                if (DateOnly.TryParseExact(text, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                    return date;
+                throw new FormatException($"Field {field.Name} holds '{text}', which isn't a YYYYMMDD date.");
+            }
+
+            case 'L':
+                return (char)raw[0] switch
+                {
+                    'T' or 't' or 'Y' or 'y' => true,
+                    'F' or 'f' or 'N' or 'n' => false,
+                    _ => null,
+                };
+
+            case 'M' or 'G' or 'P' or 'B':
+            {
+                var text = Ascii(raw);
+                if (text.Length == 0)
+                    return null;
+                if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var block))
+                    return block == 0 ? null : block;
+                throw new FormatException($"Field {field.Name} holds '{text}', which isn't a memo block number.");
+            }
+
+            default:
+                return raw.ToArray();
+        }
+    }
+
+    public static void Encode(DbfField field, object? value, Span<byte> target, Encoding encoding)
+    {
+        if (IsBinaryMemo(field))
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(target, value is null ? 0 : Convert.ToInt32(value, CultureInfo.InvariantCulture));
+            return;
+        }
+
+        if ((field.Type == 'I' && field.Length == 4) || (field.Type is 'Y' or 'B' or 'T' && field.Length == 8))
+        {
+            EncodeBinary(field, value, target);
+            return;
+        }
+
+        target.Fill(Space);
+        if (value is null)
+        {
+            if (field.Type == 'L')
+                target[0] = (byte)'?';
+            return;
+        }
+
+        switch (field.Type)
+        {
+            case 'C':
+            {
+                var text = value as string ?? Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
+                var byteCount = encoding.GetByteCount(text);
+                if (byteCount > target.Length)
+                    throw new ArgumentException($"Field {field.Name} holds {target.Length} bytes; '{text}' needs {byteCount}.");
+                encoding.GetBytes(text, target);
+                break;
+            }
+
+            case 'N' or 'F':
+            {
+                var number = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                var text = number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
+                WriteRightAligned(field, text, target);
+                break;
+            }
+
+            case 'D':
+            {
+                var date = value switch
+                {
+                    DateOnly d => d,
+                    DateTime dt => DateOnly.FromDateTime(dt),
+                    DateTimeOffset dto => DateOnly.FromDateTime(dto.Date),
+                    _ => throw new ArgumentException($"Field {field.Name} needs a DateOnly or DateTime, not {value.GetType().Name}."),
+                };
+                Encoding.ASCII.GetBytes(date.ToString("yyyyMMdd", CultureInfo.InvariantCulture), target);
+                break;
+            }
+
+            case 'L':
+                target[0] = value is bool b
+                    ? (byte)(b ? 'T' : 'F')
+                    : throw new ArgumentException($"Field {field.Name} needs a bool, not {value.GetType().Name}.");
+                break;
+
+            case 'M' or 'G' or 'P' or 'B':
+            {
+                var block = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+                if (block < 0)
+                    throw new ArgumentOutOfRangeException(nameof(value), $"Field {field.Name} can't point at memo block {block}.");
+                WriteRightAligned(field, block.ToString(CultureInfo.InvariantCulture), target);
+                break;
+            }
+
+            default:
+                if (value is not byte[] bytes || bytes.Length != target.Length)
+                    throw new ArgumentException($"Field {field.Name} has type '{field.Type}', so it needs exactly {target.Length} raw bytes.");
+                bytes.CopyTo(target);
+                break;
+        }
+    }
+
+    // Visual FoxPro has no blank for these types; null writes zeros, which VFP shows as 0 or an empty datetime.
+    private static void EncodeBinary(DbfField field, object? value, Span<byte> target)
+    {
+        target.Clear();
+        if (value is null)
+            return;
+
+        switch (field.Type)
+        {
+            case 'I':
+                BinaryPrimitives.WriteInt32LittleEndian(target, Convert.ToInt32(value, CultureInfo.InvariantCulture));
+                break;
+            case 'Y':
+                var scaled = decimal.Round(Convert.ToDecimal(value, CultureInfo.InvariantCulture) * CurrencyScale);
+                BinaryPrimitives.WriteInt64LittleEndian(target, decimal.ToInt64(scaled));
+                break;
+            case 'B':
+                BinaryPrimitives.WriteDoubleLittleEndian(target, Convert.ToDouble(value, CultureInfo.InvariantCulture));
+                break;
+            case 'T':
+                var moment = value switch
+                {
+                    DateTime dt => dt,
+                    DateOnly d => d.ToDateTime(TimeOnly.MinValue),
+                    DateTimeOffset dto => dto.DateTime,
+                    _ => throw new ArgumentException($"Field {field.Name} needs a DateTime, not {value.GetType().Name}."),
+                };
+                var sinceEpoch = moment - DateTime.UnixEpoch;
+                var days = (int)Math.Floor(sinceEpoch.TotalDays);
+                BinaryPrimitives.WriteInt32LittleEndian(target, UnixEpochJulianDay + days);
+                BinaryPrimitives.WriteInt32LittleEndian(target[4..], (int)(sinceEpoch - TimeSpan.FromDays(days)).TotalMilliseconds);
+                break;
+        }
+    }
+
+    private static string Ascii(ReadOnlySpan<byte> raw) => Encoding.ASCII.GetString(raw).Trim(' ', '\0');
+
+    private static void WriteRightAligned(DbfField field, string text, Span<byte> target)
+    {
+        if (text.Length > target.Length)
+            throw new OverflowException($"Field {field.Name} holds {target.Length} characters; '{text}' doesn't fit.");
+        Encoding.ASCII.GetBytes(text, target[(target.Length - text.Length)..]);
+    }
+}
