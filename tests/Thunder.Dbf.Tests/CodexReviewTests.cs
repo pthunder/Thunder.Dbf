@@ -43,7 +43,8 @@ public class CodexReviewTests
         using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: memo))
         {
             Assert.True(table.Header.HasProductionMdx);
-            Assert.Throws<InvalidOperationException>(() => table.Delete(0));
+            var error = Assert.Throws<DbfException>(() => table.Delete(0));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         }
 
         using var allowed = DbfTable.Open(stream, leaveOpen: true, memoStream: memo, allowUnmaintainedIndexes: true);

@@ -45,6 +45,8 @@ public static class DbfEncoding
 
     public static Encoding GetEncoding(int codePage) => Encoding.GetEncoding(codePage);
 
+    public static Encoding GetEncodingByName(string name) => Encoding.GetEncoding(name);
+
     /// <summary>
     /// Reads a shapefile-style .cpg sidecar ("UTF-8", "1252", "ANSI 1251", ...). Returns null when the file
     /// is missing or names an encoding .NET doesn't know.

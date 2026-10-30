@@ -49,8 +49,13 @@ public sealed class DbfTable : IDisposable
         Encoding = encoding;
         _buffer = new byte[header.RecordLength];
 
+        if (header.IsEncrypted)
+            throw new DbfException(DbfErrorCode.EncryptedTable, "dBASE IV encrypted this table with PROTECT, so its records are scrambled.",
+                "Decrypt it in dBASE (or the legacy app) and save an unencrypted copy; Thunder.Dbf can't read PROTECT encryption.");
+
         if (memo is null && !ignoreMissingMemo && Fields.Any(DbfValueCodec.IsMemoField))
-            throw new FileNotFoundException("The table has memo fields but no memo file was found. Pass ignoreMissingMemo to read it anyway.");
+            throw new DbfException(DbfErrorCode.MemoFileMissing, "The table has memo fields but its .dbt/.fpt memo file wasn't found.",
+                "Copy the memo file next to the table (same name), or open with ignoreMissingMemo: true to read memo fields as null.");
     }
 
     public DbfHeader Header { get; }
@@ -75,14 +80,14 @@ public sealed class DbfTable : IDisposable
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = writable ? FileShare.Read : FileShare.ReadWrite;
-        var stream = new FileStream(path, FileMode.Open, access, share);
+        var stream = DbfException.OpenFile(path, FileMode.Open, access, share);
         FileStream? memoStream = null;
         try
         {
             stream.Position = 0;
-            var header = DbfHeader.Read(stream);
+            var header = ReadHeader(stream, encoding: null, path);
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
-                memoStream = new FileStream(memoPath, FileMode.Open, access, share);
+                memoStream = DbfException.OpenFile(memoPath, FileMode.Open, access, share);
 
             var table = Open(stream, encoding ?? DbfEncoding.FromCpgFile(Path.ChangeExtension(path, ".cpg")), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
@@ -108,8 +113,17 @@ public sealed class DbfTable : IDisposable
             throw new ArgumentException("DBF tables need a seekable stream.", nameof(stream));
 
         stream.Position = 0;
-        var header = DbfHeader.Read(stream, encoding);
-        var memo = memoStream is null ? null : DbfMemoFile.Open(memoStream, header, leaveOpen);
+        var header = ReadHeader(stream, encoding, path: null);
+        DbfMemoFile? memo;
+        try
+        {
+            memo = memoStream is null ? null : DbfMemoFile.Open(memoStream, header, leaveOpen);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.MemoFileDamaged, $"The memo file can't be read: {ex.Message}",
+                "Restore the .dbt/.fpt from a backup, or open with ignoreMissingMemo: true to read the table without it.", inner: ex);
+        }
         return new DbfTable(stream, header, encoding ?? DbfEncoding.For(header.LanguageDriver), leaveOpen, memo,
             ignoreMissingMemo, allowUnmaintainedIndexes);
     }
@@ -288,7 +302,16 @@ public sealed class DbfTable : IDisposable
         if (block is null || _memo is null)
             return null;
 
-        var memo = _memo.Read(block.Value);
+        DbfMemo memo;
+        try
+        {
+            memo = _memo.Read(block.Value);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.MemoFileDamaged, $"Memo field {field.Name} points at a damaged memo: {ex.Message}",
+                "The memo file is corrupt or doesn't belong to this table. Restore it from a backup.", inner: ex);
+        }
         var isText = field.Type == 'M' && !field.IsBinary && memo.BlockType == DbfMemoFile.TextBlock;
         return isText ? Encoding.GetString(memo.Data) : memo.Data;
     }
@@ -429,11 +452,33 @@ public sealed class DbfTable : IDisposable
     private void EnsureWritable()
     {
         if (!_stream.CanWrite)
-            throw new InvalidOperationException("The table was opened read-only.");
+            throw new DbfException(DbfErrorCode.ReadOnlyConnection, "The table was opened read-only.",
+                "Open it with writable: true (or a database with ReadOnly = false) to change it.", _path);
+        if (Header.HasIncompleteTransaction)
+            throw new DbfException(DbfErrorCode.IncompleteTransaction, "dBASE IV marked a transaction on this table as unfinished.",
+                "Open the table in the legacy app so it can roll the transaction back, then try again. Reading is still safe.", _path);
         if ((Header.HasProductionMdx || Header.HasStructuralCdx) && !_allowUnmaintainedIndexes)
-            throw new InvalidOperationException(
-                "The table has a production index (.mdx or .cdx) that Thunder.Dbf can't update yet, so writing would leave it stale. " +
-                "Open with allowUnmaintainedIndexes: true if the index will be rebuilt.");
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "The table has a production index (.mdx or .cdx) that Thunder.Dbf can't update yet, so writing would leave it out of date.",
+                "Open with allowUnmaintainedIndexes: true only if the index will be rebuilt (for example with REINDEX in the legacy app) before it's used.", _path);
+    }
+
+    private static DbfHeader ReadHeader(Stream stream, Encoding? encoding, string? path)
+    {
+        try
+        {
+            return DbfHeader.Read(stream, encoding);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.NotADbfFile, $"This isn't a readable DBF table: {ex.Message}",
+                "Check it's a table (.dbf) and not an index, memo or other file, and that it wasn't truncated by an interrupted copy.", path, ex);
+        }
+        catch (NotSupportedException ex)
+        {
+            throw new DbfException(DbfErrorCode.UnsupportedFormat, ex.Message,
+                "Save the table as dBASE III/IV or FoxPro from the legacy app, or ask for this format on the Thunder.Dbf roadmap.", path, ex);
+        }
     }
 
     private void CommitHeader()

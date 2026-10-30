@@ -123,6 +123,12 @@ public sealed class DbfHeader
     /// <summary>Visual FoxPro: set when a structural .cdx with the same base name accompanies the table.</summary>
     public bool HasStructuralCdx => IsVisualFoxPro && (_fixed[28] & 0x01) != 0;
 
+    /// <summary>dBASE IV: byte 15 says the table was encrypted with PROTECT. Its records are scrambled.</summary>
+    public bool IsEncrypted => !IsVisualFoxPro && _fixed[15] == 0x01;
+
+    /// <summary>dBASE IV: byte 14 says a BEGIN TRANSACTION never finished.</summary>
+    public bool HasIncompleteTransaction => !IsVisualFoxPro && _fixed[14] == 0x01;
+
     /// <summary>Language driver / code page mark (byte 29).</summary>
     public byte LanguageDriver => _fixed[29];
 

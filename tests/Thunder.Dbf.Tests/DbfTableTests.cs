@@ -155,7 +155,7 @@ public class DbfTableTests
         using var table = DbfTable.Open(new MemoryStream(bytes, writable: false));
 
         Assert.False(table.CanWrite);
-        Assert.Throws<InvalidOperationException>(() => table.Append("Smith", null, null, null, null));
+        Assert.Equal(DbfErrorCode.ReadOnlyConnection, Assert.Throws<DbfException>(() => table.Append("Smith", null, null, null, null)).Code);
     }
 
     [Fact]

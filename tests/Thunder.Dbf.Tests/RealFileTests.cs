@@ -36,12 +36,12 @@ public class RealFileTests
 
         if (Unsupported.Contains(fixture))
         {
-            Assert.Throws<NotSupportedException>(() => DbfTable.Open(path));
+            Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => DbfTable.Open(path)).Code);
             return;
         }
 
         if (MissingMemo.Contains(fixture))
-            Assert.Throws<FileNotFoundException>(() => DbfTable.Open(path));
+            Assert.Equal(DbfErrorCode.MemoFileMissing, Assert.Throws<DbfException>(() => DbfTable.Open(path)).Code);
 
         using var table = DbfTable.Open(path, ignoreMissingMemo: MissingMemo.Contains(fixture));
         var fileLength = new FileInfo(path).Length;
