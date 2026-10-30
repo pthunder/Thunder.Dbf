@@ -26,7 +26,7 @@ public static class DbfEncoding
         [0x24] = 860, [0x25] = 850, [0x26] = 866, [0x37] = 850,
         [0x40] = 852, [0x4D] = 936, [0x4E] = 949, [0x4F] = 950,
         [0x50] = 874, [0x57] = 1252, [0x58] = 1252, [0x59] = 1252,
-        [0x64] = 852, [0x65] = 866, [0x66] = 865, [0x67] = 861,
+        [0x64] = 852, [0x69] = MazoviaEncoding.MazoviaCodePage, [0x65] = 866, [0x66] = 865, [0x67] = 861,
         [0x6A] = 737, [0x6B] = 857, [0x78] = 950, [0x79] = 949,
         [0x7A] = 936, [0x7B] = 932, [0x7C] = 874, [0x7D] = 1255,
         [0x7E] = 1256, [0x87] = 852, [0x88] = 857, [0x96] = 10007,
@@ -43,9 +43,11 @@ public static class DbfEncoding
     /// <summary>The encoding for a language driver byte, falling back to <see cref="DefaultCodePage"/>.</summary>
     public static Encoding For(byte languageDriver) => GetEncoding(CodePageFor(languageDriver) ?? DefaultCodePage);
 
-    public static Encoding GetEncoding(int codePage) => Encoding.GetEncoding(codePage);
+    public static Encoding GetEncoding(int codePage) =>
+        codePage == MazoviaEncoding.MazoviaCodePage ? MazoviaEncoding.Instance : Encoding.GetEncoding(codePage);
 
-    public static Encoding GetEncodingByName(string name) => Encoding.GetEncoding(name);
+    public static Encoding GetEncodingByName(string name) =>
+        name.Equals("mazovia", StringComparison.OrdinalIgnoreCase) ? MazoviaEncoding.Instance : Encoding.GetEncoding(name);
 
     /// <summary>
     /// Reads a shapefile-style .cpg sidecar ("UTF-8", "1252", "ANSI 1251", ...). Returns null when the file

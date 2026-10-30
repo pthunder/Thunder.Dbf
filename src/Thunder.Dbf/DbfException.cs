@@ -16,6 +16,9 @@ public enum DbfErrorCode
     InvalidConnectionString,
     TableNotFound,
 
+    /// <summary>Creating a table would overwrite or adopt files that already exist.</summary>
+    TableAlreadyExists,
+
     /// <summary>The file exists but isn't a DBF table Thunder.Dbf can read.</summary>
     NotADbfFile,
     UnsupportedFormat,
@@ -76,7 +79,7 @@ public sealed class DbfException : IOException
     {
         DbfErrorCode.TableNotFound or DbfErrorCode.FolderNotFound => 404,
         DbfErrorCode.AccessDenied or DbfErrorCode.PathEscapesFolder or DbfErrorCode.EncryptedTable => 403,
-        DbfErrorCode.FileInUse or DbfErrorCode.IndexWouldGoStale or DbfErrorCode.IncompleteTransaction
+        DbfErrorCode.FileInUse or DbfErrorCode.TableAlreadyExists or DbfErrorCode.IndexWouldGoStale or DbfErrorCode.IncompleteTransaction
             or DbfErrorCode.ReadOnlyConnection or DbfErrorCode.ReadOnlyLocation => 409,
         DbfErrorCode.InvalidConnectionString => 400,
         _ => 500,

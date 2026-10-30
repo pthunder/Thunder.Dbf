@@ -133,8 +133,19 @@ public sealed class DbfTable : IDisposable
     {
         DbfHeader.Create(fields, languageDriver); // validate before touching the disk
         var memoPath = fields.Any(f => char.ToUpperInvariant(f.Type) == 'M') ? Path.ChangeExtension(path, ".dbt") : null;
-        if (memoPath is not null && File.Exists(memoPath))
-            throw new IOException($"The memo file '{memoPath}' already exists.");
+
+        // Opening finds companions case-insensitively, so creating must refuse them the same way:
+        // a stray PEOPLE.DBT or PEOPLE.MDX would otherwise be picked up as this table's.
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        var baseName = Path.GetFileNameWithoutExtension(path);
+        var existing = Directory.Exists(directory)
+            ? Directory.EnumerateFiles(directory).FirstOrDefault(p =>
+                Path.GetFileNameWithoutExtension(p).Equals(baseName, StringComparison.OrdinalIgnoreCase)
+                && Path.GetExtension(p).ToLowerInvariant() is ".dbf" or ".dbt" or ".fpt" or ".mdx" or ".cdx")
+            : null;
+        if (existing is not null)
+            throw new DbfException(DbfErrorCode.TableAlreadyExists, $"'{Path.GetFileName(existing)}' already exists next to the new table.",
+                "Pick another table name, or move the old files away first; Thunder.Dbf won't adopt or overwrite another table's files.", existing);
 
         var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
         FileStream? memoStream = null;
@@ -294,7 +305,7 @@ public sealed class DbfTable : IDisposable
             values[i] = DbfValueCodec.IsMemoField(field) ? ReadMemo(field, value as int?) : value;
         }
 
-        return new DbfRecord(Header, index, record[0] == DeletedFlag, values);
+        return new DbfRecord(Header, index, record[0] == DeletedFlag, values, Encoding);
     }
 
     private object? ReadMemo(DbfField field, int? block)
@@ -327,11 +338,18 @@ public sealed class DbfTable : IDisposable
                 DbfValueCodec.Encode(field, values[i], _buffer.AsSpan(field.Offset, field.Length), Encoding);
         }
 
+        // Validate every memo before writing any, so a bad second memo can't leave the first one orphaned.
+        var pending = new List<(int Index, PendingMemo Memo)>();
         for (var i = 0; i < Fields.Count; i++)
         {
+            if ((changed is null || changed[i]) && DbfValueCodec.IsMemoField(Fields[i]))
+                pending.Add((i, PrepareMemo(Fields[i], values[i])));
+        }
+        foreach (var (i, memo) in pending)
+        {
             var field = Fields[i];
-            if ((changed is null || changed[i]) && DbfValueCodec.IsMemoField(field))
-                DbfValueCodec.Encode(field, StoreMemo(field, values[i]), _buffer.AsSpan(field.Offset, field.Length), Encoding);
+            object? pointer = memo.Data is null ? memo.Pointer : _memo!.Write(memo.Data, memo.BlockType);
+            DbfValueCodec.Encode(field, pointer, _buffer.AsSpan(field.Offset, field.Length), Encoding);
         }
 
         if (Header.NullFlagsFieldIndex is not { } n)
@@ -348,11 +366,13 @@ public sealed class DbfTable : IDisposable
         }
     }
 
-    // Turns a memo value into a block number by writing it to the memo file.
-    private object? StoreMemo(DbfField field, object? value)
+    private readonly record struct PendingMemo(int? Pointer, byte[]? Data, int BlockType);
+
+    // Works out what a memo value will store, checking everything that could fail before any write.
+    private PendingMemo PrepareMemo(DbfField field, object? value)
     {
         if (value is int or long)
-            return DbfValueCodec.CheckedMemoBlock(field, value); // a raw pointer, for callers managing the memo file themselves
+            return new(DbfValueCodec.CheckedMemoBlock(field, value), null, 0); // a raw pointer, for callers managing the memo file themselves
 
         var data = value switch
         {
@@ -362,10 +382,11 @@ public sealed class DbfTable : IDisposable
             _ => throw new ArgumentException($"Memo field {field.Name} needs a string or byte[], not {value.GetType().Name}."),
         };
         if (data is null || data.Length == 0)
-            return null;
+            return new(null, null, 0);
 
         if (_memo is null)
-            throw new InvalidOperationException($"Can't write memo field {field.Name}: the table's memo file isn't open.");
+            throw new DbfException(DbfErrorCode.MemoFileMissing, $"Can't write memo field {field.Name}: the table's memo file isn't open.",
+                "Open the table with its .dbt/.fpt next to it (not with ignoreMissingMemo) to write memos.", _path);
 
         var blockType = field.Type switch
         {
@@ -373,7 +394,8 @@ public sealed class DbfTable : IDisposable
             'P' => DbfMemoFile.PictureBlock,
             _ => DbfMemoFile.TextBlock,
         };
-        return _memo.Write(data, blockType);
+        _memo.Validate(data, blockType);
+        return new(null, data, blockType);
     }
 
     // Fills null autoincrement values from the header's counters and returns the counters to save.
@@ -390,13 +412,18 @@ public sealed class DbfTable : IDisposable
             var step = Math.Max(1, field.AutoIncrementStep);
             if (values[i] is null && changed is null)
             {
+                if ((long)next + step > int.MaxValue)
+                    throw new InvalidOperationException($"Autoincrement field {field.Name} has run out of numbers (next is {next}, step {step}).");
                 values[i] = next;
                 counters.Add((i, next + step));
             }
             else if (values[i] is not null && Convert.ToInt64(values[i]) >= next)
             {
                 // An explicit value at or past the counter moves it, so VFP won't hand the same number out later.
-                counters.Add((i, checked((int)Convert.ToInt64(values[i]) + step)));
+                var explicitValue = Convert.ToInt64(values[i]);
+                if (explicitValue + step > int.MaxValue)
+                    throw new InvalidOperationException($"Autoincrement field {field.Name} can't advance past {explicitValue}; the counter would overflow.");
+                counters.Add((i, (int)(explicitValue + step)));
             }
         }
         return counters;

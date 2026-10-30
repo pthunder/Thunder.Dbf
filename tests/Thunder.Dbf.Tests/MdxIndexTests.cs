@@ -43,10 +43,21 @@ public class MdxIndexTests
                 .ToList();
 
             var actual = tag.Entries().ToList();
+            AssertSorted(tag, actual);
+
+            if (tag.IsUnique)
+            {
+                // A unique tag keeps one record per key, so compare key sets, and check each kept
+                // record really has the key it's filed under.
+                var byRecord = expected.ToDictionary(e => e.Record, e => e.Key);
+                Assert.Equal(actual.Count, actual.Select(e => e.Key).Distinct().Count());
+                Assert.Equal(expected.Select(e => e.Key).Distinct().OrderBy(k => k), actual.Select(e => e.Key).OrderBy(k => k));
+                Assert.All(actual, e => Assert.Equal(byRecord[e.RecordNumber], e.Key));
+                continue;
+            }
 
             Assert.Equal(expected.Select(e => e.Record), actual.Select(e => e.RecordNumber).Order());
             Assert.Equal(expected, actual.Select(e => (Record: e.RecordNumber, Key: e.Key)).OrderBy(e => e.Record).ToList());
-            AssertSorted(tag, actual);
         }
     }
 

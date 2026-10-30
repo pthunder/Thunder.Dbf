@@ -147,12 +147,18 @@ internal abstract class DbfMemoFile : IDisposable
         return ReadAt(Stream.Length - offset);
     }
 
-    /// <summary>Appends a memo in new blocks at the end of the file and returns its first block number.</summary>
-    public int Write(ReadOnlySpan<byte> data, int blockType)
+    /// <summary>Throws if <paramref name="data"/> can't be stored, without touching the file.</summary>
+    public void Validate(ReadOnlySpan<byte> data, int blockType)
     {
         if (data.Length > MaxMemoBytes)
             throw new ArgumentException($"Memos are limited to {MaxMemoBytes:N0} bytes (DbfMemoFile.MaxMemoBytes).");
+        _ = Frame(data, blockType);
+    }
 
+    /// <summary>Appends a memo in new blocks at the end of the file and returns its first block number.</summary>
+    public int Write(ReadOnlySpan<byte> data, int blockType)
+    {
+        Validate(data, blockType);
         var framed = Frame(data, blockType);
         // Allocate from the physical end of the file; never trust a stored pointer to say where that is.
         var block = checked((int)Math.Max(FirstDataBlock, (Stream.Length + BlockSize - 1) / BlockSize));

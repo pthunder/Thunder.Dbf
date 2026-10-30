@@ -84,11 +84,14 @@ internal static class DbfValueCodec
                 var text = Ascii(raw);
                 if (text.Length == 0 || text.All(c => c == '*'))
                     return null;
-                if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
+                // Scientific values outside decimal's range (FoxPro allows them) come back as double.
+                // decimal.TryParse quietly turns 1E-100 into 0, so check the double too.
+                var parsedDecimal = decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
+                var parsedDouble = double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble);
+                if (parsedDecimal && !(number == 0 && parsedDouble && asDouble != 0))
                     return number;
-                // Scientific values beyond decimal's range (FoxPro allows them) come back as double.
-                if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var large))
-                    return large;
+                if (parsedDouble)
+                    return asDouble;
                 throw new FormatException($"Field {field.Name} holds '{text}', which isn't a number.");
             }
 
@@ -257,7 +260,7 @@ internal static class DbfValueCodec
             var d = Convert.ToDouble(value, CultureInfo.InvariantCulture);
             if (!double.IsFinite(d))
                 throw new ArgumentException($"Field {field.Name} can't store {d}.");
-            if (Math.Abs(d) >= 7.9e28)
+            if (Math.Abs(d) >= 7.9e28 || (d != 0 && Math.Abs(d) < 1e-28))
             {
                 // Too big for decimal: scientific notation, as FoxPro writes it, at the most precision that fits.
                 for (var digits = field.Length; digits >= 0; digits--)

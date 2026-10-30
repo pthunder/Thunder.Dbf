@@ -250,7 +250,8 @@ public class CodexReviewTests
             var path = Path.Combine(dir.FullName, "people.dbf");
             File.WriteAllText(Path.Combine(dir.FullName, "people.dbt"), "someone else's memos");
 
-            Assert.Throws<IOException>(() => DbfTable.Create(path, [DbfFieldDefinition.Memo("NOTES")]));
+            var error = Assert.Throws<DbfException>(() => DbfTable.Create(path, [DbfFieldDefinition.Memo("NOTES")]));
+            Assert.Equal(DbfErrorCode.TableAlreadyExists, error.Code);
             Assert.False(File.Exists(path));
         }
         finally

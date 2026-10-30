@@ -6,15 +6,19 @@ public sealed class DbfRecord
     private readonly DbfHeader _header;
     private readonly object?[] _values;
 
-    internal DbfRecord(DbfHeader header, int index, bool isDeleted, object?[] values)
+    internal DbfRecord(DbfHeader header, int index, bool isDeleted, object?[] values, System.Text.Encoding? encoding = null)
     {
         _header = header;
+        Encoding = encoding ?? DbfEncoding.For(header.LanguageDriver);
         Index = index;
         IsDeleted = isDeleted;
         _values = values;
     }
 
     internal DbfHeader Header => _header;
+
+    /// <summary>The table's text encoding, so expressions can measure character fields in bytes like dBASE does.</summary>
+    internal System.Text.Encoding Encoding { get; }
 
     /// <summary>Zero-based position in the table.</summary>
     public int Index { get; }
