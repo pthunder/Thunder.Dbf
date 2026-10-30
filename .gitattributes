@@ -1,0 +1,3 @@
+# Fixture files are byte-exact test data; never convert line endings.
+tests/fixtures/** -text -diff
+tests/fixtures/**/*.md text diff
