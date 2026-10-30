@@ -8,4 +8,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Thunder.Dbf.Tests/Thunder.Dbf.Tests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Thunder.Dbf.Cli/Thunder.Dbf.Cli.csproj" />
+  </Folder>
 </Solution>

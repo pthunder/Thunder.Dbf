@@ -17,6 +17,42 @@ A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, 
 
 **The goal:** let people build a safe web app on top of a legacy dBASE or FoxPro system, while the legacy app keeps running on the same files.
 
+## Quick start
+
+```csharp
+// Point it at the legacy app's data folder. Read-only unless you say otherwise.
+using var db = DbfDatabase.Open(@"\\server\goldmine\data");
+
+Console.Write(db.Check());              // the "Test connection" handshake: headers only, milliseconds
+
+foreach (var row in db["CONTACT1"].ReadAll())
+    Console.WriteLine(row["COMPANY"]);
+```
+
+Or a connection string: `Data Source=C:\Data;Read Only=false;Code Page=1252`.
+
+Every failure is a `DbfException` with a code, the file involved, a plain-English fix and an HTTP status. That covers access denied, file in use, read-only shares, names or links escaping the folder, encrypted tables, unfinished transactions, missing or damaged memos and indexes, and stale-index writes.
+
+**From the command line** (`dotnet run --project tools/Thunder.Dbf.Cli --`, or install it as the `thunder-dbf` tool):
+
+```bash
+thunder-dbf check  \\server\goldmine\data      # what's readable, writable, locked or damaged
+thunder-dbf import contacts.csv                 # CSV -> DBF, types and widths worked out for you
+thunder-dbf import contacts.csv --plan          # just show the shape it would create
+thunder-dbf import contacts.csv --shape-only    # the empty table, no rows
+thunder-dbf info   CONTACT1.DBF                 # fields, memo file, index tags
+thunder-dbf export CONTACT1.DBF contacts.csv    # back out to CSV
+```
+
+**Big files are fine.** Everything streams, so memory stays flat:
+
+| Test | Time | Managed memory |
+|---|---|---|
+| Write 1M rows (88 MB table) | 2.2 s | 3 MB |
+| Scan 1M rows | 0.7 s | 7 MB |
+| 1 GB memo file: write, read the last memo, scan all | 2.6 s, instant, 0.9 s | under 10 MB |
+| Import a 77 MB, 1.4M-row CSV | 4.7 s | 9 MB |
+
 ## Status
 
 Early. Today it can create DBF tables and read, append, update, delete and recall records. It handles character, numeric, float, date, logical and memo-pointer fields, plus Visual FoxPro's integer, currency, double and datetime fields. Text is decoded through the table's code page, or a shapefile-style `.cpg` file next to the table.

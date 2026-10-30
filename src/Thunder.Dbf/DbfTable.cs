@@ -37,6 +37,7 @@ public sealed class DbfTable : IDisposable
     private readonly bool _allowUnmaintainedIndexes;
     private readonly byte[] _buffer;
     private string? _path;
+    private readonly HashSet<int> _dirtyCounters = [];
 
     private DbfTable(Stream stream, DbfHeader header, Encoding encoding, bool leaveOpen, DbfMemoFile? memo,
         bool ignoreMissingMemo, bool allowUnmaintainedIndexes)
@@ -210,6 +211,42 @@ public sealed class DbfTable : IDisposable
     public int Append(params object?[] values)
     {
         EnsureWritable();
+        var index = AppendOne(values);
+        Commit();
+        return index;
+    }
+
+    /// <summary>
+    /// Adds many records quickly: rows are written in sequence and the header is committed every
+    /// <paramref name="commitEvery"/> rows and at the end, instead of after each one. If the process
+    /// dies midway, the table holds every row up to the last commit. Returns the number of rows added.
+    /// </summary>
+    public int AppendRange(IEnumerable<object?[]> rows, int commitEvery = 10_000)
+    {
+        EnsureWritable();
+        ArgumentOutOfRangeException.ThrowIfLessThan(commitEvery, 1);
+
+        var added = 0;
+        try
+        {
+            foreach (var values in rows)
+            {
+                AppendOne(values);
+                if (++added % commitEvery == 0)
+                    Commit();
+            }
+        }
+        finally
+        {
+            if (added % commitEvery != 0)
+                Commit();
+        }
+        return added;
+    }
+
+    // Writes one record after the last, without committing the header.
+    private int AppendOne(object?[] values)
+    {
         CheckValueCount(values);
         var index = RecordCount;
 
@@ -221,12 +258,25 @@ public sealed class DbfTable : IDisposable
 
         Seek(index, forAppend: true);
         _stream.Write(_buffer);
-        _stream.WriteByte(EndOfFile);
 
         Header.RecordCount++;
-        CommitCounters(counters);
-        CommitHeader();
+        foreach (var (field, next) in counters)
+        {
+            Header.SetNextAutoIncrement(field, next);
+            _dirtyCounters.Add(field);
+        }
         return index;
+    }
+
+    // Makes everything appended so far durable: end-of-file marker, counters, then the header.
+    private void Commit()
+    {
+        Seek(RecordCount, forAppend: true);
+        _stream.WriteByte(EndOfFile);
+        foreach (var field in _dirtyCounters)
+            Header.WriteAutoIncrement(_stream, field);
+        _dirtyCounters.Clear();
+        CommitHeader();
     }
 
     /// <summary>
