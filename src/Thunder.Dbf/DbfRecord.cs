@@ -14,6 +14,8 @@ public sealed class DbfRecord
         _values = values;
     }
 
+    internal DbfHeader Header => _header;
+
     /// <summary>Zero-based position in the table.</summary>
     public int Index { get; }
 

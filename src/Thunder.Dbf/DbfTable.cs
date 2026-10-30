@@ -36,6 +36,7 @@ public sealed class DbfTable : IDisposable
     private readonly DbfMemoFile? _memo;
     private readonly bool _allowUnmaintainedIndexes;
     private readonly byte[] _buffer;
+    private string? _path;
 
     private DbfTable(Stream stream, DbfHeader header, Encoding encoding, bool leaveOpen, DbfMemoFile? memo,
         bool ignoreMissingMemo, bool allowUnmaintainedIndexes)
@@ -83,8 +84,10 @@ public sealed class DbfTable : IDisposable
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
                 memoStream = new FileStream(memoPath, FileMode.Open, access, share);
 
-            return Open(stream, encoding ?? DbfEncoding.FromCpgFile(Path.ChangeExtension(path, ".cpg")), leaveOpen: false,
+            var table = Open(stream, encoding ?? DbfEncoding.FromCpgFile(Path.ChangeExtension(path, ".cpg")), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
+            table._path = path;
+            return table;
         }
         catch
         {
@@ -223,6 +226,28 @@ public sealed class DbfTable : IDisposable
         _stream.Write(_buffer);
         CommitCounters(counters);
         CommitHeader();
+    }
+
+    /// <summary>
+    /// Opens the production .mdx that sits next to the table, or returns null when the table has
+    /// none (or was opened from a stream; use <see cref="MdxIndex.Open(Stream, Encoding?, bool)"/> then).
+    /// </summary>
+    public MdxIndex? OpenProductionIndex()
+    {
+        if (!Header.HasProductionMdx || _path is null || MdxIndex.FindFor(_path) is not { } indexPath)
+            return null;
+        return MdxIndex.Open(indexPath, Encoding);
+    }
+
+    /// <summary>Reads records in the tag's key order, skipping any the tag's FOR filter left out.</summary>
+    public IEnumerable<DbfRecord> ReadInOrder(MdxTag tag) => tag.Entries().Select(e => Read(e.RecordNumber - 1));
+
+    /// <summary>The first record whose key equals <paramref name="key"/> (prefix match for character keys), like dBASE's SEEK.</summary>
+    public DbfRecord? Seek(MdxTag tag, object key)
+    {
+        foreach (var entry in tag.SeekExact(key))
+            return Read(entry.RecordNumber - 1);
+        return null;
     }
 
     /// <summary>Marks a record deleted, like dBASE's DELETE. The row stays in the file until a pack.</summary>

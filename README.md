@@ -19,7 +19,21 @@ A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, 
 
 Early. Today it can create DBF tables and read, append, update, delete and recall records. It handles character, numeric, float, date, logical and memo-pointer fields, plus Visual FoxPro's integer, currency, double and datetime fields. Text is decoded through the table's code page, or a shapefile-style `.cpg` file next to the table.
 
-Memo fields read and write their text through dBASE III `.dbt`, dBASE IV `.dbt` and FoxPro `.fpt` files. Updates rewrite only the fields that changed, so formatting left by other apps survives. Indexes and locking come next.
+Memo fields read and write their text through dBASE III `.dbt`, dBASE IV `.dbt` and FoxPro `.fpt` files. Updates rewrite only the fields that changed, so formatting left by other apps survives.
+
+dBASE IV `.mdx` indexes can be read: every tag, records in key order, and `SEEK`-style lookups by numeric, character or date key. A built-in dBASE expression evaluator handles key and `FOR` expressions such as `UPPER(LTRIM(TRIM(_SKZ)))` and `STR(PUNITTYPE,11,0)+STR(PUNITID,11,0)`. Every tag in 20 real SIMATIC Manager indexes matches keys rebuilt from its table. Tables with a production `.mdx` or `.cdx` refuse writes until index maintenance lands, unless you opt out with `allowUnmaintainedIndexes`.
+
+```csharp
+using var table = DbfTable.Open("CHANGELOG.DBF");
+using var index = table.OpenProductionIndex()!;
+
+foreach (var record in table.ReadInOrder(index["ID_TAG"]))
+    Console.WriteLine(record["ID"]);
+
+var match = table.Seek(index["USER_TAG"], "Calvin");
+```
+
+The format notes are in [docs/formats/mdx.md](docs/formats/mdx.md). MDX writes and locking come next.
 
 It's tested against 28 real tables from dBASE III, dBASE IV, FoxPro 2, Visual FoxPro and the US Census Bureau (see [tests/fixtures/SOURCES.md](tests/fixtures/SOURCES.md)).
 
@@ -39,9 +53,9 @@ foreach (var record in table.ReadAll())
 
 ## Roadmap
 
-1. DBF records: read, write, append, delete flags, code pages
-2. DBT memo files (dBASE III and IV)
-3. MDX indexes (dBASE IV): read, seek, ordered scans
+1. ~~DBF records: read, write, append, delete flags, code pages~~ done
+2. ~~DBT memo files (dBASE III and IV)~~ done, plus FoxPro `.fpt`
+3. ~~MDX indexes (dBASE IV): read, seek, ordered scans~~ done
 4. MDX writes that keep every tag in sync
 5. dBASE-compatible record and file locking
 6. FoxPro (`.cdx` / `.fpt`) and Clipper (`.ntx`) formats, including Visual FoxPro field flags (binary, nullable, autoincrement) and its two-digit-year headers
