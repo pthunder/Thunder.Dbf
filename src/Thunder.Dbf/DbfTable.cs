@@ -23,7 +23,7 @@ namespace Thunder.Dbf;
 
 /// <summary>
 /// An open DBF table and its memo file, if it has one. Memo fields read as <see cref="string"/>
-/// (or <see cref="byte"/>[] for picture/OLE/binary memos). Not thread-safe; record locking comes later.
+/// (or <see cref="byte"/>[] for binary, picture and OLE memos). Not thread-safe; record locking comes later.
 /// </summary>
 public sealed class DbfTable : IDisposable
 {
@@ -34,15 +34,16 @@ public sealed class DbfTable : IDisposable
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
     private readonly DbfMemoFile? _memo;
-    private readonly bool _ignoreMissingMemo;
+    private readonly bool _allowUnmaintainedIndexes;
     private readonly byte[] _buffer;
 
-    private DbfTable(Stream stream, DbfHeader header, Encoding encoding, bool leaveOpen, DbfMemoFile? memo, bool ignoreMissingMemo)
+    private DbfTable(Stream stream, DbfHeader header, Encoding encoding, bool leaveOpen, DbfMemoFile? memo,
+        bool ignoreMissingMemo, bool allowUnmaintainedIndexes)
     {
         _stream = stream;
         _leaveOpen = leaveOpen;
         _memo = memo;
-        _ignoreMissingMemo = ignoreMissingMemo;
+        _allowUnmaintainedIndexes = allowUnmaintainedIndexes;
         Header = header;
         Encoding = encoding;
         _buffer = new byte[header.RecordLength];
@@ -62,10 +63,14 @@ public sealed class DbfTable : IDisposable
 
     /// <summary>
     /// Opens a .dbf file and its .dbt/.fpt memo file. Read-only opens let other programs keep writing;
-    /// writable opens only allow readers. With <paramref name="ignoreMissingMemo"/>, a missing memo file
-    /// makes memo fields read as null instead of failing.
+    /// writable opens only allow readers.
     /// </summary>
-    public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false)
+    /// <param name="ignoreMissingMemo">Read memo fields as null when the memo file is missing, instead of failing.
+    /// Updates then leave those memo pointers untouched.</param>
+    /// <param name="allowUnmaintainedIndexes">Allow writes to a table with a production .mdx or structural .cdx.
+    /// Thunder.Dbf doesn't update those yet, so they go stale until something rebuilds them.</param>
+    public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
+        bool allowUnmaintainedIndexes = false)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = writable ? FileShare.Read : FileShare.ReadWrite;
@@ -78,7 +83,8 @@ public sealed class DbfTable : IDisposable
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
                 memoStream = new FileStream(memoPath, FileMode.Open, access, share);
 
-            return Open(stream, encoding ?? DbfEncoding.FromCpgFile(Path.ChangeExtension(path, ".cpg")), leaveOpen: false, memoStream, ignoreMissingMemo);
+            return Open(stream, encoding ?? DbfEncoding.FromCpgFile(Path.ChangeExtension(path, ".cpg")), leaveOpen: false,
+                memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
         }
         catch
         {
@@ -92,7 +98,8 @@ public sealed class DbfTable : IDisposable
     /// Opens a table from a seekable stream, with its memo file in <paramref name="memoStream"/> if it has memo fields.
     /// Text uses <paramref name="encoding"/>, else the header's language driver.
     /// </summary>
-    public static DbfTable Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false, Stream? memoStream = null, bool ignoreMissingMemo = false)
+    public static DbfTable Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false, Stream? memoStream = null,
+        bool ignoreMissingMemo = false, bool allowUnmaintainedIndexes = false)
     {
         if (!stream.CanSeek)
             throw new ArgumentException("DBF tables need a seekable stream.", nameof(stream));
@@ -100,18 +107,24 @@ public sealed class DbfTable : IDisposable
         stream.Position = 0;
         var header = DbfHeader.Read(stream, encoding);
         var memo = memoStream is null ? null : DbfMemoFile.Open(memoStream, header, leaveOpen);
-        return new DbfTable(stream, header, encoding ?? DbfEncoding.For(header.LanguageDriver), leaveOpen, memo, ignoreMissingMemo);
+        return new DbfTable(stream, header, encoding ?? DbfEncoding.For(header.LanguageDriver), leaveOpen, memo,
+            ignoreMissingMemo, allowUnmaintainedIndexes);
     }
 
     /// <summary>Creates a new, empty .dbf file, plus a dBASE IV .dbt when there are memo fields. Fails if either exists.</summary>
     public static DbfTable Create(string path, IReadOnlyList<DbfFieldDefinition> fields, byte languageDriver = 0x57)
     {
+        DbfHeader.Create(fields, languageDriver); // validate before touching the disk
+        var memoPath = fields.Any(f => char.ToUpperInvariant(f.Type) == 'M') ? Path.ChangeExtension(path, ".dbt") : null;
+        if (memoPath is not null && File.Exists(memoPath))
+            throw new IOException($"The memo file '{memoPath}' already exists.");
+
         var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
         FileStream? memoStream = null;
         try
         {
-            if (fields.Any(f => char.ToUpperInvariant(f.Type) == 'M'))
-                memoStream = new FileStream(Path.ChangeExtension(path, ".dbt"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+            if (memoPath is not null)
+                memoStream = new FileStream(memoPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
 
             return Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
         }
@@ -119,6 +132,9 @@ public sealed class DbfTable : IDisposable
         {
             memoStream?.Dispose();
             stream.Dispose();
+            File.Delete(path);
+            if (memoStream is not null)
+                File.Delete(memoPath!);
             throw;
         }
     }
@@ -141,24 +157,15 @@ public sealed class DbfTable : IDisposable
         stream.Flush();
 
         var memo = header.HasMemo ? DbfMemoFile.CreateDbaseIV(memoStream!, tableName, leaveOpen) : null;
-        return new DbfTable(stream, header, DbfEncoding.For(languageDriver), leaveOpen, memo, ignoreMissingMemo: false);
+        return new DbfTable(stream, header, DbfEncoding.For(languageDriver), leaveOpen, memo,
+            ignoreMissingMemo: false, allowUnmaintainedIndexes: false);
     }
 
     public DbfRecord Read(int index)
     {
         Seek(index);
         _stream.ReadExactly(_buffer);
-        var isDeleted = _buffer[0] == DeletedFlag;
-
-        var values = new object?[Fields.Count];
-        for (var i = 0; i < values.Length; i++)
-        {
-            var field = Fields[i];
-            var value = DbfValueCodec.Decode(field, _buffer.AsSpan(field.Offset, field.Length), Encoding);
-            values[i] = DbfValueCodec.IsMemoField(field) ? ReadMemo(field, value as int?) : value;
-        }
-
-        return new DbfRecord(Header, index, isDeleted, values);
+        return Decode(index, _buffer);
     }
 
     /// <summary>Reads every record in order, deleted ones included (check <see cref="DbfRecord.IsDeleted"/>).</summary>
@@ -168,18 +175,28 @@ public sealed class DbfTable : IDisposable
             yield return Read(i);
     }
 
-    /// <summary>Adds a record with values in field order and returns its zero-based index.</summary>
+    /// <summary>
+    /// Adds a record with values in field order and returns its zero-based index. A null value in a
+    /// Visual FoxPro autoincrement field takes the table's next number.
+    /// </summary>
     public int Append(params object?[] values)
     {
         EnsureWritable();
+        CheckValueCount(values);
         var index = RecordCount;
 
-        EncodeRecord(values, LiveFlag, existingMemoBlocks: null);
+        values = (object?[])values.Clone();
+        var counters = AssignAutoIncrements(values);
+
+        _buffer[0] = LiveFlag;
+        EncodeFields(values, changed: null);
+
         Seek(index, forAppend: true);
         _stream.Write(_buffer);
         _stream.WriteByte(EndOfFile);
 
         Header.RecordCount++;
+        CommitCounters(counters);
         CommitHeader();
         return index;
     }
@@ -191,31 +208,20 @@ public sealed class DbfTable : IDisposable
     public void Update(int index, params object?[] values)
     {
         EnsureWritable();
-        Seek(index);
-        _stream.ReadExactly(_buffer);
-        var original = _buffer.ToArray();
-        var existingMemoBlocks = new int?[Fields.Count];
-        for (var i = 0; i < Fields.Count; i++)
-        {
-            var field = Fields[i];
-            if (DbfValueCodec.IsMemoField(field))
-                existingMemoBlocks[i] = DbfValueCodec.Decode(field, original.AsSpan(field.Offset, field.Length), Encoding) as int?;
-        }
+        CheckValueCount(values);
 
-        var encoded = EncodeRecord(values, original[0], existingMemoBlocks);
+        var current = Read(index); // also leaves the original record bytes in _buffer
+        var changed = new bool[Fields.Count];
         for (var i = 0; i < Fields.Count; i++)
-        {
-            var field = Fields[i];
-            var span = original.AsSpan(field.Offset, field.Length);
-            var unchanged = DbfValueCodec.IsMemoField(field)
-                ? Equals(encoded[i], existingMemoBlocks[i])
-                : SameValue(DbfValueCodec.Decode(field, span, Encoding), values[i]);
-            if (unchanged)
-                span.CopyTo(_buffer.AsSpan(field.Offset, field.Length));
-        }
+            changed[i] = !SameValue(current.Values[i], values[i]);
+
+        values = (object?[])values.Clone();
+        var counters = AssignAutoIncrements(values, changed);
+        EncodeFields(values, changed);
 
         Seek(index);
         _stream.Write(_buffer);
+        CommitCounters(counters);
         CommitHeader();
     }
 
@@ -232,20 +238,73 @@ public sealed class DbfTable : IDisposable
             _stream.Dispose();
     }
 
+    private DbfRecord Decode(int index, byte[] record)
+    {
+        var nullFlags = Header.NullFlagsFieldIndex is { } n
+            ? record.AsSpan(Fields[n].Offset, Fields[n].Length)
+            : Span<byte>.Empty;
+
+        var values = new object?[Fields.Count];
+        for (var i = 0; i < values.Length; i++)
+        {
+            var field = Fields[i];
+            if (field.NullBit is { } bit && IsBitSet(nullFlags, bit))
+                continue;
+
+            var value = DbfValueCodec.Decode(field, record.AsSpan(field.Offset, field.Length), Encoding);
+            values[i] = DbfValueCodec.IsMemoField(field) ? ReadMemo(field, value as int?) : value;
+        }
+
+        return new DbfRecord(Header, index, record[0] == DeletedFlag, values);
+    }
+
     private object? ReadMemo(DbfField field, int? block)
     {
         if (block is null || _memo is null)
             return null;
 
-        var data = _memo.Read(block.Value);
-        return field.Type == 'M' ? Encoding.GetString(data) : data;
+        var memo = _memo.Read(block.Value);
+        var isText = field.Type == 'M' && !field.IsBinary && memo.BlockType == DbfMemoFile.TextBlock;
+        return isText ? Encoding.GetString(memo.Data) : memo.Data;
     }
 
-    // Turns a memo value into a block number, writing a new memo only when the content changed.
-    private object? StoreMemo(DbfField field, object? value, int? existingBlock)
+    // Encodes the changed fields (all of them when changed is null) into _buffer. Scalar fields go
+    // first so a bad value throws before any memo is written; memos follow; null bits come last.
+    private void EncodeFields(object?[] values, bool[]? changed)
+    {
+        for (var i = 0; i < Fields.Count; i++)
+        {
+            var field = Fields[i];
+            if ((changed is null || changed[i]) && !DbfValueCodec.IsMemoField(field) && i != Header.NullFlagsFieldIndex)
+                DbfValueCodec.Encode(field, values[i], _buffer.AsSpan(field.Offset, field.Length), Encoding);
+        }
+
+        for (var i = 0; i < Fields.Count; i++)
+        {
+            var field = Fields[i];
+            if ((changed is null || changed[i]) && DbfValueCodec.IsMemoField(field))
+                DbfValueCodec.Encode(field, StoreMemo(field, values[i]), _buffer.AsSpan(field.Offset, field.Length), Encoding);
+        }
+
+        if (Header.NullFlagsFieldIndex is not { } n)
+            return;
+
+        var flagsField = Fields[n];
+        var nullFlags = _buffer.AsSpan(flagsField.Offset, flagsField.Length);
+        if (changed is null)
+            DbfValueCodec.Encode(flagsField, values[n], nullFlags, Encoding);
+        for (var i = 0; i < Fields.Count; i++)
+        {
+            if (Fields[i].NullBit is { } bit && (changed is null || changed[i]))
+                SetBit(nullFlags, bit, values[i] is null);
+        }
+    }
+
+    // Turns a memo value into a block number by writing it to the memo file.
+    private object? StoreMemo(DbfField field, object? value)
     {
         if (value is int or long)
-            return value; // a raw block pointer, for callers managing the memo file themselves
+            return DbfValueCodec.CheckedMemoBlock(field, value); // a raw pointer, for callers managing the memo file themselves
 
         var data = value switch
         {
@@ -260,10 +319,64 @@ public sealed class DbfTable : IDisposable
         if (_memo is null)
             throw new InvalidOperationException($"Can't write memo field {field.Name}: the table's memo file isn't open.");
 
-        if (existingBlock is { } block && _memo.Read(block).AsSpan().SequenceEqual(data))
-            return block;
+        var blockType = field.Type switch
+        {
+            'G' => DbfMemoFile.ObjectBlock,
+            'P' => DbfMemoFile.PictureBlock,
+            _ => DbfMemoFile.TextBlock,
+        };
+        return _memo.Write(data, blockType);
+    }
 
-        return _memo.Write(data, isText: value is string);
+    // Fills null autoincrement values from the header's counters and returns the counters to save.
+    private List<(int Field, int Next)> AssignAutoIncrements(object?[] values, bool[]? changed = null)
+    {
+        var counters = new List<(int, int)>();
+        for (var i = 0; i < Fields.Count; i++)
+        {
+            var field = Fields[i];
+            if (!field.IsAutoIncrement || (changed is not null && !changed[i]))
+                continue;
+
+            var next = Header.NextAutoIncrement(i);
+            var step = Math.Max(1, field.AutoIncrementStep);
+            if (values[i] is null && changed is null)
+            {
+                values[i] = next;
+                counters.Add((i, next + step));
+            }
+            else if (values[i] is not null && Convert.ToInt64(values[i]) >= next)
+            {
+                // An explicit value at or past the counter moves it, so VFP won't hand the same number out later.
+                counters.Add((i, checked((int)Convert.ToInt64(values[i]) + step)));
+            }
+        }
+        return counters;
+    }
+
+    private void CommitCounters(List<(int Field, int Next)> counters)
+    {
+        foreach (var (field, next) in counters)
+        {
+            Header.SetNextAutoIncrement(field, next);
+            Header.WriteAutoIncrement(_stream, field);
+        }
+    }
+
+    private static bool SameValue(object? stored, object? incoming) =>
+        stored is byte[] a && incoming is byte[] b ? a.AsSpan().SequenceEqual(b) : Equals(stored, incoming);
+
+    private static bool IsBitSet(ReadOnlySpan<byte> bits, int bit) =>
+        bit / 8 < bits.Length && (bits[bit / 8] & (1 << (bit % 8))) != 0;
+
+    private static void SetBit(Span<byte> bits, int bit, bool on)
+    {
+        if (bit / 8 >= bits.Length)
+            return;
+        if (on)
+            bits[bit / 8] |= (byte)(1 << (bit % 8));
+        else
+            bits[bit / 8] &= (byte)~(1 << (bit % 8));
     }
 
     private void SetDeletionFlag(int index, byte flag)
@@ -274,32 +387,10 @@ public sealed class DbfTable : IDisposable
         CommitHeader();
     }
 
-    private static bool SameValue(object? stored, object? incoming) =>
-        stored is byte[] a && incoming is byte[] b ? a.AsSpan().SequenceEqual(b) : Equals(stored, incoming);
-
-    // Returns the values as encoded, with memo values replaced by their block numbers.
-    private object?[] EncodeRecord(object?[] values, byte flag, int?[]? existingMemoBlocks)
+    private void CheckValueCount(object?[] values)
     {
         if (values.Length != Fields.Count)
             throw new ArgumentException($"The table has {Fields.Count} fields but {values.Length} values were given.", nameof(values));
-
-        // Memo values become block numbers first; the codec then writes those like any other field.
-        var encoded = new object?[values.Length];
-        for (var i = 0; i < values.Length; i++)
-        {
-            encoded[i] = DbfValueCodec.IsMemoField(Fields[i])
-                ? StoreMemo(Fields[i], values[i], existingMemoBlocks?[i])
-                : values[i];
-        }
-
-        _buffer[0] = flag;
-        for (var i = 0; i < encoded.Length; i++)
-        {
-            var field = Fields[i];
-            DbfValueCodec.Encode(field, encoded[i], _buffer.AsSpan(field.Offset, field.Length), Encoding);
-        }
-
-        return encoded;
     }
 
     private void Seek(int index, bool forAppend = false)
@@ -314,6 +405,10 @@ public sealed class DbfTable : IDisposable
     {
         if (!_stream.CanWrite)
             throw new InvalidOperationException("The table was opened read-only.");
+        if ((Header.HasProductionMdx || Header.HasStructuralCdx) && !_allowUnmaintainedIndexes)
+            throw new InvalidOperationException(
+                "The table has a production index (.mdx or .cdx) that Thunder.Dbf can't update yet, so writing would leave it stale. " +
+                "Open with allowUnmaintainedIndexes: true if the index will be rebuilt.");
     }
 
     private void CommitHeader()

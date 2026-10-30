@@ -34,7 +34,8 @@ namespace Thunder.Dbf;
 internal static class DbfValueCodec
 {
     private const byte Space = (byte)' ';
-    private const int UnixEpochJulianDay = 2440588;
+    private const int JulianDayOfDayNumberZero = 1721426; // Julian day of 0001-01-01
+    private const int MillisecondsPerDay = 86_400_000;
     private const decimal CurrencyScale = 10_000m;
 
     /// <summary>Fields whose bytes in the .dbf are only a pointer into the memo file.</summary>
@@ -48,7 +49,7 @@ internal static class DbfValueCodec
         if (IsBinaryMemo(field))
         {
             var block = BinaryPrimitives.ReadInt32LittleEndian(raw);
-            return block == 0 ? null : block;
+            return block <= 0 ? null : block;
         }
 
         switch (field.Type)
@@ -67,8 +68,12 @@ internal static class DbfValueCodec
                 var julianDay = BinaryPrimitives.ReadInt32LittleEndian(raw);
                 if (julianDay == 0)
                     return null;
+                var dayNumber = julianDay - JulianDayOfDayNumberZero;
                 var millis = BinaryPrimitives.ReadInt32LittleEndian(raw[4..]);
-                return DateTime.UnixEpoch.AddDays(julianDay - UnixEpochJulianDay).AddMilliseconds(millis);
+                if (dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber || millis < 0 || millis >= MillisecondsPerDay)
+                    throw new FormatException($"Field {field.Name} holds an impossible datetime (day {julianDay}, {millis} ms).");
+                // DBF datetimes carry no time zone, so they come back as Unspecified wall-clock times.
+                return DateOnly.FromDayNumber(dayNumber).ToDateTime(TimeOnly.FromTimeSpan(TimeSpan.FromMilliseconds(millis)));
             }
 
             case 'C':
@@ -81,6 +86,9 @@ internal static class DbfValueCodec
                     return null;
                 if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number))
                     return number;
+                // Scientific values beyond decimal's range (FoxPro allows them) come back as double.
+                if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var large))
+                    return large;
                 throw new FormatException($"Field {field.Name} holds '{text}', which isn't a number.");
             }
 
@@ -121,13 +129,22 @@ internal static class DbfValueCodec
     {
         if (IsBinaryMemo(field))
         {
-            BinaryPrimitives.WriteInt32LittleEndian(target, value is null ? 0 : Convert.ToInt32(value, CultureInfo.InvariantCulture));
+            BinaryPrimitives.WriteInt32LittleEndian(target, value is null ? 0 : CheckedMemoBlock(field, value));
             return;
         }
 
         if ((field.Type == 'I' && field.Length == 4) || (field.Type is 'Y' or 'B' or 'T' && field.Length == 8))
         {
             EncodeBinary(field, value, target);
+            return;
+        }
+
+        if (field.Type == '0')
+        {
+            // Visual FoxPro's _NullFlags: raw bits, zero when nothing is null. DbfTable sets the bits.
+            target.Clear();
+            if (value is byte[] flags && flags.Length == target.Length)
+                flags.CopyTo(target);
             return;
         }
 
@@ -153,9 +170,7 @@ internal static class DbfValueCodec
 
             case 'N' or 'F':
             {
-                var number = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
-                var text = number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
-                WriteRightAligned(field, text, target);
+                WriteRightAligned(field, FormatNumber(field, value), target);
                 break;
             }
 
@@ -180,10 +195,7 @@ internal static class DbfValueCodec
 
             case 'M' or 'G' or 'P' or 'B':
             {
-                var block = Convert.ToInt64(value, CultureInfo.InvariantCulture);
-                if (block < 0)
-                    throw new ArgumentOutOfRangeException(nameof(value), $"Field {field.Name} can't point at memo block {block}.");
-                WriteRightAligned(field, block.ToString(CultureInfo.InvariantCulture), target);
+                WriteRightAligned(field, CheckedMemoBlock(field, value).ToString(CultureInfo.InvariantCulture), target);
                 break;
             }
 
@@ -222,12 +234,44 @@ internal static class DbfValueCodec
                     DateTimeOffset dto => dto.DateTime,
                     _ => throw new ArgumentException($"Field {field.Name} needs a DateTime, not {value.GetType().Name}."),
                 };
-                var sinceEpoch = moment - DateTime.UnixEpoch;
-                var days = (int)Math.Floor(sinceEpoch.TotalDays);
-                BinaryPrimitives.WriteInt32LittleEndian(target, UnixEpochJulianDay + days);
-                BinaryPrimitives.WriteInt32LittleEndian(target[4..], (int)(sinceEpoch - TimeSpan.FromDays(days)).TotalMilliseconds);
+                // Whole days and milliseconds from integer ticks; sub-millisecond ticks are dropped, never rounded into tomorrow.
+                BinaryPrimitives.WriteInt32LittleEndian(target, DateOnly.FromDateTime(moment).DayNumber + JulianDayOfDayNumberZero);
+                BinaryPrimitives.WriteInt32LittleEndian(target[4..], (int)(moment.TimeOfDay.Ticks / TimeSpan.TicksPerMillisecond));
                 break;
         }
+    }
+
+    /// <summary>Memo block numbers must be 1..int.MaxValue, the range every memo reader accepts.</summary>
+    public static int CheckedMemoBlock(DbfField field, object value)
+    {
+        var block = Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        if (block is < 1 or > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(value), $"Field {field.Name} can't point at memo block {block}.");
+        return (int)block;
+    }
+
+    private static string FormatNumber(DbfField field, object value)
+    {
+        if (value is double or float)
+        {
+            var d = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+            if (!double.IsFinite(d))
+                throw new ArgumentException($"Field {field.Name} can't store {d}.");
+            if (Math.Abs(d) >= 7.9e28)
+            {
+                // Too big for decimal: scientific notation, as FoxPro writes it, at the most precision that fits.
+                for (var digits = field.Length; digits >= 0; digits--)
+                {
+                    var scientific = d.ToString("0." + new string('#', digits) + "E+0", CultureInfo.InvariantCulture);
+                    if (scientific.Length <= field.Length)
+                        return scientific;
+                }
+                throw new OverflowException($"Field {field.Name} holds {field.Length} characters; {d} doesn't fit.");
+            }
+        }
+
+        var number = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+        return number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
     }
 
     private static string Ascii(ReadOnlySpan<byte> raw) => Encoding.ASCII.GetString(raw).Trim(' ', '\0');

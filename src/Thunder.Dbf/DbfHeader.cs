@@ -24,7 +24,22 @@ namespace Thunder.Dbf;
 // Then one 32-byte descriptor per field, then 0x0D, then the records.
 
 /// <summary>A field (column) descriptor from a DBF header.</summary>
-public sealed record DbfField(string Name, char Type, int Length, int DecimalCount, int Offset);
+public sealed record DbfField(string Name, char Type, int Length, int DecimalCount, int Offset)
+{
+    /// <summary>Visual FoxPro field flags (descriptor byte 18). Always 0 for other dialects.</summary>
+    public byte Flags { get; init; }
+
+    public bool IsSystem => (Flags & 0x01) != 0;
+    public bool IsNullable => (Flags & 0x02) != 0;
+    public bool IsBinary => (Flags & 0x04) != 0;
+    public bool IsAutoIncrement => (Flags & 0x08) != 0;
+
+    /// <summary>Visual FoxPro autoincrement step (descriptor byte 23).</summary>
+    public int AutoIncrementStep { get; init; }
+
+    /// <summary>This field's bit in the Visual FoxPro _NullFlags field, when it's nullable.</summary>
+    internal int? NullBit { get; init; }
+}
 
 /// <summary>A field to create in a new table.</summary>
 public sealed record DbfFieldDefinition(string Name, char Type, int Length, int DecimalCount = 0)
@@ -45,15 +60,29 @@ public sealed class DbfHeader
     private const int FieldDescriptorSize = 32;
     private const byte HeaderTerminator = 0x0D;
     private const int MaxNameLength = 10;
+    private const int MaxFieldsForCreate = 255;     // dBASE IV limits
+    private const int MaxRecordLengthForCreate = 4000;
+    private const int AutoIncrementNextOffset = 19;
 
     // Kept verbatim so rewriting the header never disturbs bytes we don't understand yet.
     private readonly byte[] _fixed;
+    private readonly int[] _autoIncrementNext;
 
-    private DbfHeader(byte[] fixedHeader, IReadOnlyList<DbfField> fields)
+    private DbfHeader(byte[] fixedHeader, IReadOnlyList<DbfField> fields, int[]? autoIncrementNext = null)
     {
         _fixed = fixedHeader;
         Fields = fields;
+        _autoIncrementNext = autoIncrementNext ?? new int[fields.Count];
+        NullFlagsFieldIndex = fields.Select((f, i) => (f, i)).Where(x => x.f.Type == '0').Select(x => (int?)x.i).FirstOrDefault();
     }
+
+    /// <summary>Index of the Visual FoxPro _NullFlags system field, if the table has one.</summary>
+    internal int? NullFlagsFieldIndex { get; }
+
+    /// <summary>The value Visual FoxPro will assign next to an autoincrement field.</summary>
+    public int NextAutoIncrement(int fieldIndex) => _autoIncrementNext[fieldIndex];
+
+    internal void SetNextAutoIncrement(int fieldIndex, int value) => _autoIncrementNext[fieldIndex] = value;
 
     public byte Version => _fixed[0];
 
@@ -119,7 +148,10 @@ public sealed class DbfHeader
         var headerLength = BinaryPrimitives.ReadUInt16LittleEndian(fixedHeader.AsSpan(8, 2));
         var recordLength = BinaryPrimitives.ReadUInt16LittleEndian(fixedHeader.AsSpan(10, 2));
         var nameEncoding = encoding ?? DbfEncoding.For(fixedHeader[29]);
+        var isVisualFoxPro = version is 0x30 or 0x31 or 0x32;
         var fields = new List<DbfField>();
+        var autoIncrementNext = new List<int>();
+        var nullBits = 0;
         var offset = 1; // byte 0 of each record is the deletion flag
         var consumed = FixedHeaderSize;
         Span<byte> descriptor = stackalloc byte[FieldDescriptorSize];
@@ -145,11 +177,37 @@ public sealed class DbfHeader
             var nameBytes = descriptor[..11];
             var nul = nameBytes.IndexOf((byte)0);
             var name = nameEncoding.GetString(nul >= 0 ? nameBytes[..nul] : nameBytes).TrimEnd(' ');
-            var length = descriptor[16];
+            var type = (char)descriptor[11];
+            int length = descriptor[16];
+            int decimals = descriptor[17];
+            if (type == 'C' && decimals > 0)
+            {
+                // Clipper and FoxPro store character widths over 255 with the decimals byte as the high byte.
+                length |= decimals << 8;
+                decimals = 0;
+            }
             if (length == 0)
                 throw new InvalidDataException($"Field '{name}' has zero length.");
 
-            fields.Add(new DbfField(name, (char)descriptor[11], length, descriptor[17], offset));
+            // Descriptor bytes 18-23 only carry flags and autoincrement data in Visual FoxPro;
+            // dBASE IV uses them for work-area bookkeeping.
+            var flags = isVisualFoxPro ? descriptor[18] : (byte)0;
+            int? nullBit = null;
+            if (isVisualFoxPro)
+            {
+                if (type is 'V' or 'Q')
+                    nullBits++; // varchar "full length" bit comes first (Harbour dbf1.c)
+                if ((flags & 0x02) != 0)
+                    nullBit = nullBits++;
+            }
+
+            fields.Add(new DbfField(name, type, length, decimals, offset)
+            {
+                Flags = flags,
+                AutoIncrementStep = (flags & 0x08) != 0 ? descriptor[23] : 0,
+                NullBit = nullBit,
+            });
+            autoIncrementNext.Add((flags & 0x08) != 0 ? BinaryPrimitives.ReadInt32LittleEndian(descriptor[AutoIncrementNextOffset..]) : 0);
             offset += length;
         }
 
@@ -157,7 +215,16 @@ public sealed class DbfHeader
         if (offset > recordLength)
             throw new InvalidDataException($"The fields need {offset} bytes per record but the header says records are {recordLength}.");
 
-        return new DbfHeader(fixedHeader, fields.AsReadOnly());
+        return new DbfHeader(fixedHeader, fields.AsReadOnly(), [.. autoIncrementNext]);
+    }
+
+    /// <summary>Writes a field's autoincrement counter back into its descriptor.</summary>
+    internal void WriteAutoIncrement(Stream stream, int fieldIndex)
+    {
+        Span<byte> bytes = stackalloc byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(bytes, _autoIncrementNext[fieldIndex]);
+        stream.Position = FixedHeaderSize + FieldDescriptorSize * fieldIndex + AutoIncrementNextOffset;
+        stream.Write(bytes);
     }
 
     private static void ReadOrThrow(Stream stream, Span<byte> buffer, string what)
@@ -171,6 +238,8 @@ public sealed class DbfHeader
     {
         if (definitions.Count == 0)
             throw new ArgumentException("A table needs at least one field.", nameof(definitions));
+        if (definitions.Count > MaxFieldsForCreate)
+            throw new ArgumentException($"dBASE IV tables hold at most {MaxFieldsForCreate} fields, not {definitions.Count}.", nameof(definitions));
 
         var fields = new List<DbfField>(definitions.Count);
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -185,6 +254,9 @@ public sealed class DbfHeader
             fields.Add(new DbfField(def.Name, char.ToUpperInvariant(def.Type), def.Length, def.DecimalCount, offset));
             offset += def.Length;
         }
+
+        if (offset > MaxRecordLengthForCreate)
+            throw new ArgumentException($"dBASE IV records hold at most {MaxRecordLengthForCreate} bytes; these fields need {offset}.", nameof(definitions));
 
         var hasMemo = fields.Any(f => f.Type == 'M');
         var fixedHeader = new byte[FixedHeaderSize];

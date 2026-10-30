@@ -128,7 +128,7 @@ public class RealFileTests
         if (originalMemo is not null)
             memoStream.Write(originalMemo);
 
-        using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: originalMemo is null ? null : memoStream))
+        using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: originalMemo is null ? null : memoStream, allowUnmaintainedIndexes: true))
         {
             foreach (var record in table.ReadAll().ToList())
                 table.Update(record.Index, [.. record.Values]);
@@ -198,7 +198,7 @@ public class RealFileTests
         const string note = "Added by Thunder.Dbf.\r\nSecond line, still the same memo.";
 
         object?[] expected;
-        using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: memoStream))
+        using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: memoStream, allowUnmaintainedIndexes: true))
         {
             Assert.Equal(format, table.MemoFormat);
             expected = table.Read(0).Values.ToArray();

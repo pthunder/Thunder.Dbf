@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/Thunder.Dbf.Benchmarks/Thunder.Dbf.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/src/">
     <Project Path="src/Thunder.Dbf/Thunder.Dbf.csproj" />
   </Folder>
