@@ -13,7 +13,9 @@
   '
 ```
 
-A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, macOS and Linux with no native dependencies. It's aimed at upgrading, migrating and bridging legacy apps.
+A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, macOS and Linux with no native dependencies.
+
+**The goal:** let people build a safe web app on top of a legacy dBASE or FoxPro system, while the legacy app keeps running on the same files.
 
 ## Status
 
@@ -35,7 +37,7 @@ var match = table.Seek(index["USER_TAG"], "Calvin");
 
 The format notes are in [docs/formats/mdx.md](docs/formats/mdx.md). MDX writes and locking come next.
 
-It's tested against 28 real tables from dBASE III, dBASE IV, FoxPro 2, Visual FoxPro and the US Census Bureau (see [tests/fixtures/SOURCES.md](tests/fixtures/SOURCES.md)).
+It's tested against 56 real tables from dBASE III, dBASE IV, FoxPro 2, Visual FoxPro, the US Census Bureau and a Siemens STEP 7 project (see [tests/fixtures/SOURCES.md](tests/fixtures/SOURCES.md)).
 
 ```csharp
 using var table = DbfTable.Create("people.dbf",
@@ -59,7 +61,15 @@ foreach (var record in table.ReadAll())
 4. MDX writes that keep every tag in sync
 5. dBASE-compatible record and file locking
 6. FoxPro (`.cdx` / `.fpt`) and Clipper (`.ntx`) formats, including Visual FoxPro field flags (binary, nullable, autoincrement) and its two-digit-year headers
-7. Tools: a migrator to SQLite/SQL Server/Postgres, a live bridge, and an ADO.NET provider
+7. Safe JSON API service: the only process that writes the files. It provides:
+   - a read-only mode first, then writes enabled per table
+   - authentication, plus per-table and per-field permissions
+   - schema validation and a journal of every write
+   - backups before risky operations, and an OpenAPI description generated from the DBF schema
+8. Live bridge inside that service: two-way sync with SQL Server, Postgres or SQLite while the legacy app keeps running
+9. Migrator (a one-shot bridge) and an optional ADO.NET provider
+
+Steps 4 and 5 come first because the web layer depends on them: a web app is only safe on top of a legacy system if every write keeps the indexes right and respects the legacy app's locks.
 
 ## Build
 
