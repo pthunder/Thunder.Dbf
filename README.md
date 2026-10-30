@@ -1,5 +1,18 @@
 # Thunder.Dbf
 
+```
+       .-----.
+      /     /      T H U N D E R . D B F
+     /     /__     a ProjectThunder joint
+    /__      /
+      /    /       dBASE  .  FoxPro  .  Clipper
+     /   /         ...now on Windows AND Mac
+    /  /
+   / /
+  //
+  '
+```
+
 A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, macOS and Linux with no native dependencies. It's aimed at upgrading, migrating and bridging legacy apps.
 
 ## Status

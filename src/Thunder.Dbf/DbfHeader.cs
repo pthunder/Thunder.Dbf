@@ -1,7 +1,27 @@
+//        .-----.
+//       /     /      ProjectThunder :: Thunder.Dbf
+//      /     /__     -------------------------------
+//     /__      /     dBASE never died. It was just
+//       /    /       waiting for a faster disk.
+//      /   /
+//     /  /
+//    / /
+//   //
+//   '
+
 using System.Buffers.Binary;
 using System.Text;
 
 namespace Thunder.Dbf;
+
+// The first 32 bytes of every .dbf, as dBASE IV left them for us:
+//
+// +-----+----------+-----------+---------+---------+-------+-----+------+-------+
+// | ver | YY MM DD | # records | hdr len | rec len |  ...  | MDX | lang |  ...  |
+// +-----+----------+-----------+---------+---------+-------+-----+------+-------+
+//   0     1..3       4..7        8..9      10..11    12..27  28    29     30..31
+//
+// Then one 32-byte descriptor per field, then 0x0D, then the records.
 
 /// <summary>A field (column) descriptor from a DBF header.</summary>
 public sealed record DbfField(string Name, char Type, int Length, int DecimalCount, int Offset);

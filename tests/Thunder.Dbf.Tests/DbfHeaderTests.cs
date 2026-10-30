@@ -1,3 +1,9 @@
+//       .--.
+//    .-(    ).        ProjectThunder :: Thunder.Dbf tests
+//   (___.__)__)       If it passes here, it would have
+//    / / / / /        passed on a Windows 95 box in 1997.
+//   / / / / /
+
 using System.Text;
 
 namespace Thunder.Dbf.Tests;
