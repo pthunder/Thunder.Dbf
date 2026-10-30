@@ -37,6 +37,9 @@ internal static class DbfValueCodec
     private const int UnixEpochJulianDay = 2440588;
     private const decimal CurrencyScale = 10_000m;
 
+    /// <summary>Fields whose bytes in the .dbf are only a pointer into the memo file.</summary>
+    public static bool IsMemoField(DbfField field) => field.Type is 'M' or 'G' or 'P' || (field.Type == 'B' && field.Length == 10);
+
     // Visual FoxPro stores memo pointers as 4-byte integers; every other dialect uses 10 ASCII digits.
     private static bool IsBinaryMemo(DbfField field) => field.Type is 'M' or 'G' or 'P' && field.Length == 4;
 

@@ -180,6 +180,77 @@ public class DbfTableTests
         }
     }
 
+    private static readonly DbfFieldDefinition[] WithNotes =
+    [
+        DbfFieldDefinition.Character("NAME", 20),
+        DbfFieldDefinition.Memo("NOTES"),
+    ];
+
+    [Fact]
+    public void Memo_tables_round_trip_text()
+    {
+        using var stream = new MemoryStream();
+        using var memoStream = new MemoryStream();
+        var longNote = string.Join("\r\n", Enumerable.Range(1, 100).Select(i => $"Call #{i}: customer wants a faster disk."));
+
+        using (var table = DbfTable.Create(stream, WithNotes, leaveOpen: true, memoStream: memoStream, tableName: "people.dbf"))
+        {
+            Assert.Equal(0x8B, table.Header.Version);
+            Assert.Equal(DbfMemoFormat.DbaseIV, table.MemoFormat);
+            table.Append("Smith", "Likes dBASE.");
+            table.Append("Jones", longNote);
+            table.Append("Brown", null);
+        }
+
+        Assert.Equal("PEOPLE", System.Text.Encoding.ASCII.GetString(memoStream.ToArray(), 8, 6));
+
+        using var reopened = DbfTable.Open(stream, leaveOpen: true, memoStream: memoStream);
+        Assert.Equal(["Likes dBASE.", longNote, null], reopened.ReadAll().Select(r => r["NOTES"]));
+    }
+
+    [Fact]
+    public void Updating_a_memo_writes_a_new_block_only_when_the_text_changes()
+    {
+        using var stream = new MemoryStream();
+        using var memoStream = new MemoryStream();
+        using var table = DbfTable.Create(stream, WithNotes, memoStream: memoStream);
+        table.Append("Smith", "Original note.");
+        var sizeAfterAppend = memoStream.Length;
+
+        table.Update(0, "Smith", "Original note.");
+        Assert.Equal(sizeAfterAppend, memoStream.Length);
+
+        table.Update(0, "Smith", "Changed note.");
+        Assert.True(memoStream.Length > sizeAfterAppend);
+        Assert.Equal("Changed note.", table.Read(0)["NOTES"]);
+    }
+
+    [Fact]
+    public void Memo_tables_need_a_memo_stream()
+    {
+        Assert.Throws<ArgumentException>(() => DbfTable.Create(new MemoryStream(), WithNotes));
+    }
+
+    [Fact]
+    public void Memo_files_are_created_next_to_the_table_on_disk()
+    {
+        var dir = Directory.CreateTempSubdirectory("thunder-");
+        try
+        {
+            var path = Path.Combine(dir.FullName, "people.dbf");
+            using (var table = DbfTable.Create(path, WithNotes))
+                table.Append("Smith", "On disk.");
+
+            Assert.True(File.Exists(Path.Combine(dir.FullName, "people.dbt")));
+            using var reopened = DbfTable.Open(path);
+            Assert.Equal("On disk.", reopened.Read(0)["NOTES"]);
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
+    }
+
     private static byte[] CreateBytes()
     {
         using var stream = new MemoryStream();

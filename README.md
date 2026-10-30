@@ -17,7 +17,9 @@ A pure C# engine for xBase files (dBASE, FoxPro, Clipper) that runs on Windows, 
 
 ## Status
 
-Early. Today it can create DBF tables and read, append, update, delete and recall records. It handles character, numeric, float, date, logical and memo-pointer fields, plus Visual FoxPro's integer, currency, double and datetime fields. Text is decoded through the table's code page, or a shapefile-style `.cpg` file next to the table. Memo contents, indexes and locking come next.
+Early. Today it can create DBF tables and read, append, update, delete and recall records. It handles character, numeric, float, date, logical and memo-pointer fields, plus Visual FoxPro's integer, currency, double and datetime fields. Text is decoded through the table's code page, or a shapefile-style `.cpg` file next to the table.
+
+Memo fields read and write their text through dBASE III `.dbt`, dBASE IV `.dbt` and FoxPro `.fpt` files. Updates rewrite only the fields that changed, so formatting left by other apps survives. Indexes and locking come next.
 
 It's tested against 28 real tables from dBASE III, dBASE IV, FoxPro 2, Visual FoxPro and the US Census Bureau (see [tests/fixtures/SOURCES.md](tests/fixtures/SOURCES.md)).
 
