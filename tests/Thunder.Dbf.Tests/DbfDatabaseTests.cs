@@ -40,7 +40,8 @@ public sealed class DbfDatabaseTests : IDisposable
         Assert.Equal(["CHANGELOG", "client", "plain"], db.TableNames);
         Assert.Same(db["CLIENT"], db["client.dbf"]);
         Assert.StartsWith("85-200", (string)db["client"].Read(0)["CLIEN_HIST"]!);
-        Assert.NotNull(db["changelog"].OpenProductionIndex());
+        using var index = db["changelog"].OpenProductionIndex(); // the caller owns it; Windows can't delete an open file
+        Assert.NotNull(index);
     }
 
     [Fact]

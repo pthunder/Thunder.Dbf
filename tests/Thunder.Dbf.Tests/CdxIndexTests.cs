@@ -89,7 +89,8 @@ public class CdxIndexTests
         Assert.Equal(('N', 8), (index["SALARY"].KeyType, index["SALARY"].KeyLength));
         Assert.Throws<KeyNotFoundException>(() => index["NOPE"]);
 
-        Assert.Equal(Fixture("xsharp/rdd-tests/TEST10K.CDX"), CdxIndex.FindFor(Fixture("xsharp/rdd-tests/TEST10K.DBF")));
+        // FindFor builds the path with the platform's separator, so compare full paths, not strings.
+        Assert.Equal(Path.GetFullPath(Fixture("xsharp/rdd-tests/TEST10K.CDX")), Path.GetFullPath(CdxIndex.FindFor(Fixture("xsharp/rdd-tests/TEST10K.DBF"))!));
     }
 
     [Fact]
