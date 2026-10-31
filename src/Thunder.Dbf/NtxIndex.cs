@@ -12,19 +12,26 @@ using System.Text;
 
 namespace Thunder.Dbf;
 
-/// <summary>A Clipper (and Harbour, xHarbour, X#) single-index (.ntx) file. Read-only.</summary>
+/// <summary>
+/// A Clipper (and Harbour, xHarbour, X#) single-index (.ntx) file. Opened on its own it's read-only;
+/// a table opened writable keeps the .ntx files next to it up to date (see NtxIndexWriter.cs).
+/// </summary>
 public sealed partial class NtxIndex : IDisposable
 {
     internal const int PageSize = 1024;
 
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
+    private readonly string _fileName;
+    private readonly DbfTable? _table;
 
-    private NtxIndex(Stream stream, bool leaveOpen, Encoding encoding)
+    private NtxIndex(Stream stream, bool leaveOpen, Encoding encoding, string fileName, DbfTable? table)
     {
         _stream = stream;
         _leaveOpen = leaveOpen;
         Encoding = encoding;
+        _fileName = fileName;
+        _table = table;
     }
 
     /// <summary>The code page character keys and expressions decode with.</summary>
@@ -74,7 +81,7 @@ public sealed partial class NtxIndex : IDisposable
             throw new ArgumentException("NTX files need a seekable stream.", nameof(stream));
 
         var fileName = stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
-        var index = new NtxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage));
+        var index = new NtxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage), fileName, table);
         index.Tag = NtxTag.Load(index, fileName, table);
         return index;
     }
@@ -160,6 +167,9 @@ public sealed partial class NtxTag
 
     internal int MaxKeys { get; private init; }
 
+    /// <summary>Bytes per item: child pointer (4), record number (4), key, and any padding the writer added.</summary>
+    internal int ItemLength { get; private init; }
+
     internal static NtxTag Load(NtxIndex index, string fileName, DbfTable? table)
     {
         var header = index.ReadPage(0);
@@ -197,6 +207,7 @@ public sealed partial class NtxTag
             KeyLength = keyLength,
             KeyDecimals = keyDecimals,
             MaxKeys = maxKeys,
+            ItemLength = itemLength,
             IsUnique = header[UniqueOffset] != 0,
             IsDescending = header[DescendOffset] != 0,
             Expression = expression,
