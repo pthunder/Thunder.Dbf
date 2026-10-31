@@ -20,7 +20,7 @@ Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add p
 - `DbfTable`:
   - reads: `Read(index)`, `ReadAll()`, `Refresh()`
   - writes: `Append(values)`, `AppendRange(rows)`, `Update(index, values)`, `UpdateFields(index, changes)` (only the named fields, under the record lock), `Delete(index)`, `Recall(index)`
-  - indexes: `OpenProductionIndex()` (.mdx), `OpenStructuralIndex()` (.cdx), `OpenIndex(path)` (.mdx/.ndx/.ntx/.cdx/.idx), `Seek(tag, key)`, `ReadInOrder(tag)`, `RebuildIndex()`, `CreateIndexTag(name, expression, forExpression, unique, descending)` (INDEX ON, dBASE IV .mdx)
+  - indexes: `OpenProductionIndex()` (.mdx), `OpenStructuralIndex()` (.cdx), `OpenIndex(path)` (.mdx/.ndx/.ntx/.cdx/.idx), `Seek(tag, key)`, `ReadInOrder(tag)`, `RebuildIndex()`, `CreateIndexTag(name, expression, forExpression, unique, descending[, candidate])` (INDEX ON: a dBASE IV .mdx tag, or on a FoxPro table a .cdx tag laid out as Visual FoxPro 9 does, with maintainFoxProIndexes)
   - maintenance: `Pack()` (PACK: removes deleted records, renumbers, rebuilds indexes). `Pack`, `RebuildIndex`, `CreateIndexTag` and `MaintainIndex(path, rebuild: true)` need `DbfTable.Open(path, writable: true, exclusive: true)` (or `Exclusive=true`), like dBASE/FoxPro's USE ... EXCLUSIVE; otherwise `ExclusiveUseRequired`.
   - typed: `ReadAll<T>()`, `Read<T>(i)`, `AppendRecord(item)`, `UpdateRecord(i, item)`, `AsQueryable<T>()` (LINQ; seeks through .mdx tags), `query.Explain()`
   - locks: `LockRecord(i)`, `LockTable()`

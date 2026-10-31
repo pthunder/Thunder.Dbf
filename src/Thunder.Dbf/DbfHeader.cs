@@ -145,6 +145,9 @@ public sealed class DbfHeader
     /// <summary>Records that a production .mdx now accompanies the table (byte 28). Written with the fixed header.</summary>
     internal void MarkProductionMdx() => _fixed[28] = 0x01;
 
+    /// <summary>Records that a structural .cdx now accompanies the table (byte 28, bit 0), keeping Visual FoxPro's other flags there.</summary>
+    internal void MarkStructuralCdx() => _fixed[28] |= 0x01;
+
     /// <summary>Visual FoxPro: set when a structural .cdx with the same base name accompanies the table.</summary>
     public bool HasStructuralCdx => (IsVisualFoxPro || Version is 0xF5 or 0xFB || _indexFlagMeansCdx) && (_fixed[28] & 0x01) != 0;
 

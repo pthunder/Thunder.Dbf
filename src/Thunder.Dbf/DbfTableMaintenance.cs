@@ -22,15 +22,28 @@ public sealed partial class DbfTable
     /// <remarks>
     /// Needs the table opened exclusively (as dBASE needs EXCLUSIVE for INDEX ON), so the legacy app must be
     /// closed: a program that already had the .mdx open wouldn't see the new tag until it reopened it.
-    /// dBASE IV tables only; FoxPro tables use .cdx indexes.
+    /// On a FoxPro or Visual FoxPro table the tag goes in the structural .cdx (created when there's none),
+    /// like Visual FoxPro's <c>INDEX ON ... TAG</c>; that needs <c>maintainFoxProIndexes</c>, so the table
+    /// keeps it up to date afterwards.
     /// </remarks>
     public void CreateIndexTag(string name, string expression, string? forExpression = null, bool unique = false, bool descending = false)
+        => CreateIndexTag(name, expression, forExpression, unique, descending, candidate: false);
+
+    /// <summary>
+    /// <inheritdoc cref="CreateIndexTag(string, string, string?, bool, bool)"/> With <paramref name="candidate"/>, a Visual
+    /// FoxPro CANDIDATE tag: no two records may share its key, and a write that would give one a taken key is refused.
+    /// </summary>
+    public void CreateIndexTag(string name, string expression, string? forExpression, bool unique, bool descending, bool candidate)
     {
         EnsureWritable();
         var tagName = ValidTagName(name);
-        if (Header.IsFoxPro)
-            throw new DbfException(DbfErrorCode.UnsupportedFormat, "FoxPro tables keep their tags in a .cdx file, which Thunder.Dbf can't create yet.",
-                "Create the tag in FoxPro (INDEX ON ... TAG ...).", _path);
+        if (Header.IsFoxPro || Header.IsFoxProByCompanion)
+        {
+            CreateCdxTag(tagName, expression, forExpression, unique, descending, candidate);
+            return;
+        }
+        if (candidate)
+            throw new ArgumentException("CANDIDATE tags are Visual FoxPro's; a dBASE .mdx tag can be UNIQUE instead.", nameof(candidate));
         if (_path is null && _index is null)
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't get a new .mdx file.",
                 "Open the table by path, or pass its .mdx stream to DbfTable.Open.");
@@ -110,6 +123,84 @@ public sealed partial class DbfTable
         _index.Commit();
         _index.PublishTag(tag);
         _index.Commit();
+    }
+
+    // Visual FoxPro's INDEX ON ... TAG: the tag goes in the structural .cdx, created when there's none.
+    private void CreateCdxTag(string tagName, string expression, string? forExpression, bool unique, bool descending, bool candidate)
+    {
+        if (_path is null)
+            throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't get a new .cdx tag.", "Open the table by path.");
+        if (!_maintainFoxProIndexes)
+            throw new DbfException(DbfErrorCode.UnsupportedFormat, "Creating .cdx tags is part of the FoxPro index preview, and this table wasn't opened with it.",
+                "Open with maintainFoxProIndexes: true (Maintain FoxPro Indexes=true), so the table keeps the new tag up to date afterwards.", _path);
+        if (unique && candidate)
+            throw new ArgumentException("A tag is UNIQUE or CANDIDATE, not both.", nameof(candidate));
+        RequireExclusive("INDEX ON");
+        ParseIndexExpression(expression, "key expression");
+        if (forExpression is not null)
+            ParseIndexExpression(forExpression, "FOR filter");
+
+        using (Locks.Table())
+        {
+            Refresh();
+            ThrowIfPackUnfinished();
+            var index = StructuralCdx() ?? CreateStructuralCdx();
+            if (index.Tags.Any(t => t.Name.Equals(tagName, StringComparison.OrdinalIgnoreCase)))
+                throw new DbfException(DbfErrorCode.InvalidValue, $"The index already has a tag named {tagName}.",
+                    "Pick another name, or rebuild the existing tag with RebuildIndex.", _path);
+
+            int keyLength;
+            try
+            {
+                keyLength = CdxIndex.KeyLengthFor(this, expression.Trim());
+            }
+            catch (Exception ex) when (ex is FormatException or NotSupportedException or InvalidOperationException or ArgumentException)
+            {
+                throw new DbfException(DbfErrorCode.InvalidValue, $"The key expression can't be evaluated: {ex.Message}",
+                    "Use the table's fields, with UPPER(), DTOS() or STR(), joined with +.", _path, ex);
+            }
+            var bare = Fields.FirstOrDefault(f => f.Name.Equals(expression.Trim(), StringComparison.OrdinalIgnoreCase));
+            index.AddTag(this, tagName, expression.Trim(), forExpression?.Trim(), keyLength, unique, candidate, descending,
+                nullableKey: bare is { IsNullable: true });
+        }
+        // A structural .cdx moves Visual FoxPro's lock positions; the next lock takes the new ones.
+        if (_locks is { HoldsNothing: true })
+            _locks = null;
+    }
+
+    private CdxIndex? StructuralCdx()
+    {
+        if (CdxIndex.FindFor(_path!) is not { } path)
+            return null;
+        if (_attachedIndexes.TryGetValue(Path.GetFullPath(path), out var attached) && attached is CdxIndex index)
+            return index;
+        throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's .cdx isn't one Thunder.Dbf keeps up to date, so a tag can't be added to it.",
+            "Rebuild it in Visual FoxPro (REINDEX), or take it over with MaintainIndex(path, rebuild: true) first.", _path,
+            diagnostic: _structuralCdxRefusal);
+    }
+
+    // A new structural .cdx next to the table, and the header flag that tells FoxPro to open it.
+    private CdxIndex CreateStructuralCdx()
+    {
+        var path = Path.ChangeExtension(_path!, Path.GetExtension(_path!).Any(char.IsUpper) ? ".CDX" : ".cdx");
+        using (var stream = DbfException.OpenFile(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite))
+            CdxIndex.WriteEmptyCompound(stream);
+        try
+        {
+            Header.MarkStructuralCdx();
+            if (Header.Version is not (0x30 or 0x31 or 0x32 or 0xF5 or 0xFB))
+                Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos says 0x03, like dBASE
+            CommitHeader();
+            if (!TryAttachIndex(path))
+                throw new InvalidDataException("The new .cdx couldn't be opened for updating.");
+            _indexFilesAtOpen.Add(Path.GetFileName(path)); // made and kept here, so not one that "appeared"
+        }
+        catch
+        {
+            File.Delete(path);
+            throw;
+        }
+        return (CdxIndex)_attachedIndexes[Path.GetFullPath(path)];
     }
 
     // A new .mdx next to the table, and the header flag that tells dBASE to open it.

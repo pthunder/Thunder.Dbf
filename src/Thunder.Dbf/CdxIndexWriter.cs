@@ -1081,6 +1081,9 @@ public sealed partial class CdxTag : IMaintainedTag
         return ReadNode(offset, inByteOrder: true);
     }
 
+    /// <summary>Writes an empty root leaf over the tag's root page, for a tag just created.</summary>
+    internal void WriteEmptyRoot() => WriteNode(new Node { Offset = RootOffset(), Attributes = (ushort)(RootAttribute | LeafAttribute) });
+
     private void WriteNode(Node node)
     {
         var page = node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node);
