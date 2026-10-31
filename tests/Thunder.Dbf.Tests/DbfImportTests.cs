@@ -33,6 +33,20 @@ public sealed class DbfImportTests : IDisposable
     }
 
     [Fact]
+    public void Imports_can_create_Visual_FoxPro_tables_with_an_fpt()
+    {
+        var longText = new string('x', 300);
+        DbfImport.FromCsv(Csv($"Name,Notes\nSmith,{longText}\n"), Dbf(), new DbfImportOptions { Format = DbfTableFormat.VisualFoxPro });
+
+        Assert.True(File.Exists(Path.ChangeExtension(Dbf(), ".fpt")));
+        Assert.False(File.Exists(Path.ChangeExtension(Dbf(), ".dbt")));
+        using var table = DbfTable.Open(Dbf());
+        Assert.True(table.Header.IsVisualFoxPro);
+        Assert.Equal(0x03, table.Header.LanguageDriver);   // Windows-1252, as FoxPro marks it
+        Assert.Equal(longText, table.Read(0)["NOTES"]);
+    }
+
+    [Fact]
     public void Quoted_commas_quotes_and_newlines_survive()
     {
         var csv = Csv("Name,Note\r\n\"Smith, Jane\",\"She said \"\"hi\"\"\r\nthen left\"\r\nJones,plain\r\n");

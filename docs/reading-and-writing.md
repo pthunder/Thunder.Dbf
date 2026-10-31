@@ -133,7 +133,31 @@ using var table = DbfTable.Create("PEOPLE.DBF",
 ]);
 ```
 
-New tables are dBASE IV (`0x03`, or `0x8B` with memos), within dBASE IV's limits of 255 fields and 4,000-byte records. Creating refuses to overwrite or adopt existing files with the same name (`.dbf`, `.dbt`, `.mdx`, `.cpg`, in any letter case). For the quickest way to a table's shape, see [CSV import](csv.md).
+New tables are dBASE IV unless you pick another format. Choose the one the program that will open the table expects:
+
+```csharp
+using var table = DbfTable.Create("PEOPLE.DBF",
+[
+    DbfFieldDefinition.Integer("ID") with { AutoIncrement = true },
+    DbfFieldDefinition.Character("NAME", 30),
+    DbfFieldDefinition.Currency("RATE"),
+    DbfFieldDefinition.DateTime("UPDATED") with { Nullable = true },
+    DbfFieldDefinition.Memo("NOTES"),                     // creates PEOPLE.FPT too
+], DbfTableFormat.VisualFoxPro);
+
+table.Append(null, "ACME", 125.50m, DateTime.Now, "First customer", null);   // null ID: the next number
+```
+
+| `DbfTableFormat` | Version byte | Memo file | Field types | Limits |
+|---|---|---|---|---|
+| `DbaseIII` | `0x03`, `0x83` with memos | `.dbt` | C, N, D, L, M | 128 fields, 4,000-byte records |
+| `DbaseIV` (default) | `0x03`, `0x8B` with memos | `.dbt` | C, N, F, D, L, M | 255 fields, 4,000-byte records |
+| `FoxPro2` | `0x03`, `0xF5` with memos | `.fpt` | C, N, F, D, L, M | 255 fields, 4,000-byte records |
+| `VisualFoxPro` | `0x30`, `0x31` with autoincrement | `.fpt` | C, N, F, D, L, M, plus I (`Integer`), Y (`Currency`), B (`Double`), T (`DateTime`) | 255 fields, 65,500-byte records |
+
+Visual FoxPro tables can also have `Nullable` fields (kept in the hidden `_NullFlags` field, which comes last in `table.Fields` and takes a `null` when appending), `Binary` character and memo fields (no code page translation) and `AutoIncrement` integer fields with a starting number and step. The headers match what Visual FoxPro 9 writes, field flags included. The code page mark defaults to Windows-1252 (`0x57` for dBASE, `0x03` for the FoxPros); pass `languageDriver` for another.
+
+Creating refuses to overwrite or adopt existing files with the same name (`.dbf`, `.dbt`, `.fpt`, `.mdx`, `.cdx`, `.cpg`, in any letter case). For the quickest way to a table's shape, see [CSV import](csv.md).
 
 ## Formats
 

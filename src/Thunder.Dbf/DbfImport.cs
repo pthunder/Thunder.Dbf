@@ -25,8 +25,17 @@ public sealed record DbfImportOptions
     /// </summary>
     public Encoding? CsvEncoding { get; init; }
 
-    /// <summary>Language driver for the new table: 0x57 (Windows-1252) by default; 0x01 is DOS 437, 0x02 is DOS 850.</summary>
-    public byte LanguageDriver { get; init; } = 0x57;
+    /// <summary>The new table's dialect: dBASE IV by default.</summary>
+    public DbfTableFormat Format { get; init; } = DbfTableFormat.DbaseIV;
+
+    /// <summary>
+    /// Language driver for the new table: 0x01 is DOS 437, 0x02 is DOS 850. Null (the default) means
+    /// Windows-1252 as the format marks it: 0x57 for dBASE, 0x03 for the FoxPros.
+    /// </summary>
+    public byte? LanguageDriver { get; init; }
+
+    internal byte EffectiveLanguageDriver => LanguageDriver
+        ?? (Format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? (byte)0x03 : (byte)0x57);
 
     /// <summary>Create the empty table only (the "basic shape"), without loading rows.</summary>
     public bool ShapeOnly { get; init; }
@@ -89,7 +98,7 @@ public static class DbfImport
         var plan = Shape(csvPath, options);
 
         var finalPaths = plan.Fields.Any(f => f.Type == 'M')
-            ? new[] { dbfPath, Path.ChangeExtension(dbfPath, ".dbt") }
+            ? new[] { dbfPath, Path.ChangeExtension(dbfPath, options.Format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? ".fpt" : ".dbt") }
             : [dbfPath];
         RefuseExisting(dbfPath);
 
@@ -99,7 +108,7 @@ public static class DbfImport
         {
             using (var stream = new FileStream(tempPaths[0], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
             using (var memo = tempPaths.Length > 1 ? new FileStream(tempPaths[1], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None) : null)
-            using (var table = DbfTable.Create(stream, plan.Fields, options.LanguageDriver, leaveOpen: true, memo, Path.GetFileName(dbfPath)))
+            using (var table = DbfTable.Create(stream, plan.Fields, options.Format, options.EffectiveLanguageDriver, leaveOpen: true, memo, Path.GetFileName(dbfPath)))
             {
                 if (!options.ShapeOnly)
                     Load(table, csvPath, options, plan);
@@ -248,7 +257,7 @@ public static class DbfImport
     private static DbfImportPlan Shape(string csvPath, DbfImportOptions options)
     {
         var delimiter = options.Delimiter ?? DetectDelimiter(csvPath, options);
-        var strict = DbfEncoding.Strict(DbfEncoding.For(options.LanguageDriver));
+        var strict = DbfEncoding.Strict(DbfEncoding.For(options.EffectiveLanguageDriver));
         List<string>? header = null;
         ColumnStats[] stats = [];
         var rowCount = 0;

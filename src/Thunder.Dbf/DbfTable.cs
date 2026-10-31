@@ -526,11 +526,19 @@ public sealed partial class DbfTable : IDisposable
 
     private bool HasMaintainedStructuralCdx { get; set; }
 
-    /// <summary>Creates a new, empty .dbf file, plus a dBASE IV .dbt when there are memo fields. Fails if either exists.</summary>
+    /// <summary>Creates a new, empty dBASE IV .dbf file, plus a .dbt when there are memo fields. Fails if either exists.</summary>
     public static DbfTable Create(string path, IReadOnlyList<DbfFieldDefinition> fields, byte languageDriver = 0x57)
+        => Create(path, fields, DbfTableFormat.DbaseIV, languageDriver);
+
+    /// <summary>
+    /// Creates a new, empty .dbf file in <paramref name="format"/>, plus its memo file when there are memo
+    /// fields: a .dbt for dBASE, an .fpt for the FoxPros. Fails if either exists.
+    /// </summary>
+    public static DbfTable Create(string path, IReadOnlyList<DbfFieldDefinition> fields, DbfTableFormat format, byte? languageDriver = null)
     {
-        DbfHeader.Create(fields, languageDriver); // validate before touching the disk
-        var memoPath = fields.Any(f => char.ToUpperInvariant(f.Type) == 'M') ? Path.ChangeExtension(path, ".dbt") : null;
+        DbfHeader.Create(fields, format, languageDriver); // validate before touching the disk
+        var memoExtension = format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? ".fpt" : ".dbt";
+        var memoPath = fields.Any(f => char.ToUpperInvariant(f.Type) == 'M') ? Path.ChangeExtension(path, memoExtension) : null;
 
         // Opening finds companions case-insensitively, so creating must refuse them the same way:
         // a stray PEOPLE.DBT or PEOPLE.MDX would otherwise be picked up as this table's.
@@ -552,7 +560,7 @@ public sealed partial class DbfTable : IDisposable
             if (memoPath is not null)
                 memoStream = new FileStream(memoPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
 
-            var table = Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
+            var table = Create(stream, fields, format, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
             return table;
         }
@@ -568,13 +576,22 @@ public sealed partial class DbfTable : IDisposable
     }
 
     /// <summary>
-    /// Writes a new, empty table into <paramref name="stream"/>, replacing anything already there.
+    /// Writes a new, empty dBASE IV table into <paramref name="stream"/>, replacing anything already there.
     /// Tables with memo fields need a <paramref name="memoStream"/>, which gets an empty dBASE IV .dbt.
     /// </summary>
     public static DbfTable Create(Stream stream, IReadOnlyList<DbfFieldDefinition> fields, byte languageDriver = 0x57,
         bool leaveOpen = false, Stream? memoStream = null, string tableName = "TABLE")
+        => Create(stream, fields, DbfTableFormat.DbaseIV, languageDriver, leaveOpen, memoStream, tableName);
+
+    /// <summary>
+    /// Writes a new, empty table in <paramref name="format"/> into <paramref name="stream"/>, replacing anything
+    /// already there. Tables with memo fields need a <paramref name="memoStream"/>, which gets an empty memo
+    /// file of the matching kind (.dbt or .fpt).
+    /// </summary>
+    public static DbfTable Create(Stream stream, IReadOnlyList<DbfFieldDefinition> fields, DbfTableFormat format, byte? languageDriver = null,
+        bool leaveOpen = false, Stream? memoStream = null, string tableName = "TABLE")
     {
-        var header = DbfHeader.Create(fields, languageDriver);
+        var header = DbfHeader.Create(fields, format, languageDriver);
         if (header.HasMemo && memoStream is null)
             throw new ArgumentException("Tables with memo fields need a memo stream.", nameof(memoStream));
 
@@ -584,8 +601,8 @@ public sealed partial class DbfTable : IDisposable
         stream.WriteByte(EndOfFile);
         stream.Flush();
 
-        var memo = header.HasMemo ? DbfMemoFile.CreateDbaseIV(memoStream!, tableName, leaveOpen) : null;
-        return new DbfTable(stream, header, DbfEncoding.For(languageDriver), leaveOpen, memo,
+        var memo = header.HasMemo ? DbfMemoFile.Create(memoStream!, format, tableName, leaveOpen) : null;
+        return new DbfTable(stream, header, DbfEncoding.For(header.LanguageDriver), leaveOpen, memo,
             ignoreMissingMemo: false, allowUnmaintainedIndexes: false);
     }
 

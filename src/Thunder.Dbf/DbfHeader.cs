@@ -45,9 +45,33 @@ public sealed record DbfField(string Name, char Type, int Length, int DecimalCou
     internal int? NullBit { get; init; }
 }
 
+/// <summary>The dialect a new table is written in. Each one opens in the programs named.</summary>
+public enum DbfTableFormat
+{
+    /// <summary>dBASE III (version 0x03, or 0x83 with a .dbt). Opens in nearly everything, Clipper included.</summary>
+    DbaseIII,
+    /// <summary>dBASE IV (version 0x03, or 0x8B with a .dbt). The default.</summary>
+    DbaseIV,
+    /// <summary>FoxPro 2 (version 0x03, or 0xF5 with an .fpt).</summary>
+    FoxPro2,
+    /// <summary>Visual FoxPro (version 0x30, or 0x31 with autoincrement), with integer, currency, double and datetime fields and nulls.</summary>
+    VisualFoxPro,
+}
+
 /// <summary>A field to create in a new table.</summary>
 public sealed record DbfFieldDefinition(string Name, char Type, int Length, int DecimalCount = 0)
 {
+    /// <summary>Visual FoxPro: the field can hold .NULL. (stored in the hidden _NullFlags field).</summary>
+    public bool Nullable { get; init; }
+    /// <summary>Visual FoxPro: character or memo bytes are stored as is, with no code page translation (NOCPTRANS).</summary>
+    public bool Binary { get; init; }
+    /// <summary>Visual FoxPro: an integer field that numbers new records itself.</summary>
+    public bool AutoIncrement { get; init; }
+    /// <summary>The first number an autoincrement field hands out.</summary>
+    public int AutoIncrementNext { get; init; } = 1;
+    /// <summary>How much an autoincrement field adds each time, 1-255.</summary>
+    public int AutoIncrementStep { get; init; } = 1;
+
     /// <summary>A character (C) field of <paramref name="length"/> characters.</summary>
     public static DbfFieldDefinition Character(string name, int length) => new(name, 'C', length);
     /// <summary>A numeric (N) field, <paramref name="length"/> characters wide including the sign and decimal point.</summary>
@@ -58,6 +82,16 @@ public sealed record DbfFieldDefinition(string Name, char Type, int Length, int 
     public static DbfFieldDefinition Logical(string name) => new(name, 'L', 1);
     /// <summary>A memo (M) field, stored in the table's .dbt or .fpt file.</summary>
     public static DbfFieldDefinition Memo(string name) => new(name, 'M', 10);
+    /// <summary>A float (F) field, stored as text like a numeric field. dBASE IV and the FoxPros only.</summary>
+    public static DbfFieldDefinition Float(string name, int length, int decimals = 0) => new(name, 'F', length, decimals);
+    /// <summary>A Visual FoxPro integer (I) field: four bytes, binary.</summary>
+    public static DbfFieldDefinition Integer(string name) => new(name, 'I', 4);
+    /// <summary>A Visual FoxPro currency (Y) field: four decimal places, binary.</summary>
+    public static DbfFieldDefinition Currency(string name) => new(name, 'Y', 8, 4);
+    /// <summary>A Visual FoxPro double (B) field; <paramref name="decimals"/> only affects how VFP displays it.</summary>
+    public static DbfFieldDefinition Double(string name, int decimals = 0) => new(name, 'B', 8, decimals);
+    /// <summary>A Visual FoxPro datetime (T) field, to the millisecond.</summary>
+    public static DbfFieldDefinition DateTime(string name) => new(name, 'T', 8);
 }
 
 /// <summary>
@@ -72,6 +106,8 @@ public sealed class DbfHeader
     private const int MaxFieldsForCreate = 255;     // dBASE IV limits
     private const int MaxRecordLengthForCreate = 4000;
     private const int AutoIncrementNextOffset = 19;
+    private const int VisualFoxProBacklinkSize = 263; // the path of the table's database container, empty for free tables
+    private const string NullFlagsName = "_NullFlags";
 
     // Kept verbatim so rewriting the header never disturbs bytes we don't understand yet.
     private readonly byte[] _fixed;
@@ -291,40 +327,98 @@ public sealed class DbfHeader
             throw new InvalidDataException($"The file ends inside the {what}.");
     }
 
-    /// <summary>Builds the header for a new table. Tables with memo fields get the dBASE IV memo version (0x8B).</summary>
+    /// <summary>Builds the header for a new dBASE IV table. Tables with memo fields get the dBASE IV memo version (0x8B).</summary>
     public static DbfHeader Create(IReadOnlyList<DbfFieldDefinition> definitions, byte languageDriver = 0x57)
+        => Create(definitions, DbfTableFormat.DbaseIV, languageDriver);
+
+    /// <summary>
+    /// Builds the header for a new table in <paramref name="format"/>. The language driver (code page
+    /// mark, byte 29) defaults to Windows-1252: 0x57 for dBASE, 0x03 for the FoxPros. dBASE III ignores the byte.
+    /// </summary>
+    public static DbfHeader Create(IReadOnlyList<DbfFieldDefinition> definitions, DbfTableFormat format, byte? languageDriver = null)
     {
+        if (!Enum.IsDefined(format))
+            throw new ArgumentOutOfRangeException(nameof(format));
         if (definitions.Count == 0)
             throw new ArgumentException("A table needs at least one field.", nameof(definitions));
-        if (definitions.Count > MaxFieldsForCreate)
-            throw new ArgumentException($"dBASE IV tables hold at most {MaxFieldsForCreate} fields, not {definitions.Count}.", nameof(definitions));
 
-        var fields = new List<DbfField>(definitions.Count);
+        var visualFoxPro = format == DbfTableFormat.VisualFoxPro;
+        var (maxFields, maxRecordLength) = format switch
+        {
+            DbfTableFormat.DbaseIII => (128, 4000),
+            DbfTableFormat.VisualFoxPro => (255, 65500),
+            _ => (MaxFieldsForCreate, MaxRecordLengthForCreate),
+        };
+        if (definitions.Count > maxFields)
+            throw new ArgumentException($"{Describe(format)} tables hold at most {maxFields} fields, not {definitions.Count}.", nameof(definitions));
+
+        var fields = new List<DbfField>(definitions.Count + 1);
+        var autoIncrementNext = new List<int>(definitions.Count + 1);
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var offset = 1;
+        var nullBits = 0;
 
         foreach (var def in definitions)
         {
-            Validate(def);
+            var type = char.ToUpperInvariant(def.Type);
+            Validate(def, format);
             if (!names.Add(def.Name))
                 throw new ArgumentException($"Duplicate field name '{def.Name}'.", nameof(definitions));
 
-            fields.Add(new DbfField(def.Name, char.ToUpperInvariant(def.Type), def.Length, def.DecimalCount, offset));
-            offset += def.Length;
+            // Visual FoxPro keeps memo pointers in four binary bytes; the others in ten digits.
+            var length = visualFoxPro && type == 'M' ? 4 : def.Length;
+            // Visual FoxPro marks its binary types (I, Y, B, T) binary too, as it does NOCPTRANS text.
+            var binary = def.Binary || (visualFoxPro && type is 'I' or 'Y' or 'B' or 'T');
+            var flags = (byte)((def.Nullable ? 0x02 : 0) | (binary ? 0x04 : 0) | (def.AutoIncrement ? 0x08 : 0));
+            fields.Add(new DbfField(def.Name, type, length, def.DecimalCount, offset)
+            {
+                Flags = flags,
+                AutoIncrementStep = def.AutoIncrement ? def.AutoIncrementStep : 0,
+                NullBit = def.Nullable ? nullBits++ : null,
+            });
+            autoIncrementNext.Add(def.AutoIncrement ? def.AutoIncrementNext : 0);
+            offset += length;
         }
 
-        if (offset > MaxRecordLengthForCreate)
-            throw new ArgumentException($"dBASE IV records hold at most {MaxRecordLengthForCreate} bytes; these fields need {offset}.", nameof(definitions));
+        if (nullBits > 0)
+        {
+            // Visual FoxPro's hidden system field: one bit per nullable field, in field order.
+            var length = (nullBits + 7) / 8;
+            fields.Add(new DbfField(NullFlagsName, '0', length, 0, offset) { Flags = 0x05 });
+            autoIncrementNext.Add(0);
+            offset += length;
+        }
+
+        if (offset > maxRecordLength)
+            throw new ArgumentException($"{Describe(format)} records hold at most {maxRecordLength} bytes; these fields need {offset}.", nameof(definitions));
 
         var hasMemo = fields.Any(f => f.Type == 'M');
         var fixedHeader = new byte[FixedHeaderSize];
-        fixedHeader[0] = hasMemo ? (byte)0x8B : (byte)0x03;
-        BinaryPrimitives.WriteUInt16LittleEndian(fixedHeader.AsSpan(8, 2), (ushort)(FixedHeaderSize + FieldDescriptorSize * fields.Count + 1));
+        fixedHeader[0] = format switch
+        {
+            DbfTableFormat.VisualFoxPro => definitions.Any(d => d.AutoIncrement) ? (byte)0x31 : (byte)0x30,
+            _ when !hasMemo => 0x03,
+            DbfTableFormat.DbaseIII => 0x83,
+            DbfTableFormat.FoxPro2 => 0xF5,
+            _ => 0x8B,
+        };
+        if (visualFoxPro && hasMemo)
+            fixedHeader[28] = 0x02;
+        var headerLength = FixedHeaderSize + FieldDescriptorSize * fields.Count + 1 + (visualFoxPro ? VisualFoxProBacklinkSize : 0);
+        BinaryPrimitives.WriteUInt16LittleEndian(fixedHeader.AsSpan(8, 2), (ushort)headerLength);
         BinaryPrimitives.WriteUInt16LittleEndian(fixedHeader.AsSpan(10, 2), (ushort)offset);
-        fixedHeader[29] = languageDriver;
+        fixedHeader[29] = languageDriver ?? (format is DbfTableFormat.DbaseIII or DbfTableFormat.DbaseIV ? (byte)0x57 : (byte)0x03);
 
-        return new DbfHeader(fixedHeader, fields.AsReadOnly()) { LastUpdate = DateOnly.FromDateTime(DateTime.Today) };
+        return new DbfHeader(fixedHeader, fields.AsReadOnly(), [.. autoIncrementNext]) { LastUpdate = DateOnly.FromDateTime(System.DateTime.Today) };
     }
+
+    private static string Describe(DbfTableFormat format) => format switch
+    {
+        DbfTableFormat.DbaseIII => "dBASE III",
+        DbfTableFormat.DbaseIV => "dBASE IV",
+        DbfTableFormat.FoxPro2 => "FoxPro 2",
+        _ => "Visual FoxPro",
+    };
 
     /// <summary>Writes the complete header (fixed part, descriptors, terminator) at the stream's current position.</summary>
     internal void WriteFull(Stream stream)
@@ -332,17 +426,31 @@ public sealed class DbfHeader
         stream.Write(_fixed);
 
         Span<byte> descriptor = stackalloc byte[FieldDescriptorSize];
-        foreach (var field in Fields)
+        for (var i = 0; i < Fields.Count; i++)
         {
+            var field = Fields[i];
             descriptor.Clear();
             Encoding.ASCII.GetBytes(field.Name, descriptor[..11]);
             descriptor[11] = (byte)field.Type;
             descriptor[16] = (byte)field.Length;
             descriptor[17] = (byte)field.DecimalCount;
+            if (IsVisualFoxPro)
+            {
+                // Visual FoxPro also records where each field starts, its flags and its autoincrement counter.
+                BinaryPrimitives.WriteUInt32LittleEndian(descriptor[12..], (uint)field.Offset);
+                descriptor[18] = field.Flags;
+                if (field.IsAutoIncrement)
+                {
+                    BinaryPrimitives.WriteInt32LittleEndian(descriptor[AutoIncrementNextOffset..], _autoIncrementNext[i]);
+                    descriptor[23] = (byte)field.AutoIncrementStep;
+                }
+            }
             stream.Write(descriptor);
         }
 
         stream.WriteByte(HeaderTerminator);
+        if (IsVisualFoxPro)
+            stream.Write(new byte[VisualFoxProBacklinkSize]);
     }
 
     /// <summary>Rewrites only the fixed 32 bytes (record count, last update) at the start of the stream.</summary>
@@ -352,29 +460,66 @@ public sealed class DbfHeader
         stream.Write(_fixed);
     }
 
-    private static void Validate(DbfFieldDefinition def)
+    private static void Validate(DbfFieldDefinition def, DbfTableFormat format)
     {
         if (string.IsNullOrEmpty(def.Name) || def.Name.Length > MaxNameLength || !char.IsAsciiLetter(def.Name[0])
             || !def.Name.All(c => char.IsAsciiLetterOrDigit(c) || c == '_'))
             throw new ArgumentException($"Field name '{def.Name}' must be 1-{MaxNameLength} letters, digits or underscores, starting with a letter.");
 
-        var (min, max) = char.ToUpperInvariant(def.Type) switch
+        var type = char.ToUpperInvariant(def.Type);
+        var visualFoxPro = format == DbfTableFormat.VisualFoxPro;
+        var (min, max) = type switch
         {
             'C' => (1, 254),
-            'N' or 'F' => (1, 20),
+            'N' => (1, format == DbfTableFormat.DbaseIII ? 19 : 20),
+            'F' when format != DbfTableFormat.DbaseIII => (1, 20),
             'D' => (8, 8),
             'L' => (1, 1),
+            'M' when visualFoxPro => (4, 10),   // given as 10 (the Memo factory) or 4; stored as 4
             'M' => (10, 10),
-            _ => throw new ArgumentException($"Field type '{def.Type}' isn't supported for new tables yet."),
+            'I' when visualFoxPro => (4, 4),
+            'Y' or 'B' or 'T' when visualFoxPro => (8, 8),
+            'I' or 'Y' or 'B' or 'T' => throw new ArgumentException($"Field '{def.Name}' of type {type} needs a Visual FoxPro table (DbfTableFormat.VisualFoxPro)."),
+            _ => throw new ArgumentException($"Field type '{def.Type}' isn't supported for new {Describe(format)} tables."),
         };
 
-        if (def.Length < min || def.Length > max)
-            throw new ArgumentException($"Field '{def.Name}' of type {def.Type} must be {min}-{max} bytes long, not {def.Length}.");
+        if (def.Length < min || def.Length > max || (type == 'M' && visualFoxPro && def.Length is not (4 or 10)))
+            throw new ArgumentException($"Field '{def.Name}' of type {type} must be {min}-{max} bytes long, not {def.Length}.");
 
         // Only numbers have decimals; for character fields the byte means "wider than 255" to Clipper and FoxPro.
-        if (def.DecimalCount != 0 && char.ToUpperInvariant(def.Type) is not ('N' or 'F'))
-            throw new ArgumentException($"Field '{def.Name}' of type {def.Type} can't have decimals.");
-        if (def.DecimalCount < 0 || (def.DecimalCount > 0 && def.DecimalCount >= def.Length - 1))
-            throw new ArgumentException($"Field '{def.Name}' can't have {def.DecimalCount} decimals in {def.Length} bytes.");
+        // Currency always has four; a double's decimals only set how Visual FoxPro shows it.
+        switch (type)
+        {
+            case 'N' or 'F':
+                if (def.DecimalCount < 0 || (def.DecimalCount > 0 && def.DecimalCount >= def.Length - 1))
+                    throw new ArgumentException($"Field '{def.Name}' can't have {def.DecimalCount} decimals in {def.Length} bytes.");
+                break;
+            case 'B':
+                if (def.DecimalCount is < 0 or > 18)
+                    throw new ArgumentException($"Field '{def.Name}' can have 0-18 decimals, not {def.DecimalCount}.");
+                break;
+            case 'Y':
+                if (def.DecimalCount != 4)
+                    throw new ArgumentException($"Currency field '{def.Name}' always has 4 decimals.");
+                break;
+            default:
+                if (def.DecimalCount != 0)
+                    throw new ArgumentException($"Field '{def.Name}' of type {type} can't have decimals.");
+                break;
+        }
+
+        if (!visualFoxPro && (def.Nullable || def.Binary || def.AutoIncrement))
+            throw new ArgumentException($"Field '{def.Name}': nullable, binary and autoincrement fields need a Visual FoxPro table (DbfTableFormat.VisualFoxPro).");
+        if (def.Binary && type is not ('C' or 'M'))
+            throw new ArgumentException($"Field '{def.Name}': only character and memo fields can be binary.");
+        if (def.AutoIncrement)
+        {
+            if (def.Nullable)
+                throw new ArgumentException($"Field '{def.Name}': an autoincrement field can't be nullable.");
+            if (type != 'I')
+                throw new ArgumentException($"Field '{def.Name}': only integer fields can autoincrement.");
+            if (def.AutoIncrementStep is < 1 or > 255)
+                throw new ArgumentException($"Field '{def.Name}': the autoincrement step must be 1-255, not {def.AutoIncrementStep}.");
+        }
     }
 }

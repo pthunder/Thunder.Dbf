@@ -10,6 +10,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **New tables in any format:** `DbfTable.Create(path, fields, DbfTableFormat.VisualFoxPro)` (also `DbaseIII`, `DbaseIV`, the default, and `FoxPro2`) writes the matching header and memo file (`.dbt` or `.fpt`). Visual FoxPro tables get integer, currency, double and datetime fields (`DbfFieldDefinition.Integer`, `Currency`, `Double`, `DateTime`), `Nullable` fields with the hidden `_NullFlags`, `Binary` text and memos, and `AutoIncrement` integers, with field flags as Visual FoxPro 9 writes them. CSV import takes `Format` too, and `thunder-dbf import` takes `--format dbase3|dbase4|foxpro2|vfp`.
+- `DbfImportOptions.LanguageDriver` is now `byte?`: null (the default) marks Windows-1252 the way the chosen format does.
+- The FAQ answers "is it thread-safe?".
 - `Check()`'s summary says "No problems; N note(s) below." when tables only have notes (such as a missing code page), instead of "All good." above a warning.
 
 ### Engine (Thunder.Dbf)
