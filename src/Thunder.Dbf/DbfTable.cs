@@ -153,6 +153,8 @@ public sealed partial class DbfTable : IDisposable
                         table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
                     table.AttachOtherIndexes(path, table.Header);
                     table.RepairUnfinishedAppends();
+                    if (DbfJournal.IsPending(path) && table.MaintainsIndex)
+                        table.TryReplayJournalOnOpen();
                 }
                 catch
                 {
@@ -570,6 +572,7 @@ public sealed partial class DbfTable : IDisposable
     private void PrepareWrite(bool appending)
     {
         Refresh();
+        ReplayJournal(); // a write cut off in this or another process; every caller holds the header lock
         ThrowIfPackUnfinished();
         ThrowIfIndexesNeedRebuild();
         ThrowIfIndexAppeared();
@@ -931,7 +934,7 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // Writes a record's new values under the caller's locks. Order: memos (inside EncodeFields), the
-    // record, then index entries; each reaches the disk before the next starts.
+    // new index entries, the record, then the old entries go; each reaches the disk before the next.
     private void UpdateCore(int index, DbfRecord current, object?[] values)
     {
         Seek(index);
@@ -946,10 +949,12 @@ public sealed partial class DbfTable : IDisposable
         var keys = PlanIndexChanges(current, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
         _memo?.FlushToDisk();
-        Seek(index);
-        _stream.Write(_buffer);
-        FlushToDisk(_stream);
-        ApplyIndexChanges(keys, index + 1);
+        ChangeRecordAndKeys(keys, index + 1, () =>
+        {
+            Seek(index);
+            _stream.Write(_buffer);
+            FlushToDisk(_stream);
+        });
         CommitCounters(counters);
         CommitHeader();
     }
@@ -1241,10 +1246,12 @@ public sealed partial class DbfTable : IDisposable
         _buffer[0] = flag;
         var keys = PlanIndexChanges(before, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
-        Seek(index);
-        _stream.WriteByte(flag);
-        FlushToDisk(_stream);
-        ApplyIndexChanges(keys, index + 1);
+        ChangeRecordAndKeys(keys, index + 1, () =>
+        {
+            Seek(index);
+            _stream.WriteByte(flag);
+            FlushToDisk(_stream);
+        });
         CommitHeader();
     }
 
@@ -1322,9 +1329,118 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
-    // Applies one record's index changes. If one fails partway (a damaged node, a full disk), the
-    // ones already made are undone, so the index never holds half of a record's change.
-    private void ApplyIndexChanges(List<TagChange>? changes, int recordNumber)
+    private enum KeyPhase { All, NewKeys, OldKeys }
+
+    // Changing a record's keys goes new keys, record, old keys: each step reaches the disk before the
+    // next, so a crash in between leaves the record with an extra key (still found by its new key and,
+    // until the old one goes, its old key too), never without one. Appends write the record first,
+    // since a key for a record past the count would send other programs past the end of the table.
+    private void ChangeRecordAndKeys(List<TagChange>? keys, int recordNumber, Action writeRecord)
+    {
+        var journaled = _useJournal && _path is not null && keys is { Count: > 0 };
+        if (journaled)
+            DbfJournal.Write(_path!, new DbfJournalEntry(recordNumber, keys!.Select(k => (k.Tag.Name, k.Remove, k.Insert)).ToList()));
+        ApplyIndexChanges(keys, recordNumber, KeyPhase.NewKeys);
+        if (keys is { Count: > 0 })
+            CommitIndexes();
+        CrashPoint?.Invoke("new keys");
+        writeRecord();
+        CrashPoint?.Invoke("record");
+        ApplyIndexChanges(keys, recordNumber, KeyPhase.OldKeys);
+        if (journaled)
+        {
+            CommitIndexes();
+            DbfJournal.Clear(_path!);
+        }
+    }
+
+    private bool _useJournal;
+
+    /// <summary>For the tests: called between a key change's steps, where throwing stands in for a killed process.</summary>
+    internal Action<string>? CrashPoint { get; set; }
+
+    /// <summary>
+    /// Opt-in: note each record's key changes in <c>TABLE.DBF.journal</c> before making them, so a write cut off
+    /// partway (a crash, a killed process) is finished by the next write or writable open, here or in another
+    /// Thunder.Dbf process. Costs two extra forced disk writes per write that changes a key. Without it, such a
+    /// write leaves the record with an extra key (never a missing one) until <see cref="RebuildIndex"/>.
+    /// </summary>
+    public bool UseJournal
+    {
+        get => _useJournal;
+        set
+        {
+            if (value && _path is null)
+                throw new InvalidOperationException("Only a table opened by path can keep a journal next to it.");
+            _useJournal = value;
+        }
+    }
+
+    /// <summary>True when the table's journal holds a note: a write was cut off, or another Thunder.Dbf process is mid-write.</summary>
+    public bool HasPendingJournal => _path is not null && DbfJournal.IsPending(_path);
+
+    // A note found on opening is finished straight away, so other programs stop seeing the stale key.
+    // If another program holds the header lock (it may be the writer, still at work), the note waits
+    // for this table's first write instead of failing the open.
+    private void TryReplayJournalOnOpen()
+    {
+        try
+        {
+            using (Locks.Header())
+            {
+                Refresh();
+                ReplayJournal();
+            }
+        }
+        catch (DbfException ex) when (ex.Code is DbfErrorCode.TableLocked)
+        {
+        }
+    }
+
+    // Finishes a key change a writer was cut off in the middle of, under the header lock every
+    // journaled write holds: each journaled tag ends up with exactly the key the record has now.
+    // A torn note was cut off before any index change, so it's dropped. A note for a tag this table
+    // doesn't keep is left for a process that does (Check() reports it).
+    private void ReplayJournal()
+    {
+        if (_path is null || !_stream.CanWrite || !DbfJournal.IsPending(_path))
+            return;
+        if (DbfJournal.Read(_path) is not { } entry)
+        {
+            DbfJournal.Clear(_path);
+            return;
+        }
+        var tags = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToList();
+        var noted = entry.Changes.Select(c => c.Tag).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (!noted.All(name => tags.Any(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase))))
+            return;
+
+        var record = entry.RecordNumber >= 1 && entry.RecordNumber <= RecordCount ? Read(entry.RecordNumber - 1) : null;
+        var done = new List<Action>();
+        foreach (var tag in tags)
+        {
+            var changes = entry.Changes.Where(c => string.Equals(c.Tag, tag.Name, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (changes.Count == 0)
+                continue;
+            var current = record is not null && tag.Includes(record) ? tag.KeyFor(record) : null;
+            foreach (var key in changes.SelectMany(c => new[] { c.OldKey, c.NewKey }).OfType<byte[]>())
+            {
+                if (current is null || !key.AsSpan().SequenceEqual(current))
+                    RemoveKey(tag, key, entry.RecordNumber, done, mayBeMissing: true);
+            }
+            if (current is not null)
+            {
+                RemoveKey(tag, current, entry.RecordNumber, done, mayBeMissing: true);
+                InsertKey(tag, current, entry.RecordNumber, done);
+            }
+        }
+        CommitIndexes();
+        DbfJournal.Clear(_path);
+    }
+
+    // Applies one record's index changes (or one phase of them). If one fails partway (a damaged
+    // node, a full disk), the ones already made are undone, so the index never holds half of a change.
+    private void ApplyIndexChanges(List<TagChange>? changes, int recordNumber, KeyPhase phase = KeyPhase.All)
     {
         if (changes is null)
             return;
@@ -1334,9 +1450,9 @@ public sealed partial class DbfTable : IDisposable
         {
             foreach (var (tag, remove, insert) in changes)
             {
-                if (remove is not null)
+                if (remove is not null && phase != KeyPhase.NewKeys)
                     RemoveKey(tag, remove, recordNumber, done);
-                if (insert is not null)
+                if (insert is not null && phase != KeyPhase.OldKeys)
                     InsertKey(tag, insert, recordNumber, done);
             }
         }
@@ -1356,7 +1472,10 @@ public sealed partial class DbfTable : IDisposable
                     break; // the index is damaged beyond undoing here; the error below says what to do
                 }
             }
-            throw new DbfException(DbfErrorCode.IndexDamaged, $"Record {recordNumber} was written, but its index entries couldn't be updated.",
+            throw new DbfException(DbfErrorCode.IndexDamaged,
+                phase == KeyPhase.NewKeys
+                    ? $"Record {recordNumber} wasn't changed: its new index entries couldn't be added."
+                    : $"Record {recordNumber} was written, but its index entries couldn't be updated.",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
         }
     }
@@ -1376,13 +1495,14 @@ public sealed partial class DbfTable : IDisposable
         done.Add(() => tag.Remove(key, recordNumber));
     }
 
-    private void RemoveKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done)
+    private void RemoveKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done, bool mayBeMissing = false)
     {
         if (!tag.Remove(key, recordNumber))
         {
             // A unique tag may hold another record under this key. Any other tag must have had this
-            // entry: if it's missing, the index is already out of step with the table.
-            if (!tag.IsUnique)
+            // entry: if it's missing, the index is already out of step with the table. (A journal
+            // replay doesn't know how far the cut-off write got, so there it may be missing.)
+            if (!tag.IsUnique && !mayBeMissing)
                 throw new InvalidDataException($"Index tag {tag.Name} has no entry for record {recordNumber}, which it should.");
             return;
         }
@@ -1451,6 +1571,8 @@ public sealed partial class DbfTable : IDisposable
             tag.ReplaceAll(keys);
         CommitIndexes();
         _indexesNeedRebuild = false;
+        if (_path is not null)
+            DbfJournal.Clear(_path); // rebuilt from the table, so any note is moot
     }
 
     private void CheckValueCount(object?[] values)
