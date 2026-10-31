@@ -4,7 +4,7 @@
 //     |____|                         and a running legacy app see each other's locks.
 //
 //   scheme          header/append     record n                       whole file
-//   dBASE           4,026,531,838     4,026,531,838 - n              3,026,531,838 for 1e9, + header/append
+//   dBASE           4,026,531,839     4,026,531,838 - n              3,026,531,838 for 1e9, + 4,026,531,838-839
 //   Clipper         1,000,000,000     1,000,000,000 + n              1,000,000,001 for 1e9
 //   VFP (no .cdx)   0x40000000        0x40000000 + record's offset   0x40000001 for 0x3FFFFFFD
 //   VFP (.cdx)      0x7FFFFFFE        0x7FFFFFFE - n                 0x77FFFFFF for 0x07FFFFFF
@@ -110,15 +110,19 @@ internal sealed class DbfLocks
 
     // ---- positions ---------------------------------------------------------------------
 
-    private (long Offset, long Length) HeaderRange => Scheme switch
+    internal (long Offset, long Length) HeaderRange => Scheme switch
     {
         DbfLockScheme.Clipper => (1_000_000_000, 1),
         DbfLockScheme.VisualFoxPro => (_withCdx ? 0x7FFFFFFEL : 0x40000000L, 1),
-        _ => (HeaderByte, 1),
+        // Microsoft's Jet and ACE (Access) read a held dBASE header byte as "the table is opened
+        // exclusively by another user" and fail at once, so header changes take the append byte
+        // after it, which Jet itself takes to append. The header byte is only held, with the
+        // append byte, as part of the whole-table lock (measured against Jet 4.0 on Windows).
+        _ => (HeaderByte + 1, 1),
     };
 
-    // Harbour's schemes take the header byte for appends too; dBASE uses the byte after it.
-    private (long Offset, long Length) AppendRange => Scheme == DbfLockScheme.Dbase ? (HeaderByte + 1, 1) : HeaderRange;
+    // Every scheme now appends under its header lock's byte.
+    private (long Offset, long Length) AppendRange => HeaderRange;
 
     internal (long Offset, long Length) RecordRange(int recordNumber) => Scheme switch
     {
@@ -128,7 +132,7 @@ internal sealed class DbfLocks
         _ => (HeaderByte - recordNumber, 1),
     };
 
-    private (long Offset, long Length)[] TableRanges => Scheme switch
+    internal (long Offset, long Length)[] TableRanges => Scheme switch
     {
         DbfLockScheme.Clipper => [(1_000_000_001, 1_000_000_000)],
         DbfLockScheme.VisualFoxPro when _withCdx => [(0x7FFFFFFEL - 0x07FFFFFFL, 0x07FFFFFF)],

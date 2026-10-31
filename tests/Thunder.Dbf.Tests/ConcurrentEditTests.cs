@@ -79,6 +79,20 @@ public sealed class ConcurrentEditTests : IDisposable
         Assert.Equal((offset, 1L), table.Locks.RecordRange(recordNumber));
     }
 
+    // Microsoft's Jet (Access) reads a held header byte, 4,026,531,838, as "the table is opened
+    // exclusively by another user" and fails at once (measured against Jet 4.0), and appends under
+    // the byte after it. So appends and index updates take that append byte, and the header byte is
+    // only held as part of the whole-table lock.
+    [Fact]
+    public void dBASE_header_changes_take_the_append_byte_not_the_one_Jet_reads_as_exclusive()
+    {
+        using var table = DbfTable.Open(_path, writable: true);
+        table.LockScheme = DbfLockScheme.Dbase;
+        Assert.Equal((4_026_531_839L, 1L), table.Locks.HeaderRange);
+        Assert.Contains((4_026_531_838L, 2L), table.Locks.TableRanges);
+        Assert.Contains((3_026_531_838L, 1_000_000_000L), table.Locks.TableRanges);
+    }
+
     [Fact]
     public void Visual_FoxPro_tables_pick_the_FoxPro_scheme_by_themselves()
     {
