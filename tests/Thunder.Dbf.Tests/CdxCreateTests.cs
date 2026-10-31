@@ -164,6 +164,22 @@ public sealed class CdxCreateTests : IDisposable
         Assert.Equal(before[28], SharedFile.ReadAllBytes(path)[28]);
     }
 
+    // Found by the Visual FoxPro stress tests: a tag on a C(254) field failed inside the tree code.
+    [Fact]
+    public void Keys_longer_than_FoxPro_allows_are_refused_before_anything_is_written()
+    {
+        var path = BareKinds();
+        using var table = OpenToIndex(path);
+        var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("LONG", string.Join("+", Enumerable.Repeat("name", 9))));
+        Assert.Equal(DbfErrorCode.InvalidValue, error.Code);
+        Assert.Contains("240", error.Message);
+        Assert.Null(CdxIndex.FindFor(path));
+
+        table.CreateIndexTag("LONGEST", string.Join("+", Enumerable.Repeat("name", 8))); // 240 bytes: the most FoxPro allows
+        using var made = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(CdxIndex.FindFor(path)!)));
+        Assert.Equal(240, made["LONGEST"].KeyLength);
+    }
+
     [Fact]
     public void A_FOR_filter_must_be_logical_and_expressions_must_fit_the_code_page()
     {

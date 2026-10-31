@@ -54,6 +54,9 @@ public sealed partial class CdxIndex
 
     private const ushort RootAndLeaf = 0x03;
 
+    /// <summary>The longest key Visual FoxPro gives a .cdx tag: 240 bytes.</summary>
+    internal const int MaxKeyLength = 240;
+
     /// <summary>
     /// Adds a tag to this structural .cdx and fills it from <paramref name="table"/>. The header and root
     /// go at the end of the file and are filled first; the tag directory names it last, so a crash

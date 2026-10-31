@@ -141,8 +141,31 @@ public sealed partial class CdxWriteTests
         table.Append(Call(template, 5001, contact: 1, subject: "second"));
 
         File.Copy(cdx, Path.Combine(_dir.FullName, "calls.idx"));
+        if (table.WatchesFolder) // Windows: the watcher's event comes a moment after the file
+            Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)));
         var error = Assert.Throws<DbfException>(() => table.Append(Call(template, 5002, contact: 1, subject: "third")));
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         Assert.Contains("appeared after it was opened", error.Message);
+    }
+
+    // The watcher Windows uses (started by hand here, so it runs everywhere): quiet while nothing is
+    // made next to the table, and a new index file makes the next write look and refuse.
+    [Fact]
+    public void A_watched_folder_reports_a_new_index_to_the_next_write()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using var table = OpenShared(dbf);
+        table.WatchFolder();
+        Assert.True(table.WatchesFolder);
+        var template = table.Read(0).Values.ToArray();
+        table.Append(Call(template, 5000, contact: 1, subject: "looks once"));
+        table.Append(Call(template, 5001, contact: 1, subject: "nothing to look for"));
+        Assert.False(table.FolderLookPending);
+
+        File.Copy(cdx, Path.Combine(_dir.FullName, "calls.idx"));
+        Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the new file");
+        var error = Assert.Throws<DbfException>(() => table.Append(Call(template, 5002, contact: 1, subject: "refused")));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        Assert.True(table.FolderLookPending); // refused, so the next write looks again
     }
 }

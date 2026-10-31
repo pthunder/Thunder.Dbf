@@ -189,8 +189,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
         }
     }
 
-    // After a locked change: bump the counter (so other programs drop their cached pages) and push the
-    // change out. Half a change (a damaged page met midway) is still published, but then neither the
+    // After a locked change: bump the counter again (it moved before the first page too, see Write)
+    // and push the change out. The second bump is for readers that walk without the lock, this
+    // library's own open-time check among them: a walk that met the change half done sees the
+    // counter move again, and walks once more. Half a change (a damaged page met midway) is still published, but then neither the
     // pages nor the layout count as checked any more.
     private void Publish(bool succeeded)
     {
