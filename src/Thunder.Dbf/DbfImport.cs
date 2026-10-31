@@ -19,7 +19,10 @@ public sealed record DbfImportOptions
     /// <summary>The field separator. Null detects comma, semicolon, tab or pipe from the header line.</summary>
     public char? Delimiter { get; init; }
 
-    /// <summary>The CSV's encoding. Null means UTF-8, unless the file starts with a different byte-order mark.</summary>
+    /// <summary>
+    /// The CSV's encoding. Null means UTF-8, unless the file starts with a different byte-order mark.
+    /// Bytes that aren't valid in it are an error, never silently replaced.
+    /// </summary>
     public Encoding? CsvEncoding { get; init; }
 
     /// <summary>Language driver for the new table: 0x57 (Windows-1252) by default; 0x01 is DOS 437, 0x02 is DOS 850.</summary>
@@ -65,28 +68,74 @@ public static class DbfImport
     private const int MaxNumericWidth = 20;
     private static readonly string[] TrueWords = ["T", "TRUE", "Y", "YES"];
     private static readonly string[] FalseWords = ["F", "FALSE", "N", "NO"];
+    private static readonly string[] CompanionExtensions = [".dbf", ".dbt", ".fpt", ".mdx", ".cdx", ".cpg"];
 
     /// <summary>Reads the CSV and works out the table it would become, without creating anything.</summary>
-    public static DbfImportPlan Plan(string csvPath, DbfImportOptions? options = null)
-    {
-        options ??= new DbfImportOptions();
-        return Shape(csvPath, options);
-    }
+    public static DbfImportPlan Plan(string csvPath, DbfImportOptions? options = null) =>
+        Shape(csvPath, options ?? new DbfImportOptions());
 
     /// <summary>
     /// Creates <paramref name="dbfPath"/> from the CSV: the shape always, the rows unless
-    /// <see cref="DbfImportOptions.ShapeOnly"/>. Streams the file twice (once to shape, once to
-    /// load), so memory stays flat however big the CSV is.
+    /// <see cref="DbfImportOptions.ShapeOnly"/>. The CSV is streamed twice (once to shape, once to
+    /// load), so memory stays flat however big it is. The table is built under temporary names and
+    /// only moved into place when everything succeeded, so a failed import leaves nothing behind.
     /// </summary>
     public static DbfImportPlan FromCsv(string csvPath, string dbfPath, DbfImportOptions? options = null)
     {
         options ??= new DbfImportOptions();
+        var fingerprint = Fingerprint(csvPath);
         var plan = Shape(csvPath, options);
 
-        using var table = DbfTable.Create(dbfPath, plan.Fields, options.LanguageDriver);
-        if (options.ShapeOnly)
-            return plan;
+        var finalPaths = plan.Fields.Any(f => f.Type == 'M')
+            ? new[] { dbfPath, Path.ChangeExtension(dbfPath, ".dbt") }
+            : [dbfPath];
+        RefuseExisting(dbfPath);
 
+        var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dbfPath))!, $".{Path.GetFileNameWithoutExtension(dbfPath)}.importing-{Guid.NewGuid():N}");
+        var tempPaths = finalPaths.Select(p => temporary + Path.GetExtension(p)).ToArray();
+        try
+        {
+            using (var stream = new FileStream(tempPaths[0], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
+            using (var memo = tempPaths.Length > 1 ? new FileStream(tempPaths[1], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None) : null)
+            using (var table = DbfTable.Create(stream, plan.Fields, options.LanguageDriver, leaveOpen: true, memo, Path.GetFileName(dbfPath)))
+            {
+                if (!options.ShapeOnly)
+                    Load(table, csvPath, options, plan);
+            }
+
+            // The CSV must not have changed between the shaping pass and the loading pass.
+            if (!fingerprint.AsSpan().SequenceEqual(Fingerprint(csvPath)))
+                throw new DbfException(DbfErrorCode.InvalidCsv, "The CSV changed while it was being imported.",
+                    "Make sure nothing is writing to the file, then import again.", csvPath);
+
+            // Publish the memo file before the table, so the table never appears without its memos.
+            // If a move fails, take back whatever this import already published.
+            RefuseExisting(dbfPath);
+            var published = new List<string>();
+            try
+            {
+                for (var i = tempPaths.Length - 1; i >= 0; i--)
+                {
+                    File.Move(tempPaths[i], finalPaths[i]);
+                    published.Add(finalPaths[i]);
+                }
+            }
+            catch
+            {
+                published.ForEach(File.Delete);
+                throw;
+            }
+        }
+        finally
+        {
+            foreach (var temp in tempPaths)
+                File.Delete(temp);
+        }
+        return plan;
+    }
+
+    private static void Load(DbfTable table, string csvPath, DbfImportOptions options, DbfImportPlan plan)
+    {
         var line = new int[1]; // the CSV line being loaded, for error messages
         try
         {
@@ -97,33 +146,58 @@ public static class DbfImport
             // The table names its field; name the CSV column too, since that's what the user sees.
             var column = plan.Columns.FirstOrDefault(c => ex.Message.Contains($"Field {c.Field.Name} ", StringComparison.Ordinal));
             var where = column is null ? "" : $", column '{column.CsvName}'";
-            throw new DbfException(DbfErrorCode.NotADbfFile, $"Row {line[0]}{where}: {ex.Message}",
+            throw new DbfException(DbfErrorCode.InvalidValue, $"Row {line[0]}{where}: {ex.Message}",
                 "Fix the value in the CSV, or widen the column with DbfImportOptions.Overrides.", csvPath, ex);
         }
-        return plan;
+    }
+
+    private static void RefuseExisting(string dbfPath)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(dbfPath))!;
+        var baseName = Path.GetFileNameWithoutExtension(dbfPath);
+        var existing = Directory.Exists(directory)
+            ? Directory.EnumerateFiles(directory).FirstOrDefault(p =>
+                Path.GetFileNameWithoutExtension(p).Equals(baseName, StringComparison.OrdinalIgnoreCase)
+                && CompanionExtensions.Contains(Path.GetExtension(p), StringComparer.OrdinalIgnoreCase))
+            : null;
+        if (existing is not null)
+            throw new DbfException(DbfErrorCode.TableAlreadyExists, $"'{Path.GetFileName(existing)}' already exists.",
+                "Pick another table name, or move the old files away first.", existing);
+    }
+
+    private static byte[] Fingerprint(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            return System.Security.Cryptography.SHA256.HashData(stream);
+        }
+        catch (Exception ex) when (DbfException.Translate(ex, path, FileAccess.Read) is { } translated)
+        {
+            throw translated;
+        }
     }
 
     private static IEnumerable<object?[]> Rows(string csvPath, DbfImportOptions options, DbfImportPlan plan, int[] currentLine)
     {
-        var line = 1;
         foreach (var record in ReadRecords(csvPath, options, plan.Delimiter).Skip(1))
         {
-            currentLine[0] = ++line;
-            if (IsBlankLine(record))
+            currentLine[0] = record.Line;
+            if (record.IsBlankLine)
                 continue;
 
             var values = new object?[plan.Columns.Count];
             for (var c = 0; c < values.Length; c++)
             {
-                var text = c < record.Count ? record[c] : "";
+                var text = c < record.Fields.Count ? record.Fields[c] : "";
                 try
                 {
                     values[c] = Convert(text, plan.Columns[c].Field, options);
                 }
                 catch (Exception ex) when (ex is FormatException or OverflowException)
                 {
-                    throw new DbfException(DbfErrorCode.NotADbfFile,
-                        $"Row {line}, column '{plan.Columns[c].CsvName}': '{text}' doesn't fit {plan.Columns[c].Field.Name} ({plan.Columns[c].Reason}).",
+                    throw new DbfException(DbfErrorCode.InvalidValue,
+                        $"Row {record.Line}, column '{plan.Columns[c].CsvName}': '{text}' doesn't fit {plan.Columns[c].Field.Name} ({plan.Columns[c].Reason}).",
                         "Fix the value in the CSV, or force the column's type with DbfImportOptions.Overrides.", csvPath, ex);
                 }
             }
@@ -141,9 +215,10 @@ public static class DbfImport
         public bool LeadingZero, Negative;
         public int MaxWhole, MaxDecimals, MaxBytes;
 
-        public void Add(string raw, Encoding encoding, DbfImportOptions options)
+        public void Add(string raw, Encoding strict, DbfImportOptions options)
         {
-            MaxBytes = Math.Max(MaxBytes, encoding.GetByteCount(raw.TrimEnd()));
+            // Text is stored as written (only trailing spaces go, as the field pads with spaces anyway).
+            MaxBytes = Math.Max(MaxBytes, strict.GetByteCount(raw.TrimEnd(' ')));
             var v = raw.Trim();
             if (v.Length == 0)
                 return;
@@ -152,13 +227,15 @@ public static class DbfImport
             CouldBeLogical &= IsWord(v, TrueWords) || IsWord(v, FalseWords);
             CouldBeDate &= ParseDate(v, options) is not null;
 
-            // Leading zeros (ZIP codes, account numbers) are text, not numbers.
-            var unsigned = v.TrimStart('-');
+            // One optional sign, then the digits. Leading zeros (ZIP codes, account numbers like
+            // +0007) mean an identifier, which stays text.
+            var unsigned = v[0] is '+' or '-' ? v[1..] : v;
             LeadingZero |= unsigned.Length > 1 && unsigned[0] == '0' && !unsigned.StartsWith("0.", StringComparison.Ordinal);
-            if (CouldBeNumber && decimal.TryParse(v, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out _))
+            if (CouldBeNumber && unsigned.Length > 0 && char.IsAsciiDigit(unsigned[0])
+                && decimal.TryParse(v, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out _))
             {
-                Negative |= v.StartsWith('-');
-                MaxDecimals = Math.Max(MaxDecimals, v.Contains('.') ? v.Length - v.IndexOf('.') - 1 : 0);
+                Negative |= v[0] == '-';
+                MaxDecimals = Math.Max(MaxDecimals, unsigned.Contains('.') ? unsigned.Length - unsigned.IndexOf('.') - 1 : 0);
                 MaxWhole = Math.Max(MaxWhole, unsigned.Split('.')[0].TrimStart('0').Length);
             }
             else
@@ -169,7 +246,7 @@ public static class DbfImport
     private static DbfImportPlan Shape(string csvPath, DbfImportOptions options)
     {
         var delimiter = options.Delimiter ?? DetectDelimiter(csvPath, options);
-        var encoding = DbfEncoding.For(options.LanguageDriver);
+        var strict = DbfEncoding.Strict(DbfEncoding.For(options.LanguageDriver));
         List<string>? header = null;
         ColumnStats[] stats = [];
         var rowCount = 0;
@@ -179,21 +256,33 @@ public static class DbfImport
         {
             if (header is null)
             {
-                header = record;
-                stats = record.Select(_ => new ColumnStats()).ToArray();
+                header = record.Fields;
+                stats = header.Select(_ => new ColumnStats()).ToArray();
                 continue;
             }
-            if (IsBlankLine(record))
+            if (record.IsBlankLine)
                 continue;
 
             rowCount++;
-            ragged |= record.Count > header.Count;
+            ragged |= record.Fields.Count > header.Count;
             for (var c = 0; c < stats.Length; c++)
-                stats[c].Add(c < record.Count ? record[c] : "", encoding, options);
+            {
+                var raw = c < record.Fields.Count ? record.Fields[c] : "";
+                try
+                {
+                    stats[c].Add(raw, strict, options);
+                }
+                catch (EncoderFallbackException ex)
+                {
+                    throw new DbfException(DbfErrorCode.InvalidValue,
+                        $"Row {record.Line}, column '{header[c]}': '{ex.CharUnknown}' can't be stored in the table's code page ({strict.WebName}).",
+                        "Pick a code page that has it with LanguageDriver (or --code-page), or change the text.", csvPath, ex);
+                }
+            }
         }
 
         if (header is null || header.All(string.IsNullOrWhiteSpace))
-            throw new DbfException(DbfErrorCode.NotADbfFile, "The CSV has no header row.",
+            throw new DbfException(DbfErrorCode.InvalidCsv, "The CSV has no header row.",
                 "The first line must name the columns, like Name,City,Balance.", csvPath);
 
         var warnings = new List<string>();
@@ -222,7 +311,7 @@ public static class DbfImport
     private static DbfImportColumn Infer(string csvName, string name, ColumnStats s)
     {
         if (s.NonEmpty == 0)
-            return new(csvName, DbfFieldDefinition.Character(name, 1), "always empty, kept as C(1)");
+            return new(csvName, DbfFieldDefinition.Character(name, Math.Max(1, s.MaxBytes)), "always empty, kept as text");
         if (s.CouldBeLogical)
             return new(csvName, DbfFieldDefinition.Logical(name), "only yes/no values");
         if (s.CouldBeDate)
@@ -244,6 +333,10 @@ public static class DbfImport
 
     private static object? Convert(string text, DbfFieldDefinition field, DbfImportOptions options)
     {
+        // Character and memo fields keep the text exactly (tabs, line breaks, inner spaces).
+        if (field.Type is 'C' or 'M')
+            return text.Length == 0 ? null : text.TrimEnd(' ');
+
         var value = text.Trim();
         if (value.Length == 0)
             return null;
@@ -253,13 +346,11 @@ public static class DbfImport
             'L' => IsWord(value, TrueWords) ? true : IsWord(value, FalseWords) ? false : throw new FormatException(),
             'D' => ParseDate(value, options) ?? throw new FormatException(),
             'N' or 'F' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture),
-            _ => text.TrimEnd(),
+            _ => value,
         };
     }
 
     private static bool IsWord(string value, string[] words) => words.Contains(value, StringComparer.OrdinalIgnoreCase);
-
-    private static bool IsBlankLine(List<string> record) => record.Count == 1 && record[0].Length == 0;
 
     private static DateOnly? ParseDate(string value, DbfImportOptions options)
     {
@@ -296,11 +387,20 @@ public static class DbfImport
 
     // ---- CSV, streamed --------------------------------------------------------------------
 
+    /// <summary>One CSV record, the line it started on, and whether it was a bare empty line (not "").</summary>
+    private sealed record CsvRecord(List<string> Fields, int Line, bool IsBlankLine);
+
     private static StreamReader OpenCsv(string path, DbfImportOptions options)
     {
+        Encoding encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+        if (options.CsvEncoding is { } chosen)
+        {
+            encoding = (Encoding)chosen.Clone();
+            encoding.DecoderFallback = DecoderFallback.ExceptionFallback;
+        }
         try
         {
-            return new StreamReader(path, options.CsvEncoding ?? new UTF8Encoding(false), detectEncodingFromByteOrderMarks: true);
+            return new StreamReader(path, encoding, detectEncodingFromByteOrderMarks: true);
         }
         catch (Exception ex) when (DbfException.Translate(ex, path, FileAccess.Read) is { } translated)
         {
@@ -308,26 +408,54 @@ public static class DbfImport
         }
     }
 
+    // Counts candidate separators outside quotes, across the whole first record (which may span lines).
     private static char DetectDelimiter(string path, DbfImportOptions options)
     {
-        using var reader = OpenCsv(path, options);
-        var firstLine = reader.ReadLine() ?? "";
         char[] candidates = [',', ';', '\t', '|'];
-        return candidates.MaxBy(c => firstLine.Count(ch => ch == c));
+        var counts = new int[candidates.Length];
+        using var reader = OpenCsv(path, options);
+        var quoted = false;
+        int next;
+        while ((next = Read(reader, path)) >= 0)
+        {
+            var c = (char)next;
+            if (c == '"')
+                quoted = !quoted;
+            else if (!quoted && c is '\r' or '\n')
+                break;
+            else if (!quoted && Array.IndexOf(candidates, c) is var at and >= 0)
+                counts[at]++;
+        }
+        var best = Array.IndexOf(counts, counts.Max());
+        return candidates[best];
     }
 
     // RFC 4180, one record at a time: quoted fields may hold delimiters, newlines and doubled quotes.
-    private static IEnumerable<List<string>> ReadRecords(string path, DbfImportOptions options, char delimiter)
+    // Hard limits, so one hostile line can't exhaust memory: dBASE tables hold at most 255 fields,
+    // and no field can be bigger than the largest memo Thunder.Dbf will store.
+    private const int MaxColumns = 1_024;
+
+    private static IEnumerable<CsvRecord> ReadRecords(string path, DbfImportOptions options, char delimiter)
     {
+        var maxFieldChars = DbfMemoFile.MaxMemoBytes;
         using var reader = OpenCsv(path, options);
         var record = new List<string>();
         var field = new StringBuilder();
         var quoted = false;
+        var started = false;       // anything (even "") seen in this record
         var line = 1;
+        var recordLine = 1;
 
         int next;
-        while ((next = reader.Read()) >= 0)
+        while ((next = Read(reader, path)) >= 0)
         {
+            if (field.Length > maxFieldChars)
+                throw new DbfException(DbfErrorCode.InvalidCsv, $"A value starting on line {recordLine} is longer than {maxFieldChars:N0} characters.",
+                    "Check for a missing closing quote, or split the value; no field can hold that much.", path);
+            if (record.Count > MaxColumns)
+                throw new DbfException(DbfErrorCode.InvalidCsv, $"Line {recordLine} has more than {MaxColumns:N0} values.",
+                    "Check the delimiter, or set DbfImportOptions.Delimiter; dBASE tables hold at most 255 fields.", path);
+
             var c = (char)next;
             if (quoted)
             {
@@ -346,33 +474,54 @@ public static class DbfImport
                 }
             }
             else if (c == '"' && field.Length == 0)
+            {
                 quoted = true;
+                started = true;
+            }
             else if (c == delimiter)
             {
                 record.Add(field.ToString());
                 field.Clear();
+                started = true;
             }
             else if (c is '\r' or '\n')
             {
                 if (c == '\r' && reader.Peek() == '\n')
                     reader.Read();
-                line++;
                 record.Add(field.ToString());
                 field.Clear();
-                yield return record;
+                yield return new CsvRecord(record, recordLine, IsBlankLine: !started && record.Count == 1 && record[0].Length == 0);
                 record = [];
+                started = false;
+                recordLine = ++line;
             }
             else
+            {
                 field.Append(c);
+                started = true;
+            }
         }
 
         if (quoted)
-            throw new DbfException(DbfErrorCode.NotADbfFile, $"A quoted value starting before line {line} never closes.",
+            throw new DbfException(DbfErrorCode.InvalidCsv, $"A quoted value starting on line {recordLine} never closes.",
                 "Check for a missing closing quote (\") in the CSV.", path);
-        if (field.Length > 0 || record.Count > 0)
+        if (started)
         {
             record.Add(field.ToString());
-            yield return record;
+            yield return new CsvRecord(record, recordLine, IsBlankLine: false);
+        }
+    }
+
+    private static int Read(StreamReader reader, string path)
+    {
+        try
+        {
+            return reader.Read();
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new DbfException(DbfErrorCode.InvalidCsv, $"The CSV has bytes that aren't valid {reader.CurrentEncoding.WebName}.",
+                "Save the CSV as UTF-8, or set DbfImportOptions.CsvEncoding to the encoding it was saved in (for example Windows-1252).", path, ex);
         }
     }
 }

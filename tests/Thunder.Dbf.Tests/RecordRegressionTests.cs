@@ -4,15 +4,15 @@
 //    |  '-'  |     down so it can't sneak back in.
 //    |_______|
 //
-// Each test reproduces a finding from the Codex review of 6a8d5aa, using the
-// failing input Codex described wherever it gave one.
+// Each test reproduces a finding from an independent review of the record and memo
+// code, using the failing input the reviewer described wherever there was one.
 
 using System.Buffers.Binary;
 using System.Text;
 
 namespace Thunder.Dbf.Tests;
 
-public class CodexReviewTests
+public class RecordRegressionTests
 {
     private static readonly string FixtureRoot = FindFixtureRoot();
 
@@ -265,7 +265,7 @@ public class CodexReviewTests
     [InlineData(0x96, 10007)]
     [InlineData(0x97, 10029)]
     [InlineData(0x98, 10006)]
-    public void Language_drivers_Codex_found_missing_now_map(byte driver, int codePage)
+    public void Language_drivers_once_missing_now_map(byte driver, int codePage)
     {
         Assert.Equal(codePage, DbfEncoding.CodePageFor(driver));
     }

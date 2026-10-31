@@ -46,6 +46,14 @@ public static class DbfEncoding
     public static Encoding GetEncoding(int codePage) =>
         codePage == MazoviaEncoding.MazoviaCodePage ? MazoviaEncoding.Instance : Encoding.GetEncoding(codePage);
 
+    /// <summary>A copy of <paramref name="encoding"/> that throws on characters it can't encode, instead of writing '?'.</summary>
+    public static Encoding Strict(Encoding encoding)
+    {
+        var strict = (Encoding)encoding.Clone();
+        strict.EncoderFallback = EncoderFallback.ExceptionFallback;
+        return strict;
+    }
+
     public static Encoding GetEncodingByName(string name) =>
         name.Equals("mazovia", StringComparison.OrdinalIgnoreCase) ? MazoviaEncoding.Instance : Encoding.GetEncoding(name);
 
@@ -58,7 +66,21 @@ public static class DbfEncoding
         if (!File.Exists(path))
             return null;
 
-        var name = File.ReadAllText(path).Trim();
+        string name;
+        try
+        {
+            // An encoding label is a few bytes; read no more than a small cap of a hostile sidecar.
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var buffer = new byte[64];
+            var read = file.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            if (read == buffer.Length && file.Length > buffer.Length)
+                return null;
+            name = Encoding.ASCII.GetString(buffer, 0, read).Trim();
+        }
+        catch (Exception ex) when (DbfException.Translate(ex, path, FileAccess.Read) is { } translated)
+        {
+            throw translated;
+        }
         if (name.StartsWith("ANSI ", StringComparison.OrdinalIgnoreCase))
             name = name[5..];
 

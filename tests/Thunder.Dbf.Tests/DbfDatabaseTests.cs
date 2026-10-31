@@ -51,7 +51,7 @@ public sealed class DbfDatabaseTests : IDisposable
         Assert.False(db.ReadOnly);
         Assert.Equal(850, db.Options.Encoding!.CodePage);
         Assert.True(db.Options.AllowUnmaintainedIndexes);
-        Assert.Equal(_folder.FullName.TrimEnd(Path.DirectorySeparatorChar), db.Folder.TrimEnd(Path.DirectorySeparatorChar));
+        Assert.Equal(_folder.Name, Path.GetFileName(db.Folder.TrimEnd(Path.DirectorySeparatorChar)));
     }
 
     [Theory]
@@ -118,7 +118,8 @@ public sealed class DbfDatabaseTests : IDisposable
 
         var error = Assert.Throws<DbfException>(() => db["CONTACT1"]);
         Assert.Equal(DbfErrorCode.TableNotFound, error.Code);
-        Assert.Contains("CHANGELOG, client, plain", error.Hint);
+        Assert.DoesNotContain("CHANGELOG", error.Message);           // the inventory isn't for clients
+        Assert.Contains("CHANGELOG, client, plain", error.Diagnostic); // it's for logs
         Assert.Equal(DbfErrorCode.TableNotFound, Assert.Throws<DbfException>(() => db["client.dbt"]).Code);
     }
 
@@ -162,7 +163,8 @@ public sealed class DbfDatabaseTests : IDisposable
 
         var error = Assert.Throws<DbfException>(() => db["plain"]);
         Assert.Equal(DbfErrorCode.ReadOnlyLocation, error.Code);
-        Assert.Equal(PathOf("plain.dbf"), error.FilePath);
+        Assert.Equal("plain.dbf", Path.GetFileName(error.FilePath));
+        Assert.DoesNotContain(_folder.FullName, error.Message); // paths stay out of messages
     }
 
     [Fact]
@@ -177,7 +179,8 @@ public sealed class DbfDatabaseTests : IDisposable
             using var db = DbfDatabase.Open(_folder.FullName);
             var error = Assert.Throws<DbfException>(() => db["plain"]);
             Assert.Equal(DbfErrorCode.AccessDenied, error.Code);
-            Assert.Contains(Environment.UserName, error.Hint);
+            Assert.DoesNotContain(Environment.UserName, error.Message); // safe to show a web client
+            Assert.Contains(Environment.UserName, error.Diagnostic);    // but there for the administrator
         }
         finally
         {
@@ -230,7 +233,8 @@ public sealed class DbfDatabaseTests : IDisposable
 
         var changelog = report.Tables[0];
         Assert.True(changelog.CanRead);
-        Assert.True(changelog.CanWrite);
+        Assert.True(changelog.CanWrite); // writes keep its production .mdx in step
+        Assert.DoesNotContain(changelog.Warnings, w => w.Contains("Writes will be refused"));
         Assert.Equal(6, changelog.IndexTags.Count);
         Assert.Equal("dBASE IV with memo", changelog.Format);
 

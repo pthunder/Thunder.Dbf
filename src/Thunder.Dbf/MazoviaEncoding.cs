@@ -54,7 +54,14 @@ public sealed class MazoviaEncoding : Encoding
         for (var i = 0; i < charCount; i++)
         {
             var c = chars[charIndex + i];
-            bytes[byteIndex + i] = c < 0x80 ? (byte)c : Reverse.TryGetValue(c, out var b) ? b : (byte)'?';
+            if (c < 0x80)
+                bytes[byteIndex + i] = (byte)c;
+            else if (Reverse.TryGetValue(c, out var b))
+                bytes[byteIndex + i] = b;
+            else if (EncoderFallback is EncoderExceptionFallback)
+                throw new EncoderFallbackException($"'{c}' (U+{(int)c:X4}) has no Mazovia code.");
+            else
+                bytes[byteIndex + i] = (byte)'?';
         }
         return charCount;
     }

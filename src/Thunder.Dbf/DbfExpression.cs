@@ -38,6 +38,38 @@ public sealed class DbfExpression
 
     public string Text { get; }
 
+    /// <summary>
+    /// The field names an expression refers to, in any case, without evaluating it. Used to tell
+    /// which fields an index reveals, and which table an index file belongs to.
+    /// </summary>
+    public static IReadOnlyCollection<string> FieldNamesIn(string text)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Collect(Parse(text)._root, names);
+        return names;
+
+        static void Collect(Node node, HashSet<string> names)
+        {
+            switch (node)
+            {
+                case FieldRef field:
+                    names.Add(field.Name);
+                    break;
+                case Unary unary:
+                    Collect(unary.Operand, names);
+                    break;
+                case Binary binary:
+                    Collect(binary.Left, names);
+                    Collect(binary.Right, names);
+                    break;
+                case Call call:
+                    foreach (var argument in call.Arguments)
+                        Collect(argument, names);
+                    break;
+            }
+        }
+    }
+
     public static DbfExpression Parse(string text)
     {
         var parser = new Parser(text);
@@ -101,6 +133,19 @@ public sealed class DbfExpression
 
     private static string TrimSpacesEnd(string s) => s.TrimEnd(' ');
 
+    /// <summary>
+    /// The longest string an expression may build. dBASE's own strings stop at 254 characters (memos
+    /// aside); this generous cap only exists so a hostile expression or value (SPACE(2147483647))
+    /// can't make the process allocate gigabytes.
+    /// </summary>
+    internal const int MaxStringLength = 1 << 20;
+
+    private static string Bounded(string s, string where) =>
+        s.Length <= MaxStringLength ? s : throw new InvalidOperationException($"{where} would build a string over {MaxStringLength:N0} characters.");
+
+    private static int BoundedLength(decimal n, string where) =>
+        n is >= 0 and <= MaxStringLength ? (int)n : throw new InvalidOperationException($"{where} asks for {n} characters; the limit is {MaxStringLength:N0}.");
+
     // ---- syntax tree ----------------------------------------------------------------------
 
     private abstract class Node
@@ -115,6 +160,8 @@ public sealed class DbfExpression
 
     private sealed class FieldRef(string name) : Node
     {
+        public string Name => name;
+
         public override object? Evaluate(DbfRecord record)
         {
             var fields = record.Header.Fields;
@@ -124,9 +171,10 @@ public sealed class DbfExpression
                 if (!string.Equals(field.Name, name, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var value = record[i];
-                if (value is null && field.IsNullable)
+                // Only a set null bit is .NULL.; a nullable field that's merely blank is still blank.
+                if (record.IsNull(i))
                     return NullValue.Instance;
+                var value = record[i];
 
                 switch (field.Type)
                 {
@@ -159,6 +207,8 @@ public sealed class DbfExpression
 
     private sealed class Unary(string op, Node operand) : Node
     {
+        public Node Operand => operand;
+
         public override object? Evaluate(DbfRecord record)
         {
             var value = operand.Evaluate(record);
@@ -175,13 +225,20 @@ public sealed class DbfExpression
 
     private sealed class Binary(string op, Node left, Node right) : Node
     {
+        public Node Left => left;
+        public Node Right => right;
+
         public override object? Evaluate(DbfRecord record)
         {
             if (op is "AND" or "OR")
             {
+                // Short-circuit like dBASE: a decisive left side means the right is never evaluated,
+                // so guards such as .F. .AND. (1 / 0 = 0) work.
                 var l = left.Evaluate(record);
-                var r = right.Evaluate(record);
                 bool? lb = l is NullValue ? null : Bool(l, $".{op}.");
+                if ((op == "AND" && lb == false) || (op == "OR" && lb == true))
+                    return lb.Value;
+                var r = right.Evaluate(record);
                 bool? rb = r is NullValue ? null : Bool(r, $".{op}.");
                 // Three-valued logic, as Visual FoxPro does with .NULL.
                 object? result = op == "AND"
@@ -198,7 +255,7 @@ public sealed class DbfExpression
             switch (op)
             {
                 case "+" when a is string s1:
-                    return s1 + Str(b, "string +");
+                    return Bounded(s1 + Str(b, "string +"), "string +");
                 case "+" when a is DateOnly d && IsNumber(b):
                     return d.AddDays((int)Dec(b, "date +"));
                 case "+" when IsNumber(a) && IsNumber(b):
@@ -211,7 +268,7 @@ public sealed class DbfExpression
                     // dBASE's "-" on strings moves the left side's trailing spaces to the end.
                     var s2 = Str(b, "string -");
                     var trimmed = TrimSpacesEnd(s1);
-                    return trimmed + s2 + new string(' ', s1.Length - trimmed.Length);
+                    return Bounded(trimmed + s2 + new string(' ', s1.Length - trimmed.Length), "string -");
                 }
                 case "-" when a is DateOnly d1 && b is DateOnly d2:
                     return (decimal)(d1.DayNumber - d2.DayNumber);
@@ -279,13 +336,22 @@ public sealed class DbfExpression
 
     private sealed class Call(string name, Node[] args) : Node
     {
+        public IReadOnlyList<Node> Arguments => args;
+
         public override object? Evaluate(DbfRecord record)
         {
+            // IIF evaluates only the branch it picks, so the other can't fail.
+            if (name == "IIF")
+            {
+                var condition = args[0].Evaluate(record);
+                return condition is NullValue || !Bool(condition, "IIF()") ? args[2].Evaluate(record) : args[1].Evaluate(record);
+            }
+
             var values = new object?[args.Length];
             for (var i = 0; i < args.Length; i++)
             {
                 values[i] = args[i].Evaluate(record);
-                if (values[i] is NullValue && name != "IIF")
+                if (values[i] is NullValue)
                     return NullValue.Instance;
             }
 
@@ -301,7 +367,7 @@ public sealed class DbfExpression
                 case "TRIM" or "RTRIM": return S(0).TrimEnd(' ');
                 case "LTRIM": return S(0).TrimStart(' ');
                 case "ALLTRIM": return S(0).Trim(' ');
-                case "SPACE": return new string(' ', (int)N(0));
+                case "SPACE": return new string(' ', BoundedLength(N(0), "SPACE()"));
                 case "LEN": return (decimal)S(0).Length;
                 case "LEFT": return Substring(S(0), 1, (int)N(1));
                 case "RIGHT":
@@ -311,11 +377,10 @@ public sealed class DbfExpression
                     return s[^n..];
                 }
                 case "SUBSTR": return Substring(S(0), (int)N(1), Count() > 2 ? (int)N(2) : int.MaxValue);
-                case "STR": return FormatStr(values[0], Count() > 1 ? (int)N(1) : 10, Count() > 2 ? (int)N(2) : 0);
+                case "STR": return FormatStr(values[0], Count() > 1 ? BoundedLength(N(1), "STR()") : 10, Count() > 2 ? Math.Clamp((int)N(2), 0, 18) : 0);
                 case "VAL": return Val(S(0));
                 case "ABS": return values[0] is double ad ? Math.Abs(ad) : Math.Abs(N(0));
                 case "INT": return values[0] is double id ? Math.Truncate(id) : decimal.Truncate(N(0));
-                case "IIF": return values[0] is NullValue ? values[2] : Bool(values[0], "IIF()") ? values[1] : values[2];
                 case "DTOS": return D(0) is { } d ? d.ToString("yyyyMMdd", CultureInfo.InvariantCulture) : "        ";
                 case "YEAR": return D(0) is { } y ? (decimal)y.Year : 0m;
                 case "MONTH": return D(0) is { } m ? (decimal)m.Month : 0m;

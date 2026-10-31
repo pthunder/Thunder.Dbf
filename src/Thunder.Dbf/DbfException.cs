@@ -50,25 +50,75 @@ public enum DbfErrorCode
 
     /// <summary>The table or database was opened read-only.</summary>
     ReadOnlyConnection,
+
+    /// <summary>Another program holds a lock on the record being changed.</summary>
+    RecordLocked,
+
+    /// <summary>Another program holds a lock on the whole table (or is adding records).</summary>
+    TableLocked,
+
+    /// <summary>The platform or file system can't take byte-range locks, so shared writes aren't safe.</summary>
+    LockingUnsupported,
+
+    /// <summary>A CSV (or other input) is malformed: no header, an unclosed quote, undecodable bytes.</summary>
+    InvalidCsv,
+
+    /// <summary>A SQL statement uses something Thunder.Dbf's small SQL dialect doesn't support, or is malformed.</summary>
+    UnsupportedSql,
+
+    /// <summary>A value can't be stored in its field: too wide, wrong type, or a character the code page lacks.</summary>
+    InvalidValue,
+
+    /// <summary>A command ran longer than its time limit.</summary>
+    Timeout,
+
+    /// <summary>A query would need more memory than the library allows it (for example sorting a huge result).</summary>
+    QueryTooLarge,
 }
 
 /// <summary>
-/// A failure Thunder.Dbf can explain: <see cref="Code"/> says what kind, <see cref="FilePath"/> says
-/// which file, and <see cref="Hint"/> says what to do about it.
+/// A failure Thunder.Dbf can explain: <see cref="Code"/> says what kind and <see cref="Hint"/> says what
+/// to do about it.
 /// </summary>
+/// <remarks>
+/// <see cref="Exception.Message"/> and <see cref="Hint"/> are safe to show to anyone: they never contain
+/// file paths, account names or lists of tables. Those details live in <see cref="FilePath"/> and
+/// <see cref="Diagnostic"/>, for logs and administrators only.
+/// </remarks>
 public sealed class DbfException : IOException
 {
-    public DbfException(DbfErrorCode code, string message, string hint, string? filePath = null, Exception? inner = null)
-        : base(Compose(message, hint, filePath), inner)
+    public DbfException(DbfErrorCode code, string message, string hint, string? filePath = null, Exception? inner = null, string? diagnostic = null)
+        : base($"{message} {hint}", inner)
     {
         Code = code;
         Hint = hint;
         FilePath = filePath;
+        DiagnosticDetail = diagnostic;
     }
 
     public DbfErrorCode Code { get; }
     public string Hint { get; }
+
+    /// <summary>The file involved. Diagnostic only: don't send it to untrusted clients.</summary>
     public string? FilePath { get; }
+
+    private string? DiagnosticDetail { get; }
+
+    /// <summary>Everything known about the failure, including paths, account and inner errors. For logs only.</summary>
+    public string Diagnostic
+    {
+        get
+        {
+            var text = new System.Text.StringBuilder($"{Code}: {Message}");
+            if (FilePath is not null)
+                text.Append($" File: {FilePath}.");
+            if (DiagnosticDetail is not null)
+                text.Append($" {DiagnosticDetail}");
+            if (InnerException is not null)
+                text.Append($" Cause: {InnerException.GetType().Name}: {InnerException.Message}");
+            return text.ToString();
+        }
+    }
 
     /// <summary>True for refusals made to protect data or access rules, as opposed to missing or damaged files.</summary>
     public bool IsSecurityRelated => Code is DbfErrorCode.AccessDenied or DbfErrorCode.PathEscapesFolder
@@ -81,12 +131,13 @@ public sealed class DbfException : IOException
         DbfErrorCode.AccessDenied or DbfErrorCode.PathEscapesFolder or DbfErrorCode.EncryptedTable => 403,
         DbfErrorCode.FileInUse or DbfErrorCode.TableAlreadyExists or DbfErrorCode.IndexWouldGoStale or DbfErrorCode.IncompleteTransaction
             or DbfErrorCode.ReadOnlyConnection or DbfErrorCode.ReadOnlyLocation => 409,
-        DbfErrorCode.InvalidConnectionString => 400,
+        DbfErrorCode.InvalidConnectionString or DbfErrorCode.InvalidCsv or DbfErrorCode.UnsupportedSql => 400,
+        DbfErrorCode.InvalidValue => 422,
+        DbfErrorCode.RecordLocked or DbfErrorCode.TableLocked => 423,
+        DbfErrorCode.QueryTooLarge => 413,
+        DbfErrorCode.Timeout => 504,
         _ => 500,
     };
-
-    private static string Compose(string message, string hint, string? filePath) =>
-        filePath is null ? $"{message} {hint}" : $"{message} ({filePath}) {hint}";
 
     // ---- translating operating-system failures ---------------------------------------------
 
@@ -129,9 +180,9 @@ public sealed class DbfException : IOException
             case UnauthorizedAccessException:
                 return new DbfException(DbfErrorCode.AccessDenied,
                     writing ? "The operating system refused write access." : "The operating system refused read access.",
-                    $"Grant the account running this program ({Environment.UserName}) {(writing ? "modify" : "read")} permission on the file " +
+                    $"Grant the account running this program {(writing ? "modify" : "read")} permission on the file " +
                     "and, for a network share, on the share itself. On macOS, also check Files and Folders or Full Disk Access in Privacy & Security.",
-                    path, ex);
+                    path, ex, diagnostic: $"Account: {Environment.UserName}.");
 
             case IOException io when io.HResult is SharingViolation or LockViolation || io.Message.Contains("being used by another process", StringComparison.OrdinalIgnoreCase):
                 return new DbfException(DbfErrorCode.FileInUse,

@@ -1,3 +1,7 @@
+//    +---+---------+---------+          ProjectThunder :: Thunder.Dbf
+//    | * | Smith   | 1234.50 |          One row, decoded: values by position or name,
+//    +---+---------+---------+          its record number, and whether it's deleted.
+
 namespace Thunder.Dbf;
 
 /// <summary>One row read from a DBF table.</summary>
@@ -19,6 +23,12 @@ public sealed class DbfRecord
 
     /// <summary>The table's text encoding, so expressions can measure character fields in bytes like dBASE does.</summary>
     internal System.Text.Encoding Encoding { get; }
+
+    /// <summary>Which values are Visual FoxPro .NULL. (null bit set), as opposed to blank. Null when none are.</summary>
+    internal bool[]? NullFlags { get; init; }
+
+    /// <summary>True when field <paramref name="fieldIndex"/> is a real Visual FoxPro .NULL., not just blank.</summary>
+    public bool IsNull(int fieldIndex) => NullFlags is { } flags && flags[fieldIndex];
 
     /// <summary>Zero-based position in the table.</summary>
     public int Index { get; }

@@ -84,13 +84,12 @@ internal static class DbfValueCodec
                 var text = Ascii(raw);
                 if (text.Length == 0 || text.All(c => c == '*'))
                     return null;
-                // Scientific values outside decimal's range (FoxPro allows them) come back as double.
-                // decimal.TryParse quietly turns 1E-100 into 0, so check the double too.
-                var parsedDecimal = decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number);
-                var parsedDouble = double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble);
-                if (parsedDecimal && !(number == 0 && parsedDouble && asDouble != 0))
+                // decimal when it holds the value exactly; otherwise double. decimal.TryParse rounds
+                // quietly (1.5E-28 becomes 2E-28, 1E-100 becomes 0), so compare digits, not success.
+                if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                    && SameDigits(text, number.ToString(CultureInfo.InvariantCulture)))
                     return number;
-                if (parsedDouble)
+                if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var asDouble))
                     return asDouble;
                 throw new FormatException($"Field {field.Name} holds '{text}', which isn't a number.");
             }
@@ -164,10 +163,10 @@ internal static class DbfValueCodec
             case 'C':
             {
                 var text = value as string ?? Convert.ToString(value, CultureInfo.InvariantCulture) ?? "";
-                var byteCount = encoding.GetByteCount(text);
-                if (byteCount > target.Length)
-                    throw new ArgumentException($"Field {field.Name} holds {target.Length} bytes; '{text}' needs {byteCount}.");
-                encoding.GetBytes(text, target);
+                var encoded = StrictBytes(field, text, encoding);
+                if (encoded.Length > target.Length)
+                    throw new ArgumentException($"Field {field.Name} holds {target.Length} bytes; '{text}' needs {encoded.Length}.");
+                encoded.CopyTo(target);
                 break;
             }
 
@@ -241,6 +240,40 @@ internal static class DbfValueCodec
                 BinaryPrimitives.WriteInt32LittleEndian(target, DateOnly.FromDateTime(moment).DayNumber + JulianDayOfDayNumberZero);
                 BinaryPrimitives.WriteInt32LittleEndian(target[4..], (int)(moment.TimeOfDay.Ticks / TimeSpan.TicksPerMillisecond));
                 break;
+        }
+    }
+
+    // True when two numeric strings hold the same value: same sign, significant digits and magnitude.
+    private static bool SameDigits(string a, string b) => Normalize(a) == Normalize(b);
+
+    private static (bool Negative, string Digits, int Exponent) Normalize(string text)
+    {
+        text = text.Trim();
+        var negative = text.StartsWith('-');
+        text = text.TrimStart('-', '+');
+        var mark = text.IndexOfAny(['E', 'e']);
+        var power = mark < 0 ? 0 : int.Parse(text[(mark + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        var mantissa = mark < 0 ? text : text[..mark];
+        var point = mantissa.IndexOf('.');
+        var digits = mantissa.Replace(".", "", StringComparison.Ordinal);
+        var leading = digits.Length - digits.TrimStart('0').Length;
+        var significant = digits[leading..].TrimEnd('0');
+        if (significant.Length == 0)
+            return (false, "", 0);
+        return (negative, significant, (point < 0 ? mantissa.Length : point) + power - leading);
+    }
+
+    /// <summary>Encodes text, turning "this code page has no such character" into a clear error.</summary>
+    public static byte[] StrictBytes(DbfField field, string text, Encoding encoding)
+    {
+        try
+        {
+            return encoding.GetBytes(text);
+        }
+        catch (EncoderFallbackException ex)
+        {
+            throw new ArgumentException($"Field {field.Name} can't store '{text}': {encoding.WebName} has no code for '{ex.CharUnknown}'. " +
+                "Open the table with an encoding that has it, or change the text.", ex);
         }
     }
 

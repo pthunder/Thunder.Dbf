@@ -27,6 +27,9 @@ public sealed record DbfDatabaseOptions
 
     public bool IgnoreMissingMemo { get; init; }
     public bool AllowUnmaintainedIndexes { get; init; }
+
+    /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
+    public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
 
 /// <summary>A folder of DBF tables, opened as one database.</summary>
@@ -67,8 +70,8 @@ public sealed class DbfDatabase : IDisposable
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
         {
-            throw new DbfException(DbfErrorCode.InvalidConnectionString, $"'{folder}' isn't a valid folder path.",
-                "Check for stray quotes or characters the file system doesn't allow.", inner: ex);
+            throw new DbfException(DbfErrorCode.InvalidConnectionString, "The folder path isn't valid.",
+                "Check for stray quotes or characters the file system doesn't allow.", inner: ex, diagnostic: $"Path: {folder}");
         }
 
         if (!Directory.Exists(fullPath))
@@ -82,10 +85,33 @@ public sealed class DbfDatabase : IDisposable
         catch (UnauthorizedAccessException ex)
         {
             throw new DbfException(DbfErrorCode.AccessDenied, "The operating system refused to list the folder.",
-                $"Grant the account running this program ({Environment.UserName}) list and read permission on the folder.", fullPath, ex);
+                "Grant the account running this program list and read permission on the folder.", fullPath, ex,
+                diagnostic: $"Account: {Environment.UserName}.");
         }
 
-        return new DbfDatabase(fullPath, parsed);
+        return new DbfDatabase(RealPath(fullPath), parsed);
+    }
+
+    /// <summary>
+    /// The folder with every symbolic link in its path resolved, so containment is judged against
+    /// the real directory (macOS's /var is really /private/var, for example).
+    /// </summary>
+    private static string RealPath(string folder)
+    {
+        var resolved = new DirectoryInfo(folder);
+        var parts = new Stack<string>();
+        for (var dir = resolved; dir is not null; dir = dir.Parent)
+            parts.Push(dir.Name);
+
+        var current = parts.Pop(); // the root
+        while (parts.Count > 0)
+        {
+            current = Path.Combine(current, parts.Pop());
+            var info = new DirectoryInfo(current);
+            if (info.LinkTarget is not null)
+                current = info.ResolveLinkTarget(returnFinalTarget: true)!.FullName;
+        }
+        return current;
     }
 
     /// <summary>Every table in the folder, by name without the extension.</summary>
@@ -163,14 +189,16 @@ public sealed class DbfDatabase : IDisposable
 
         if (path is null)
         {
+            // The list of tables is useful to an administrator and to an attacker, so it's diagnostic only.
             var available = TableNames;
-            var listed = available.Count == 0 ? "The folder has no .dbf tables." : $"Tables here: {string.Join(", ", available.Take(12))}{(available.Count > 12 ? ", ..." : "")}.";
-            throw new DbfException(DbfErrorCode.TableNotFound, $"There's no table called '{wanted}'.", listed, Folder);
+            throw new DbfException(DbfErrorCode.TableNotFound, $"There's no table called '{wanted}'.",
+                "Check the spelling; TableNames lists the tables in the folder.", Folder,
+                diagnostic: available.Count == 0 ? "The folder has no .dbf tables." : $"Tables here: {string.Join(", ", available)}.");
         }
 
-        EnsureStaysInFolder(path);
+        EnsureNotLink(path);
         foreach (var companion in Companions(path))
-            EnsureStaysInFolder(companion);
+            EnsureNotLink(companion);
         return path;
     }
 
@@ -182,18 +210,24 @@ public sealed class DbfDatabase : IDisposable
             && CompanionExtensions.Contains(Path.GetExtension(p), StringComparer.OrdinalIgnoreCase));
     }
 
-    private void EnsureStaysInFolder(string path)
+    // Tables are direct children of the real folder (they're found by listing it), so the only way
+    // out is a link. Links are refused outright rather than followed and judged: a link's target can
+    // pass through further links, and checking a target is a race against whoever can change it.
+    // See SECURITY.md for what this does and doesn't protect against.
+    internal static void EnsureNotLink(string path)
     {
-        var target = new FileInfo(path).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? path;
-        var folder = Folder.EndsWith(Path.DirectorySeparatorChar) ? Folder : Folder + Path.DirectorySeparatorChar;
-        var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        if (!Path.GetFullPath(target).StartsWith(folder, comparison))
-            throw new DbfException(DbfErrorCode.PathEscapesFolder, $"'{Path.GetFileName(path)}' is a link to a file outside the data folder.",
-                "Replace the link with the real file, or connect to the folder the link points into.", path);
+        if (new FileInfo(path).LinkTarget is not null)
+            throw new DbfException(DbfErrorCode.PathEscapesFolder, $"'{Path.GetFileName(path)}' is a link, and links aren't followed.",
+                "Replace the link with the real file, or connect to the folder that holds the real file.", path);
     }
 
-    private DbfTable OpenTableAt(string path) =>
-        DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes);
+    private DbfTable OpenTableAt(string path)
+    {
+        var table = DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes);
+        table.RefuseLinks = true;
+        table.LockScheme = Options.LockScheme;
+        return table;
+    }
 
     // ---- the handshake --------------------------------------------------------------------
 
@@ -206,6 +240,7 @@ public sealed class DbfDatabase : IDisposable
         IReadOnlyList<string> tags = [];
         var canRead = false;
         var canWrite = false;
+        var indexDamaged = false;
 
         try
         {
@@ -223,6 +258,8 @@ public sealed class DbfDatabase : IDisposable
                 warnings.Add($"The table doesn't record its code page (byte 29 is 0x{table.Header.LanguageDriver:X2}), so text is read as {table.Encoding.WebName}. " +
                     "If accented letters look wrong, set DbfDatabaseOptions.Encoding.");
             }
+            if (!Options.ReadOnly && !DbfLocks.PlatformSupportsLocks)
+                warnings.Add("This platform can't take byte-range locks, so writes here aren't coordinated with other programs using the table. Run on Windows or Linux to share the files safely.");
             if (table.Header.HasIncompleteTransaction)
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
@@ -238,19 +275,36 @@ public sealed class DbfDatabase : IDisposable
                 }
                 catch (Exception ex) when (ex is InvalidDataException or DbfException)
                 {
-                    problems.Add(ex as DbfException ?? new DbfException(DbfErrorCode.IndexDamaged, $"The .mdx index can't be read: {ex.Message}",
+                    problems.Add(ex as DbfException ?? new DbfException(DbfErrorCode.IndexDamaged, "The .mdx index can't be read.",
                         "Rebuild it in the legacy app (REINDEX) or restore it from a backup.", Path.ChangeExtension(path, ".mdx"), ex));
+                    indexDamaged = true;
                 }
             }
             if (table.Header.HasStructuralCdx)
-                warnings.Add("The table has a FoxPro .cdx index. Reading it isn't supported yet, and writes are refused so it can't go stale.");
+                warnings.Add("The table has a FoxPro .cdx index. It can be read, but not yet kept up to date, so writes are refused unless AllowUnmaintainedIndexes is set.");
 
             if (!Options.ReadOnly)
-                canWrite = ProbeWrite(path, problems);
+            {
+                // Writable means the file system allows it AND the library would: no stale-index or
+                // unfinished-transaction refusal, and the memo and index files are writable too.
+                var mdx = table.Header.HasProductionMdx ? MdxIndex.FindFor(path) : null;
+                var blocker = DbfTable.WriteBlocker(table.Header, Options.AllowUnmaintainedIndexes,
+                    indexMaintained: mdx is not null && !indexDamaged, path, DbfTable.FindUnmaintainedIndexes(path, table.Header));
+                if (blocker is not null)
+                    warnings.Add($"Writes will be refused: {blocker.Message}");
+                canWrite = blocker is null && !indexDamaged && ProbeWrite(path, problems)
+                    && Companions(path).Where(p => Path.GetExtension(p).ToLowerInvariant() is ".dbt" or ".fpt" or ".mdx").All(p => ProbeWrite(p, problems));
+            }
         }
         catch (DbfException ex)
         {
             problems.Add(ex);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            problems.Add(DbfException.Translate(ex, Path.Combine(Folder, name), FileAccess.Read)
+                ?? new DbfException(DbfErrorCode.NotADbfFile, "The table or one of its companion files can't be read.",
+                    "Check the table's .dbt/.fpt, .mdx and .cpg files are intact and readable.", Path.Combine(Folder, name), ex));
         }
 
         return new DbfTableReport(name, canRead, canWrite, records, format, encoding, memo, tags, problems, warnings);
@@ -261,7 +315,8 @@ public sealed class DbfDatabase : IDisposable
     {
         try
         {
-            using var _ = DbfException.OpenFile(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            var probe = DbfException.OpenFile(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            DbfLocks.CloseWhenSafe(probe); // on Linux, a plain close would drop this process's locks on the file
             return true;
         }
         catch (DbfException ex)
@@ -325,12 +380,21 @@ public sealed class DbfDatabase : IDisposable
                 case "ignoremissingmemo":
                     options = options with { IgnoreMissingMemo = ParseBool(key, value) };
                     break;
+                case "lockscheme":
+                    options = options with
+                    {
+                        LockScheme = Enum.TryParse<DbfLockScheme>(value, ignoreCase: true, out var scheme)
+                            ? scheme
+                            : throw new DbfException(DbfErrorCode.InvalidConnectionString, $"'{value}' isn't a lock scheme.",
+                                "Use Auto, Dbase, Clipper or VisualFoxPro."),
+                    };
+                    break;
                 case "allowunmaintainedindexes":
                     options = options with { AllowUnmaintainedIndexes = ParseBool(key, value) };
                     break;
                 default:
                     throw new DbfException(DbfErrorCode.InvalidConnectionString, $"The connection string has an unknown setting '{key}'.",
-                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes.");
+                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Lock Scheme.");
             }
         }
 

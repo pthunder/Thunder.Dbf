@@ -139,6 +139,7 @@ internal abstract class DbfMemoFile : IDisposable
     /// <summary>Reads the memo stored at <paramref name="block"/>.</summary>
     public DbfMemo Read(int block)
     {
+        DbfTable.DiscardReadBuffer(Stream);
         long offset = (long)block * BlockSize;
         if (block < FirstDataBlock || offset >= Stream.Length)
             throw new InvalidDataException($"Memo block {block} is outside the memo file's data area.");
@@ -173,6 +174,8 @@ internal abstract class DbfMemoFile : IDisposable
         Stream.Flush();
         return block;
     }
+
+    public void FlushToDisk() => DbfTable.FlushToDisk(Stream);
 
     public void Dispose()
     {

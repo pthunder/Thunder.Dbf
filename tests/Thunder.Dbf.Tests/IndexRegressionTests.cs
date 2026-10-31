@@ -1,6 +1,6 @@
 //     _______
 //    | o   o |     ProjectThunder :: Thunder.Dbf tests
-//    |   ^   |     Round two: the Codex review of the MDX reader and the
+//    |   ^   |     Round two: an independent review of the MDX reader and the
 //    |  '-'  |     expression evaluator (ae4fd4a), one test per finding.
 //    |_______|
 
@@ -9,7 +9,7 @@ using System.Text;
 
 namespace Thunder.Dbf.Tests;
 
-public class MdxReviewTests
+public class IndexRegressionTests
 {
     private static readonly string FixtureRoot = FindFixtureRoot();
 

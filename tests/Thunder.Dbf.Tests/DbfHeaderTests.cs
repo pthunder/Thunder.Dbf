@@ -73,7 +73,7 @@ public class DbfHeaderTests
         Assert.Equal(1, header.Fields[0].Offset);
     }
 
-    // Regressions from the Codex audit of 730d7c0.
+    // Regressions from an independent review of the header reader.
 
     private static byte[] OneCharField() => BuildHeader(0x03, productionMdx: false, ("A", 'C', 1, 0));
 
@@ -169,5 +169,20 @@ public class DbfHeaderTests
     {
         var header = DbfHeader.Read(new MemoryStream(OneCharField()));
         Assert.IsNotType<List<DbfField>>(header.Fields);
+    }
+
+    [Theory]
+    [InlineData(0x30, 24, 2024)]   // Visual FoxPro after 2000: year modulo 100
+    [InlineData(0x30, 99, 1999)]
+    [InlineData(0xF5, 5, 2005)]    // FoxPro 2 too
+    [InlineData(0x03, 124, 2024)]  // dBASE: years since 1900
+    [InlineData(0x03, 85, 1985)]
+    public void Last_update_years_follow_each_dialect(byte version, byte storedYear, int expectedYear)
+    {
+        var bytes = OneCharField();
+        bytes[0] = version;
+        (bytes[1], bytes[2], bytes[3]) = (storedYear, 6, 15);
+
+        Assert.Equal(new DateOnly(expectedYear, 6, 15), DbfHeader.Read(new MemoryStream(bytes)).LastUpdate);
     }
 }

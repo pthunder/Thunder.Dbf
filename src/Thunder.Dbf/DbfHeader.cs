@@ -86,15 +86,24 @@ public sealed class DbfHeader
 
     public byte Version => _fixed[0];
 
+    /// <summary>Any FoxPro dialect: FoxBASE, FoxPro 2 or Visual FoxPro.</summary>
+    public bool IsFoxPro => IsVisualFoxPro || Version is 0xF5 or 0xFB;
+
     /// <summary>Visual FoxPro tables (0x30-0x32) use byte 28 as a flag mask and add a 263-byte backlink after the descriptors.</summary>
     public bool IsVisualFoxPro => Version is 0x30 or 0x31 or 0x32;
 
-    /// <summary>Date of last update, or null when the stored bytes aren't a real date. FoxPro's two-digit years can read as 1900s.</summary>
+    /// <summary>
+    /// Date of last update, or null when the stored bytes aren't a real date. dBASE stores years since
+    /// 1900 (2026 is 126); FoxPro after 2000 stored the year modulo 100 (2024 is 24), so for FoxPro
+    /// tables a year before 1980 is read as 20xx: there were no FoxPro tables in the 1970s.
+    /// </summary>
     public DateOnly? LastUpdate
     {
         get
         {
             var year = 1900 + _fixed[1];
+            if (IsFoxPro && year < 1980)
+                year += 100;
             return _fixed[2] is >= 1 and <= 12 && _fixed[3] >= 1 && _fixed[3] <= DateTime.DaysInMonth(year, _fixed[2])
                 ? new DateOnly(year, _fixed[2], _fixed[3])
                 : null;
@@ -224,6 +233,22 @@ public sealed class DbfHeader
         return new DbfHeader(fixedHeader, fields.AsReadOnly(), [.. autoIncrementNext]);
     }
 
+    /// <summary>Re-reads the fixed header and autoincrement counters, which other programs may have changed.</summary>
+    internal void Reload(Stream stream)
+    {
+        stream.Position = 0;
+        stream.ReadExactly(_fixed);
+        Span<byte> counter = stackalloc byte[4];
+        for (var i = 0; i < Fields.Count; i++)
+        {
+            if (!Fields[i].IsAutoIncrement)
+                continue;
+            stream.Position = FixedHeaderSize + FieldDescriptorSize * i + AutoIncrementNextOffset;
+            stream.ReadExactly(counter);
+            _autoIncrementNext[i] = BinaryPrimitives.ReadInt32LittleEndian(counter);
+        }
+    }
+
     /// <summary>Writes a field's autoincrement counter back into its descriptor.</summary>
     internal void WriteAutoIncrement(Stream stream, int fieldIndex)
     {
@@ -302,8 +327,9 @@ public sealed class DbfHeader
 
     private static void Validate(DbfFieldDefinition def)
     {
-        if (string.IsNullOrEmpty(def.Name) || def.Name.Length > MaxNameLength || !def.Name.All(char.IsAscii))
-            throw new ArgumentException($"Field name '{def.Name}' must be 1-{MaxNameLength} ASCII characters.");
+        if (string.IsNullOrEmpty(def.Name) || def.Name.Length > MaxNameLength || !char.IsAsciiLetter(def.Name[0])
+            || !def.Name.All(c => char.IsAsciiLetterOrDigit(c) || c == '_'))
+            throw new ArgumentException($"Field name '{def.Name}' must be 1-{MaxNameLength} letters, digits or underscores, starting with a letter.");
 
         var (min, max) = char.ToUpperInvariant(def.Type) switch
         {
@@ -318,6 +344,9 @@ public sealed class DbfHeader
         if (def.Length < min || def.Length > max)
             throw new ArgumentException($"Field '{def.Name}' of type {def.Type} must be {min}-{max} bytes long, not {def.Length}.");
 
+        // Only numbers have decimals; for character fields the byte means "wider than 255" to Clipper and FoxPro.
+        if (def.DecimalCount != 0 && char.ToUpperInvariant(def.Type) is not ('N' or 'F'))
+            throw new ArgumentException($"Field '{def.Name}' of type {def.Type} can't have decimals.");
         if (def.DecimalCount < 0 || (def.DecimalCount > 0 && def.DecimalCount >= def.Length - 1))
             throw new ArgumentException($"Field '{def.Name}' can't have {def.DecimalCount} decimals in {def.Length} bytes.");
     }

@@ -17,7 +17,7 @@ namespace Thunder.Dbf;
 public readonly record struct MdxEntry(object? Key, int RecordNumber);
 
 /// <summary>A dBASE IV multiple-index (.mdx) file. Read-only for now.</summary>
-public sealed class MdxIndex : IDisposable
+public sealed partial class MdxIndex : IDisposable
 {
     internal const int PageSize = 512;
     private const int TagTableOffset = 544;
@@ -49,10 +49,16 @@ public sealed class MdxIndex : IDisposable
     /// <summary>Opens an .mdx file. Character keys decode with <paramref name="encoding"/> (Windows-1252 by default).</summary>
     public static MdxIndex Open(string path, Encoding? encoding = null)
     {
-        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var stream = DbfException.OpenFile(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         try
         {
             return Open(stream, encoding);
+        }
+        catch (InvalidDataException ex)
+        {
+            stream.Dispose();
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"The .mdx index can't be read: {ex.Message}",
+                "Rebuild it in the legacy app (REINDEX) or restore it from a backup.", path, ex);
         }
         catch
         {
@@ -66,14 +72,32 @@ public sealed class MdxIndex : IDisposable
         if (!stream.CanSeek)
             throw new ArgumentException("MDX files need a seekable stream.", nameof(stream));
 
-        var header = new byte[HeaderAreaSize];
-        stream.Position = 0;
-        if (stream.ReadAtLeast(header.AsMemory(0, TagTableOffset).Span, TagTableOffset, throwOnEndOfStream: false) < TagTableOffset)
-            throw new InvalidDataException("The file is too short to be an .mdx index.");
-
+        var header = ReadHeaderArea(stream);
         var blockSize = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(22, 2));
         if (blockSize < PageSize || blockSize % PageSize != 0)
             throw new InvalidDataException($"An .mdx block size of {blockSize} bytes isn't a multiple of {PageSize}.");
+
+        var index = new MdxIndex(stream, leaveOpen, blockSize, encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage))
+        {
+            IsProduction = header[24] == 0x01,
+        };
+        index.Tags = index.LoadTags(header);
+        return index;
+    }
+
+    /// <summary>
+    /// Re-reads the tag table, in case the legacy app added, dropped or rebuilt tags since the index
+    /// was opened, so writes maintain every tag that exists now.
+    /// </summary>
+    internal void ReloadTags() => Tags = LoadTags(ReadHeaderArea(_stream));
+
+    private static byte[] ReadHeaderArea(Stream stream)
+    {
+        var header = new byte[HeaderAreaSize];
+        DbfTable.DiscardReadBuffer(stream);
+        stream.Position = 0;
+        if (stream.ReadAtLeast(header.AsMemory(0, TagTableOffset).Span, TagTableOffset, throwOnEndOfStream: false) < TagTableOffset)
+            throw new InvalidDataException("The file is too short to be an .mdx index.");
 
         var tagCount = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(28, 2));
         var entryLength = header[26] == 0 ? 32 : header[26];
@@ -84,11 +108,15 @@ public sealed class MdxIndex : IDisposable
         var tableBytes = entryLength * tagCount;
         if (stream.ReadAtLeast(header.AsSpan(TagTableOffset, tableBytes), tableBytes, throwOnEndOfStream: false) < tableBytes)
             throw new InvalidDataException("The .mdx file ends inside its tag table.");
+        return header;
+    }
 
-        var index = new MdxIndex(stream, leaveOpen, blockSize, encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage))
-        {
-            IsProduction = header[24] == 0x01,
-        };
+    private IReadOnlyList<MdxTag> LoadTags(byte[] header)
+    {
+        var tagCount = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(28, 2));
+        var entryLength = header[26] == 0 ? 32 : header[26];
+        if (tagCount > MaxTags || entryLength < 21 || TagTableOffset + (long)entryLength * tagCount > HeaderAreaSize)
+            throw new InvalidDataException($"The .mdx header claims {tagCount} tags of {entryLength} bytes, more than its 2,048-byte header holds.");
 
         var tags = new List<MdxTag>(tagCount);
         for (var i = 0; i < tagCount; i++)
@@ -98,10 +126,9 @@ public sealed class MdxIndex : IDisposable
             var nameBytes = entry[4..15];
             var nul = nameBytes.IndexOf((byte)0);
             var name = Encoding.ASCII.GetString(nul >= 0 ? nameBytes[..nul] : nameBytes).TrimEnd();
-            tags.Add(MdxTag.Load(index, name, headerPage, index.Encoding));
+            tags.Add(MdxTag.Load(this, name, headerPage, Encoding));
         }
-        index.Tags = tags.AsReadOnly();
-        return index;
+        return tags.AsReadOnly();
     }
 
     /// <summary>Finds the production .mdx next to a table, if the table says it has one.</summary>
@@ -126,6 +153,7 @@ public sealed class MdxIndex : IDisposable
             throw new InvalidDataException($"Index page {page} is outside the .mdx file.");
 
         var block = new byte[BlockSize];
+        DbfTable.DiscardReadBuffer(_stream); // other programs change indexes too
         _stream.Position = offset;
         _stream.ReadExactly(block);
         return block;
@@ -133,7 +161,7 @@ public sealed class MdxIndex : IDisposable
 }
 
 /// <summary>One tag (B-tree) in an .mdx file: a key expression, an optional FOR filter, and keys in order.</summary>
-public sealed class MdxTag
+public sealed partial class MdxTag
 {
     private const int MaxDepth = 32;
     private const int MaxKeyLength = 100;
@@ -185,7 +213,7 @@ public sealed class MdxTag
             IsDescending = (header[8] & 0x08) != 0,
             IsUnique = (header[8] & 0x40) != 0 || header[23] != 0,
             Expression = ReadText(header.AsSpan(24, 221), encoding),
-            ForExpression = header[245] != 0 ? ReadText(header.AsSpan(762, Math.Min(220, header.Length - 762)), encoding) : null,
+            ForExpression = header[245] != 0 && header.Length > 762 ? ReadText(header.AsSpan(762, Math.Min(220, header.Length - 762)), encoding) : null,
         };
     }
 
@@ -309,6 +337,7 @@ public sealed class MdxTag
         CharacterProbe c => CompareCharacter(key, c.Bytes),
         NumericProbe n => MdxKeys.CompareNumeric(key, n.Bcd),
         DateProbe d => BinaryPrimitives.ReadDoubleLittleEndian(key).CompareTo(d.Julian),
+        RawProbe r => CompareRaw(key, r),
         _ => throw new InvalidOperationException(),
     };
 

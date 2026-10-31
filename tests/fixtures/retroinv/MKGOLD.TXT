@@ -1,0 +1,265 @@
+
+Structure for database: C:ITEMS.dbf
+Number of data records:       5
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  ITEM_ID     Numeric        8
+    2  CATEGORY    Character      4
+    3  ITEMTYPE    Character     20
+    4  MFR         Character     30
+    5  MODEL       Character     30
+    6  SERIALNO    Character     30
+    7  DESCR       Character     60
+    8  COND        Character      3
+    9  QTY         Numeric        5
+   10  ON_LOAN     Numeric        5
+   11  LOC_CODE    Character      6
+   12  PARENT_ID   Numeric        8
+   13  ACQ_DATE    Date           8
+   14  ACQ_SRC     Character     30
+   15  ACQ_PRICE   Numeric        9      2
+   16  CUR_VALUE   Numeric        9      2
+   17  TAGS        Character     60
+   18  STATUS      Character      1
+   19  CREATED     Date           8
+   20  UPDATED     Date           8
+   21  NOTES       Memo          10
+** Total **                     353
+
+Record#   ITEM_ID CATEGORY ITEMTYPE             MFR                            MODEL                          SERIALNO                       DESCR                                                        COND   QTY ON_LOAN LOC_CODE PARENT_ID ACQ_DATE ACQ_SRC                        ACQ_PRICE CUR_VALUE TAGS                                                         STATUS CREATED  UPDATED  NOTES
+      1         1 SYS      DESKTOP              IBM                            5160 PC XT                     0123456                        IBM PC XT, 640 KB, 10 MB MFM disk, CGA                       GD       1       0 A3               0 03/15/88 Computer fair                    1299.99    450.00 xt,8088,mfm                                                  A      10/08/26 10/08/26 Memo
+      2         2 CARD     ISA VGA              Paradise                       PVGA1A                         PV-88812                       8-bit VGA card, 256 KB                                       NW       2       1 A3               1   /  /   Refund on return                  -45.50      0.00 vga,isa                                                      A      10/08/26 10/08/26 Memo
+      3 *       3 DRV      MFM HDD              Seagate                        ST-225                                                        20 MB MFM                                                    PT       1       0 B12              0 12/31/99                                     0.01 999999.99                                                              D      10/08/26 10/08/26 Memo
+      4         4                                                                                                                                                                                                                                 /  /                                                                                                                            /  /     /  /   Memo
+      5         5 CBL                                                                                                                                                                                                                             /  /                                      -0.99  -1234.50                                                              A        /  /     /  /   Memo
+
+Record#   ITEM_ID NOTES
+      1         1 Bought at a computer fair with the original       
+                  keyboard and both manuals.                        
+                  Recapped the power supply.                        
+                                                                    
+      2         2 Line 01 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 02 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 03 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 04 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 05 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 06 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 07 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 08 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 09 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 10 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 11 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 12 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 13 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 14 of the long memo: 8088, ISA, MFM, CGA.    
+                  Line 15 of the long memo: 8088, ISA, MFM, CGA.    
+                                                                    
+      3 *       3                                                   
+      4         4                                                   
+      5         5 Bought at a computer fair with the original       
+                  keyboard and both manuals.                        
+                  Recapped the power supply.                        
+                                                                    
+
+Structure for database: C:CATS.dbf
+Number of data records:       3
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  CAT_CODE    Character      4
+    2  CAT_NAME    Character     20
+    3  SORTORD     Numeric        2
+** Total **                      27
+
+Record#  CAT_CODE CAT_NAME             SORTORD
+      1  SYS      Complete systems           1
+      2  CPU      Processors                 3
+      3  CARD     Expansion cards            4
+
+Structure for database: C:LOANS.dbf
+Number of data records:       2
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  LOAN_ID     Numeric        8
+    2  ITEM_ID     Numeric        8
+    3  QTY         Numeric        5
+    4  BORROWER    Character     30
+    5  CONTACT     Character     30
+    6  OUT_DATE    Date           8
+    7  DUE_DATE    Date           8
+    8  RET_DATE    Date           8
+    9  NOTES       Character     60
+** Total **                     166
+
+Record#   LOAN_ID  ITEM_ID   QTY BORROWER                       CONTACT                        OUT_DATE DUE_DATE RET_DATE NOTES
+      1         1        2     1 J. Smith                       555-0142                       09/01/86 10/01/86   /  /   for a VGA demo                                              
+      2         2        1     1 Club                                                          01/02/87 01/09/87 01/08/87                                                             
+
+Structure for database: C:USERS.dbf
+Number of data records:       3
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  USER_ID     Numeric        4
+    2  USERNAME    Character      8
+    3  FULLNAME    Character     30
+    4  GROUPNAME   Character      8
+    5  LEVEL       Numeric        1
+    6  SALT        Character      4
+    7  PWHASH      Character     32
+    8  STATUS      Character      1
+    9  MUSTCHG     Logical        1
+   10  LASTLOGIN   Date           8
+   11  CREATED     Date           8
+** Total **                     106
+
+Record#  USER_ID USERNAME FULLNAME                       GROUPNAME LEVEL SALT PWHASH                           STATUS MUSTCHG LASTLOGIN CREATED
+      1        1 ADMIN    Administrator                                3                                       A      .T.       /  /    10/08/26
+      2        2 CLERK                                                 2                                       A      .F.     10/08/26  10/08/26
+      3        3 GUEST                                                 1                                       D      .F.       /  /      /  /  
+
+Structure for database: C:BIG.dbf
+Number of data records:     300
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  ID          Numeric        8
+    2  NAME        Character     10
+    3  D           Date           8
+** Total **                      27
+
+Structure for database: C:NUM2000.dbf
+Number of data records:    2000
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  ID          Numeric        8
+** Total **                       9
+
+Structure for database: C:NUM993.dbf
+Number of data records:     993
+Date of last update   : 10/08/26
+Field  Field Name  Type       Width    Dec
+    1  ID          Numeric        8
+** Total **                       9
+
+Record#  NAME
+      1  N  1                                                                                                
+      2  N  2                                                                                                
+      3  N  3                                                                                                
+      4  N  4                                                                                                
+      5  N  5                                                                                                
+      6  N  6                                                                                                
+      7  N  7                                                                                                
+      8  N  8                                                                                                
+      9  N  9                                                                                                
+     10  N 10                                                                                                
+     11  N 11                                                                                                
+     12  N 12                                                                                                
+     13  N 13                                                                                                
+     14  N 14                                                                                                
+     15  N 15                                                                                                
+     16  N 16                                                                                                
+     17  N 17                                                                                                
+     18  N 18                                                                                                
+     19  N 19                                                                                                
+     20  N 20                                                                                                
+     21  N 21                                                                                                
+     22  N 22                                                                                                
+     23  N 23                                                                                                
+     24  N 24                                                                                                
+     25  N 25                                                                                                
+     26  N 26                                                                                                
+     27  N 27                                                                                                
+     28  N 28                                                                                                
+     29  N 29                                                                                                
+     38  N 38                                                                                                
+     39  N 39                                                                                                
+     40  N 40                                                                                                
+     41  N 41                                                                                                
+     42  N 42                                                                                                
+     43  N 43                                                                                                
+     44  N 44                                                                                                
+     45  N 45                                                                                                
+     46  N 46                                                                                                
+     47  N 47                                                                                                
+     48  N 48                                                                                                
+     49  N 49                                                                                                
+     50  N 50                                                                                                
+     51  N 51                                                                                                
+     52  N 52                                                                                                
+     53  N 53                                                                                                
+     54  N 54                                                                                                
+     55  N 55                                                                                                
+     56  N 56                                                                                                
+     57  N 57                                                                                                
+     58  N 58                                                                                                
+     59  N 59                                                                                                
+     60  N 60                                                                                                
+     30  N DUP                                                                                               
+     31  N DUP                                                                                               
+     32  N DUP                                                                                               
+     33  N DUP                                                                                               
+     34  N DUP                                                                                               
+     35  N DUP                                                                                               
+     36  N DUP                                                                                               
+     37  N DUP                                                                                               
+
+Record#  NAME
+     17  N 17                                                                                                
+     18  N 18                                                                                                
+     19  N 19                                                                                                
+     20  N 20                                                                                                
+     21  N 21                                                                                                
+     22  N 22                                                                                                
+     23  N 23                                                                                                
+     24  N 24                                                                                                
+     25  N 25                                                                                                
+     26  N 26                                                                                                
+     27  N 27                                                                                                
+     28  N 28                                                                                                
+     29  N 29                                                                                                
+     38  N 38                                                                                                
+     39  N 39                                                                                                
+     40  N 40                                                                                                
+     41  N 41                                                                                                
+     42  N 42                                                                                                
+     43  N 43                                                                                                
+     44  N 44                                                                                                
+     45  N 45                                                                                                
+     46  N 46                                                                                                
+     47  N 47                                                                                                
+     48  N 48                                                                                                
+     49  N 49                                                                                                
+     50  N 50                                                                                                
+     51  N 51                                                                                                
+     52  N 52                                                                                                
+     53  N 53                                                                                                
+     54  N 54                                                                                                
+     55  N 55                                                                                                
+     56  N 56                                                                                                
+     57  N 57                                                                                                
+     58  N 58                                                                                                
+     59  N 59                                                                                                
+     60  N 60                                                                                                
+      1  Z  1                                                                                                
+      2  Z  2                                                                                                
+      3  Z  3                                                                                                
+      4  Z  4                                                                                                
+      5  Z  5                                                                                                
+      6  Z  6                                                                                                
+      7  Z  7                                                                                                
+      8  Z  8                                                                                                
+      9  Z  9                                                                                                
+     10  Z 10                                                                                                
+     11  Z 11                                                                                                
+     12  Z 12                                                                                                
+     13  Z 13                                                                                                
+     14  Z 14                                                                                                
+     15  Z 15                                                                                                
+     16  Z 16                                                                                                
+     30  Z 30                                                                                                
+     31  Z 31                                                                                                
+     32  Z 32                                                                                                
+     33  Z 33                                                                                                
+     34  Z 34                                                                                                
+     35  Z 35                                                                                                
+     36  Z 36                                                                                                
+     37  Z 37                                                                                                
+
