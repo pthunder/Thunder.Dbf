@@ -104,27 +104,28 @@ public sealed partial class CdxWriteTests
     }
 
     // A rebuild's candidate keys are checked among themselves: the old tree says nothing about them.
+    // Another program changed keys behind the index's back. The index no longer matches the table,
+    // so an exclusive open refuses it, rebuild or not, rather than guess why (a sort order this
+    // writer doesn't reproduce looks the same); REINDEX in FoxPro repairs it. A rebuild's own check
+    // of candidate keys is in A_takeover_whose_rebuild_fails_lets_the_index_go.
     [Fact]
-    public void A_rebuild_checks_candidate_keys_on_their_own()
+    public void An_index_another_program_left_out_of_step_is_refused_not_rebuilt_over()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        using var table = OpenWritable(dbf);
-        int first, second;
-        // Another program swaps two records' keys without touching the index.
         using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
         {
-            (first, second) = ((int)other.Read(0)["CALL_ID"]!, (int)other.Read(1)["CALL_ID"]!);
+            var (first, second) = ((int)other.Read(0)["CALL_ID"]!, (int)other.Read(1)["CALL_ID"]!);
             other.UpdateFields(0, new Dictionary<string, object?> { ["CALL_ID"] = second });
             other.UpdateFields(1, new Dictionary<string, object?> { ["CALL_ID"] = first });
         }
-        table.RebuildIndex(); // each key is still unique: the rebuild goes through
-        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
-
-        // Now two records really share one, and the rebuild stops before the index changes.
-        using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
-            other.UpdateFields(2, new Dictionary<string, object?> { ["CALL_ID"] = first });
         var before = SharedFile.ReadAllBytes(cdx);
-        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(table.RebuildIndex).Code);
+
+        using (var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            var error = Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        }
         Assert.Equal(before, SharedFile.ReadAllBytes(cdx));
     }
 
@@ -469,10 +470,10 @@ public sealed partial class CdxWriteTests
     public void Asking_to_rebuild_an_index_already_kept_rebuilds_it()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        using var table = OpenWritable(dbf);
         using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
             other.Append(Call(other.Read(0).Values.ToArray(), id: 777, contact: 1, subject: "unindexed"));
 
+        var table = OpenWritable(dbf);
         table.MaintainIndex(cdx, rebuild: true);
         table.Dispose();
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
@@ -487,7 +488,7 @@ public sealed partial class CdxWriteTests
         PatchTag(cdx, "STATE", header => header[14] |= CdxIndex.OptionCandidate); // and many records share a state
         var before = SharedFile.ReadAllBytes(cdx);
 
-        using var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+        using var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true)).Code);
         Assert.False(table.MaintainsIndex);
 

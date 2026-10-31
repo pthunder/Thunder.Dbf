@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` preview) is safer:
 
+- **PACK, rebuilds and INDEX ON need exclusive use,** as they do in dBASE and FoxPro: `Pack()`, `RebuildIndex()`, `CreateIndexTag()` and `MaintainIndex(path, rebuild: true)` throw `ExclusiveUseRequired` unless the table was opened with `DbfTable.Open(path, writable: true, exclusive: true)` (`DbfDatabaseOptions.Exclusive`, `Exclusive=true` in a connection string). An exclusive open fails with `FileInUse` while another program has the table open. Run against a table Visual FoxPro had open shared, a rebuild left VFP reading freed pages (error 2066, "tag is corrupted") and a PACK renumbered records under it (found by the Visual FoxPro tests). **Breaking:** code that packs or rebuilds must open the table exclusively.
 - **Tag roots stay put:** a full root's keys move down into new pages and the root is rewritten in place; shrinking and rebuilds also keep the root's address. Visual FoxPro reads each root's address once, when it opens the table, so a moved root left it walking a stale page while Thunder.Dbf wrote (found by the Visual FoxPro round-trip test).
 
 - **Visual FoxPro's index lock:** every change, and every reload of the tag list, runs under the lock Visual FoxPro takes on the index file itself (one byte at 0x7FFFFFFE), following `LockTimeout` and `RequireLocks`; pages are re-read under it and the update counter is bumped before it's released.

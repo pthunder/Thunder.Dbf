@@ -39,6 +39,12 @@ public sealed record DbfDatabaseOptions
     /// </summary>
     public bool MaintainFoxProIndexes { get; init; }
 
+    /// <summary>
+    /// Open tables exclusively, like <c>USE ... EXCLUSIVE</c>: no other program can open them meanwhile, and
+    /// opening fails while one has them open. PACK, rebuilds and INDEX ON need it. Off by default.
+    /// </summary>
+    public bool Exclusive { get; init; }
+
     /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
     public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
@@ -239,7 +245,7 @@ public sealed class DbfDatabase : IDisposable
     private DbfTable OpenTableAt(string path)
     {
         var table = DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes,
-            Options.MaintainFoxProIndexes);
+            Options.MaintainFoxProIndexes, Options.Exclusive);
         table.RefuseLinks = true;
         table.LockScheme = Options.LockScheme;
         return table;
@@ -429,9 +435,12 @@ public sealed class DbfDatabase : IDisposable
                 case "maintainfoxproindexes":
                     options = options with { MaintainFoxProIndexes = ParseBool(key, value) };
                     break;
+                case "exclusive":
+                    options = options with { Exclusive = ParseBool(key, value) };
+                    break;
                 default:
                     throw new DbfException(DbfErrorCode.InvalidConnectionString, $"The connection string has an unknown setting '{key}'.",
-                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Lock Scheme.");
+                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Exclusive, Lock Scheme.");
             }
         }
 

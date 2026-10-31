@@ -194,7 +194,7 @@ public sealed class IndexSafetyTests : IDisposable
         Copy("xsharp/rdd-tests/TEST10K.CDX");
         var path = Copy("xsharp/rdd-tests/TEST10K.DBF");
 
-        using var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        using var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.True(table.Header.HasStructuralCdx);
         Assert.False(table.Header.HasProductionMdx);
         Assert.Equal(DbfLockScheme.VisualFoxPro, table.LockScheme);
@@ -212,7 +212,7 @@ public sealed class IndexSafetyTests : IDisposable
         foreach (var file in new[] { "CHANGELOG.DBF", "CHANGELOG.DBT", "CHANGELOG.MDX" })
             Copy(Path.Combine("siemens-step7/siprom", file));
         var path = Path.Combine(_dir.FullName, "CHANGELOG.DBF");
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
 
         // Another program loses record 2's USER_TAG entry: the index is now out of step.
         using (var mdx = MdxIndex.Open(DbfException.OpenFile(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
@@ -258,7 +258,7 @@ internal static class IndexedTables
     /// </summary>
     public static DbfTable OpenWithIndexes(string path)
     {
-        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
         foreach (var index in DbfTable.FindCompanionIndexes(path, table.Header))
             table.MaintainIndex(index);
         return table;

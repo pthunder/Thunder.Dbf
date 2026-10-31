@@ -107,12 +107,17 @@ public sealed partial class DbfTable : IDisposable
     /// <param name="path">The .dbf file.</param>
     /// <param name="writable">Open for writing. Read-only by default.</param>
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
+    /// <param name="exclusive">Open the .dbf so no other program can open it, like dBASE and FoxPro's
+    /// <c>USE ... EXCLUSIVE</c>; fails with <see cref="DbfErrorCode.FileInUse"/> while another program has it
+    /// open. <see cref="Pack"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/> and
+    /// <c>MaintainIndex(path, rebuild: true)</c> need it.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
-        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false)
+        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false, bool exclusive = false)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
-        var stream = DbfException.OpenFile(path, FileMode.Open, access, share);
+        // Every program has to open the .dbf to use the table, so holding it unshared is enough.
+        var stream = DbfException.OpenFile(path, FileMode.Open, access, exclusive ? FileShare.None : share);
         FileStream? memoStream = null;
         try
         {
@@ -125,6 +130,7 @@ public sealed partial class DbfTable : IDisposable
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
+            table._exclusive = exclusive;
             table._maintainFoxProIndexes = maintainFoxProIndexes;
             if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is { } cdx
                 && IsIndexOver(cdx, table.Header))
@@ -236,6 +242,8 @@ public sealed partial class DbfTable : IDisposable
     public void MaintainIndex(string path, bool rebuild = false)
     {
         EnsureWritable();
+        if (rebuild)
+            RequireExclusive("Rebuilding an index");
         var full = Path.GetFullPath(path);
         var name = Path.GetFileName(full);
         if (_attachedIndexes.ContainsKey(full))
@@ -409,6 +417,22 @@ public sealed partial class DbfTable : IDisposable
     // ---- locking ---------------------------------------------------------------------------
 
     private DbfLocks? _locks;
+    private bool _exclusive;
+
+    /// <summary>True when this table holds its .dbf so no other program can open it (see the <c>exclusive</c> parameter of Open).</summary>
+    public bool IsExclusive => _exclusive;
+
+    // PACK, REINDEX and INDEX ON rewrite pages and renumber records other programs may hold in their
+    // caches, so dBASE and FoxPro only run them on a table opened EXCLUSIVE; so does Thunder.Dbf.
+    // A table opened from a stream is the caller's to share or not.
+    private void RequireExclusive(string operation)
+    {
+        if (_path is null || _exclusive)
+            return;
+        throw new DbfException(DbfErrorCode.ExclusiveUseRequired,
+            $"{operation} needs the table opened exclusively, as dBASE and FoxPro require: other programs could be holding its records or index pages.",
+            "Close the legacy app, then open the table with exclusive: true (Exclusive=true in a connection string).", _path);
+    }
     internal DbfLocks Locks => _locks ??= new DbfLocks(_stream as FileStream, _path, _lockScheme, Header) { Timeout = _lockTimeout, RequireLocks = _requireLocks };
     private TimeSpan _lockTimeout = TimeSpan.FromSeconds(3);
     private bool _requireLocks;
@@ -554,6 +578,7 @@ public sealed partial class DbfTable : IDisposable
 
             var table = Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
+            table._exclusive = true; // brand new, and no other program can write to it while it's open here
             return table;
         }
         catch
@@ -1278,6 +1303,7 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.IndexDamaged, "The table has no index open that Thunder.Dbf can rebuild.",
                 "Open the table by path, writable, with its index files next to it.", _path);
 
+        RequireExclusive("Rebuilding the indexes");
         using var tableLock = Locks.Table();
         Refresh();
         if (Header.HasIncompleteTransaction)

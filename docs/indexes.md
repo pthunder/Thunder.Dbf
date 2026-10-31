@@ -49,7 +49,7 @@ This adds a tag to the production `.mdx`, creating the file (and setting the tab
 - **A crash can't leave a half-filled tag.** The tag is filled while it's still unlisted, and listed last.
 - **Expressions and filters are stored in the table's code page.** A character the code page can't hold is refused.
 
-dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app is closed, because a program that already has the `.mdx` open won't see the new tag until it reopens it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
+Like dBASE's `INDEX ON`, it needs the table to itself: open it with `exclusive: true`, or it throws `ExclusiveUseRequired`. A program that already had the `.mdx` open wouldn't see the new tag until it reopened it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
 
 ## Rebuilding
 
@@ -57,7 +57,7 @@ dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app i
 table.RebuildIndex();   // like dBASE's REINDEX: every tag, from the table
 ```
 
-Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
+Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. Like REINDEX in dBASE and FoxPro it needs the table opened with `exclusive: true` (so does `MaintainIndex(path, rebuild: true)`): a program with the table open would go on reading index pages a rebuild has replaced, which Visual FoxPro reports as a corrupted tag. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
 
 ## How it's verified
 

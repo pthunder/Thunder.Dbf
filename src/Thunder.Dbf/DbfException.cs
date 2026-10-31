@@ -80,6 +80,9 @@ public enum DbfErrorCode
 
     /// <summary>A query would need more memory than the library allows it (for example sorting a huge result).</summary>
     QueryTooLarge,
+
+    /// <summary>The operation (PACK, a rebuild, INDEX ON) needs the table opened exclusively, as dBASE and FoxPro require.</summary>
+    ExclusiveUseRequired,
 }
 
 /// <summary>
@@ -144,7 +147,7 @@ public sealed class DbfException : IOException
     {
         DbfErrorCode.TableNotFound or DbfErrorCode.FolderNotFound => 404,
         DbfErrorCode.AccessDenied or DbfErrorCode.PathEscapesFolder or DbfErrorCode.EncryptedTable => 403,
-        DbfErrorCode.FileInUse or DbfErrorCode.TableAlreadyExists or DbfErrorCode.IndexWouldGoStale or DbfErrorCode.IncompleteTransaction
+        DbfErrorCode.FileInUse or DbfErrorCode.ExclusiveUseRequired or DbfErrorCode.TableAlreadyExists or DbfErrorCode.IndexWouldGoStale or DbfErrorCode.IncompleteTransaction
             or DbfErrorCode.ReadOnlyConnection or DbfErrorCode.ReadOnlyLocation => 409,
         DbfErrorCode.InvalidConnectionString or DbfErrorCode.InvalidCsv or DbfErrorCode.UnsupportedSql => 400,
         DbfErrorCode.InvalidValue => 422,

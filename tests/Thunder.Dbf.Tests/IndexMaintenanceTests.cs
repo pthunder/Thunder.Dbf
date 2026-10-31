@@ -38,7 +38,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     public void Tags_made_from_scratch_match_the_ones_dBASE_software_wrote()
     {
         var path = CopyChangelog(withIndex: false);
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
         {
             Assert.Null(table.OpenProductionIndex());
             foreach (var (name, expression, unique) in SiemensTags)
@@ -92,7 +92,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     public void A_new_tag_joins_an_existing_index_and_is_kept_up_to_date()
     {
         var path = CopyChangelog(withIndex: true);
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
         {
             table.CreateIndexTag("UPUSER", "UPPER(USER)+STR(ID,10)", descending: true);
             var values = table.Read(0).Values.ToArray();
@@ -122,7 +122,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     {
         var path = CopyChangelog(withIndex: true);
         var before = SharedFile.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
         {
             var error = Assert.ThrowsAny<Exception>(() => table.CreateIndexTag(name, expression, filter));
             Assert.Contains(expected, error.Message);
@@ -135,7 +135,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     {
         var path = CopyChangelog(withIndex: true);
         int[] keptIds;
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
         {
             for (var i = 0; i < 5; i++)
             {
@@ -172,7 +172,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     {
         var path = CopyChangelog(withIndex: true);
         File.WriteAllText(path + ".packing", "left over from a crash");
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
 
         Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Pack()).Code);
         Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray())).Code);
@@ -207,8 +207,8 @@ public sealed class IndexMaintenanceTests : IDisposable
         }
         var before = SharedFile.ReadAllBytes(path);
 
-        using var reopened = DbfTable.Open(path, writable: true);
-        Assert.ThrowsAny<Exception>(() => reopened.Pack());
+        using (var reopened = DbfTable.Open(path, writable: true, exclusive: true))
+            Assert.ThrowsAny<Exception>(() => reopened.Pack());
         Assert.Equal(before, SharedFile.ReadAllBytes(path));   // not one record moved
         Assert.False(File.Exists(path + ".packing"));    // and no backup, since nothing started
     }
@@ -217,7 +217,7 @@ public sealed class IndexMaintenanceTests : IDisposable
     public void Character_keys_are_as_wide_as_the_widest_real_value()
     {
         var path = CopyChangelog(withIndex: true);
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
         // On a synthetic all-blank record LEVEL is 0, which would pick the 1-character branch.
         table.CreateIndexTag("LONGLVL", "IIF(LEVEL > 0, \"LONGVALUE\", \"X\")");
 
@@ -239,7 +239,7 @@ public sealed class IndexMaintenanceTests : IDisposable
         var mdx = Path.ChangeExtension(path, ".mdx");
         var before = SharedFile.ReadAllBytes(mdx);
 
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
         {
             var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("MIXED", "IIF(N = 1, \"text\", N)"));
             Assert.Equal(DbfErrorCode.InvalidValue, error.Code);

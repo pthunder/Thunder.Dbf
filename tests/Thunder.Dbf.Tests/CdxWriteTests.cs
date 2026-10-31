@@ -259,20 +259,24 @@ public sealed partial class CdxWriteTests : IDisposable
         }
 
         AssertIndexMatchesTable(dbf, cdx);
-        using var reopened = DbfTable.Open(dbf);
-        using var index = CdxIndex.Open(cdx, table: reopened);
-        Assert.True(index["AGE"].IsDescending);
-        Assert.Equal(reopened.ReadAll().Max(r => (decimal)r["AGE"]!), index["AGE"].Entries().First().Key);
-        Assert.Equal(reopened.ReadAll().Count(r => !r.IsDeleted), index["SALARY"].Entries().Count());
-        Assert.DoesNotContain(1, index["SALARY"].Entries().Select(e => e.RecordNumber));   // deleted
-        Assert.Contains(15, index["SALARY"].Entries().Select(e => e.RecordNumber));        // recalled
+        using (var reopened = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(cdx, table: reopened))
+        {
+            Assert.True(index["AGE"].IsDescending);
+            Assert.Equal(reopened.ReadAll().Max(r => (decimal)r["AGE"]!), index["AGE"].Entries().First().Key);
+            Assert.Equal(reopened.ReadAll().Count(r => !r.IsDeleted), index["SALARY"].Entries().Count());
+            Assert.DoesNotContain(1, index["SALARY"].Entries().Select(e => e.RecordNumber));   // deleted
+            Assert.Contains(15, index["SALARY"].Entries().Select(e => e.RecordNumber));        // recalled
+        }
 
         // Between rebuilds a Visual FoxPro UNIQUE tag can lose a key whose holder left; a rebuild
         // gives every key back to its lowest record.
         using (var table = IndexedTables.OpenWithIndexes(dbf))
             table.RebuildIndex();
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
-        Assert.Equal(reopened.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), index["STATE"].Entries().Count());
+        using var after = DbfTable.Open(dbf);
+        using var rebuilt = CdxIndex.Open(cdx, table: after);
+        Assert.Equal(after.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), rebuilt["STATE"].Entries().Count());
     }
 
     [Fact]
@@ -531,7 +535,7 @@ public sealed partial class CdxWriteTests : IDisposable
     // the index is refused until it's taken over and rebuilt in byte order.
     private static DbfTable TakeOver(string dbf, string cdx)
     {
-        var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+        var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.Throws<DbfException>(() => table.MaintainIndex(cdx));
         table.MaintainIndex(cdx, rebuild: true);
         Assert.True(table.MaintainsIndex);
