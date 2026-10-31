@@ -147,4 +147,30 @@ public sealed class CdxCreateTests : IDisposable
             Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => plain.CreateIndexTag("CODE", "code")).Code);
         Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
     }
+
+    // A refusal writes nothing: not even a new .cdx, or the header flag that would name it.
+    [Fact]
+    public void A_refused_tag_on_a_table_without_a_cdx_leaves_no_cdx_behind()
+    {
+        var path = BareKinds();
+        var before = File.ReadAllBytes(path);
+        using (var table = OpenToIndex(path))
+        {
+            Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.CreateIndexTag("TWICE", "amount*2")).Code);
+            Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.CreateIndexTag("CCODE", "code", null, false, false, candidate: true)).Code);
+            Assert.False(table.MaintainsIndex);
+        }
+        Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
+        Assert.Equal(before[28], SharedFile.ReadAllBytes(path)[28]);
+    }
+
+    [Fact]
+    public void A_FOR_filter_must_be_logical_and_expressions_must_fit_the_code_page()
+    {
+        var path = BareKinds();
+        using var table = OpenToIndex(path);
+        Assert.Contains("logical", Assert.Throws<DbfException>(() => table.CreateIndexTag("LIVE", "id", forExpression: "id")).Message);
+        Assert.Contains("code page", Assert.Throws<DbfException>(() => table.CreateIndexTag("SNOW", "code", forExpression: "status=\"\u2603\"")).Message);
+        Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
+    }
 }

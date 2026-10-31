@@ -1461,7 +1461,9 @@ public sealed partial class CdxTag : IMaintainedTag
             Store(leaf, path, appendedAtEnd: false, plan);
         else
             DropEmpty(leaf, path, plan);
-        Apply(plan, topDown: false);
+        // A leaf another writer packed tighter (Harbour, X#) can need more room once re-packed the
+        // way Visual FoxPro packs, so even a removal can split it: then the split's order applies.
+        Apply(plan, topDown: plan.Fresh.Count > 0);
         CollapseRoot();
         return true;
     }

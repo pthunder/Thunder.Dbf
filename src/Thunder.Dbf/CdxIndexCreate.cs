@@ -65,6 +65,7 @@ public sealed partial class CdxIndex
         bool unique, bool candidate, bool descending, bool nullableKey)
     {
         var originalLength = _stream.Length;
+        var published = false;
         try
         {
             var headerOffset = AllocatePage();
@@ -82,8 +83,18 @@ public sealed partial class CdxIndex
             BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(CdxTag.DescendingOffset), descending ? (ushort)1 : (ushort)0);
 
             // The pool: the key expression at 0, the FOR expression right after its NUL, as FoxPro puts them.
-            var key = Encoding.GetBytes(expression);
-            var filter = forExpression is null ? [] : Encoding.GetBytes(forExpression);
+            byte[] key, filter;
+            try
+            {
+                var strict = DbfEncoding.Strict(Encoding);
+                key = strict.GetBytes(expression);
+                filter = forExpression is null ? [] : strict.GetBytes(forExpression);
+            }
+            catch (System.Text.EncoderFallbackException ex)
+            {
+                throw new DbfException(DbfErrorCode.InvalidValue, "The tag's expression has a character the table's code page can't hold.",
+                    "Use characters the code page has, as FoxPro stores the expression in it.", table.FilePath, ex);
+            }
             if (key.Length + 1 + filter.Length + 1 > CdxTag.PoolLength)
                 throw new DbfException(DbfErrorCode.InvalidValue, "The key and FOR expressions are too long for a .cdx tag.",
                     $"Keep them under {CdxTag.PoolLength - 2} bytes together.", table.FilePath);
@@ -123,7 +134,8 @@ public sealed partial class CdxIndex
             Write(headerOffset, written);
             Commit();
 
-            // Listed last: from here on FoxPro (and this library) see the tag.
+            // Listed last: from here on FoxPro (and this library) see the tag, and the file is never cut back.
+            published = true;
             var directory = CdxTag.LoadDirectory(this);
             var nameKey = new byte[CdxTag.TagNameLength];
             nameKey.AsSpan().Fill((byte)' ');
@@ -136,8 +148,9 @@ public sealed partial class CdxIndex
         }
         catch
         {
-            // Nothing lists the new pages yet, so cutting the file back loses nothing.
-            if (_stream.Length > originalLength && Tags.All(t => t.HeaderOffset < originalLength))
+            // Until the directory is changed nothing lists the new pages, so cutting the file back loses
+            // nothing; once it's begun, the directory may already point at them.
+            if (!published && _stream.Length > originalLength)
             {
                 _stream.SetLength(originalLength);
                 DbfTable.FlushToDisk(_stream);

@@ -126,6 +126,8 @@ public sealed partial class DbfTable
     }
 
     // Visual FoxPro's INDEX ON ... TAG: the tag goes in the structural .cdx, created when there's none.
+    // Everything is checked first, with the whole tag built in a scratch .cdx in memory, so a refusal
+    // writes nothing at all, not even a new .cdx or the header flag for it.
     private void CreateCdxTag(string tagName, string expression, string? forExpression, bool unique, bool descending, bool candidate)
     {
         if (_path is null)
@@ -136,32 +138,54 @@ public sealed partial class DbfTable
         if (unique && candidate)
             throw new ArgumentException("A tag is UNIQUE or CANDIDATE, not both.", nameof(candidate));
         RequireExclusive("INDEX ON");
+        expression = expression.Trim();
+        forExpression = forExpression?.Trim();
         ParseIndexExpression(expression, "key expression");
-        if (forExpression is not null)
-            ParseIndexExpression(forExpression, "FOR filter");
+        var filter = forExpression is null ? null : ParseIndexExpression(forExpression, "FOR filter");
 
         using (Locks.Table())
         {
             Refresh();
             ThrowIfPackUnfinished();
-            var index = StructuralCdx() ?? CreateStructuralCdx();
-            if (index.Tags.Any(t => t.Name.Equals(tagName, StringComparison.OrdinalIgnoreCase)))
+            ReplayJournal(); // a cut-off write's note is finished before the index grows
+
+            var existing = StructuralCdx();
+            if (existing is not null && existing.Tags.Any(t => t.Name.Equals(tagName, StringComparison.OrdinalIgnoreCase)))
                 throw new DbfException(DbfErrorCode.InvalidValue, $"The index already has a tag named {tagName}.",
                     "Pick another name, or rebuild the existing tag with RebuildIndex.", _path);
+
+            // Visual FoxPro wants a logical FOR filter.
+            if (filter is not null)
+            {
+                foreach (var record in ReadAll().Prepend(IndexKeys.BlankRecord(this)))
+                {
+                    if (filter.Evaluate(record) is not (bool or null))
+                        throw new DbfException(DbfErrorCode.InvalidValue, "A FOR filter must be a logical expression, like status = \"A\" or !DELETED().",
+                            "Write the filter as a condition.", _path);
+                }
+            }
 
             int keyLength;
             try
             {
-                keyLength = CdxIndex.KeyLengthFor(this, expression.Trim());
+                keyLength = CdxIndex.KeyLengthFor(this, expression);
             }
             catch (Exception ex) when (ex is FormatException or NotSupportedException or InvalidOperationException or ArgumentException)
             {
                 throw new DbfException(DbfErrorCode.InvalidValue, $"The key expression can't be evaluated: {ex.Message}",
                     "Use the table's fields, with UPPER(), DTOS() or STR(), joined with +.", _path, ex);
             }
-            var bare = Fields.FirstOrDefault(f => f.Name.Equals(expression.Trim(), StringComparison.OrdinalIgnoreCase));
-            index.AddTag(this, tagName, expression.Trim(), forExpression?.Trim(), keyLength, unique, candidate, descending,
-                nullableKey: bare is { IsNullable: true });
+            var nullableKey = Fields.FirstOrDefault(f => f.Name.Equals(expression, StringComparison.OrdinalIgnoreCase)) is { IsNullable: true };
+
+            using (var scratch = new MemoryStream())
+            {
+                CdxIndex.WriteEmptyCompound(scratch);
+                using var dry = CdxIndex.Open(scratch, Encoding, leaveOpen: true, table: this);
+                dry.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
+            }
+
+            var index = existing ?? CreateStructuralCdx();
+            index.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
         }
         // A structural .cdx moves Visual FoxPro's lock positions; the next lock takes the new ones.
         if (_locks is { HoldsNothing: true })
@@ -179,7 +203,9 @@ public sealed partial class DbfTable
             diagnostic: _structuralCdxRefusal);
     }
 
-    // A new structural .cdx next to the table, and the header flag that tells FoxPro to open it.
+    // A new structural .cdx next to the table: attached first, and only then named in the table's
+    // header (the flag that tells FoxPro to open it). Until that flag is written, a failure takes the
+    // file away again; after it, the file stays, since FoxPro now expects it.
     private CdxIndex CreateStructuralCdx()
     {
         var path = Path.ChangeExtension(_path!, Path.GetExtension(_path!).Any(char.IsUpper) ? ".CDX" : ".cdx");
@@ -187,10 +213,6 @@ public sealed partial class DbfTable
             CdxIndex.WriteEmptyCompound(stream);
         try
         {
-            Header.MarkStructuralCdx();
-            if (Header.Version is not (0x30 or 0x31 or 0x32 or 0xF5 or 0xFB))
-                Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos says 0x03, like dBASE
-            CommitHeader();
             if (!TryAttachIndex(path))
                 throw new InvalidDataException("The new .cdx couldn't be opened for updating.");
             _indexFilesAtOpen.Add(Path.GetFileName(path)); // made and kept here, so not one that "appeared"
@@ -200,6 +222,10 @@ public sealed partial class DbfTable
             File.Delete(path);
             throw;
         }
+        Header.MarkStructuralCdx();
+        if (Header.Version is not (0x30 or 0x31 or 0x32 or 0xF5 or 0xFB))
+            Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos says 0x03, like dBASE
+        CommitHeader();
         return (CdxIndex)_attachedIndexes[Path.GetFullPath(path)];
     }
 
