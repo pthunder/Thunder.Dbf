@@ -77,4 +77,22 @@ public sealed class ExclusiveUseTests : IDisposable
         Assert.True(table.IsExclusive);
         Assert.Equal(1, table.Pack());
     }
+
+    [Fact]
+    public void Check_looks_at_an_exclusive_table_already_open_and_reports_one_another_program_holds()
+    {
+        var path = Table();
+        using (var db = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false, Exclusive = true }))
+        {
+            Assert.True(db.Check().Ok);              // the probe holds it exclusively, then lets go
+            _ = db["PEOPLE"];                         // now this database holds it
+            var report = db.Check();
+            Assert.True(report.Ok, report.ToString());
+            Assert.True(report.Tables.Single().CanWrite);
+        }
+
+        using var other = DbfTable.Open(path);
+        using var blocked = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false, Exclusive = true });
+        Assert.Contains(blocked.Check().Tables.Single().Problems, p => p.Code == DbfErrorCode.FileInUse);
+    }
 }

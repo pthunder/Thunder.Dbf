@@ -267,7 +267,18 @@ public sealed class DbfDatabase : IDisposable
         try
         {
             var path = ResolveTablePath(name);
-            using var table = DbfTable.Open(path, writable: false, Options.Encoding, Options.IgnoreMissingMemo);
+            // A table this database already has open is looked at as it is: opening the file again
+            // would collide with it when it's held exclusively. Otherwise the probe opens the way the
+            // database would, so an exclusive open that would fail shows up here.
+            var cached = _open.GetValueOrDefault(Path.GetFileNameWithoutExtension(path));
+            // Held exclusively, the .dbf can't be opened a second time to test writing, so the probe
+            // opens it for writing itself when writes are wanted.
+            using var probe = cached is null
+                ? DbfTable.Open(path, writable: Options.Exclusive && !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo,
+                    allowUnmaintainedIndexes: true, exclusive: Options.Exclusive)
+                : null;
+            var table = cached ?? probe!;
+            var heldTable = cached ?? (Options.Exclusive ? probe : null);
             canRead = true;
             records = table.RecordCount;
             format = DescribeFormat(table.Header);
@@ -332,7 +343,7 @@ public sealed class DbfDatabase : IDisposable
                     structuralCdxMaintained: cdxMaintained);
                 if (blocker is not null)
                     warnings.Add($"Writes will be refused: {blocker.Message}");
-                canWrite = blocker is null && !indexDamaged && ProbeWrite(path, problems)
+                canWrite = blocker is null && !indexDamaged && (heldTable?.CanWrite ?? ProbeWrite(path, problems))
                     && Companions(path).Where(p => Path.GetExtension(p).ToLowerInvariant() is ".dbt" or ".fpt" or ".mdx").All(p => ProbeWrite(p, problems));
             }
         }

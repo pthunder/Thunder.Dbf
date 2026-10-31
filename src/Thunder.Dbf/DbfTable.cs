@@ -113,6 +113,16 @@ public sealed partial class DbfTable : IDisposable
     /// <c>MaintainIndex(path, rebuild: true)</c> need it.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
         bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false, bool exclusive = false)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive);
+
+    /// <summary>Opens a table shared: the 0.1.0 signature, kept so code compiled against it still runs.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public static DbfTable Open(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive: false);
+
+    private static DbfTable OpenPath(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes, bool exclusive)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
@@ -153,7 +163,9 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Opens a table from a seekable stream, with its memo file in <paramref name="memoStream"/> if it has memo fields.
-    /// Text uses <paramref name="encoding"/>, else the header's language driver.
+    /// Text uses <paramref name="encoding"/>, else the header's language driver. PACK, rebuilds and INDEX ON don't
+    /// check for exclusive use on a stream: when it's a file other programs could have open, keeping them out
+    /// (opening it with <see cref="FileShare.None"/>) is the caller's job.
     /// </summary>
     public static DbfTable Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false, Stream? memoStream = null,
         bool ignoreMissingMemo = false, bool allowUnmaintainedIndexes = false, Stream? indexStream = null)
@@ -362,7 +374,7 @@ public sealed partial class DbfTable : IDisposable
     {
         if (_indexesNeedRebuild)
             throw new DbfException(DbfErrorCode.IndexDamaged, "An earlier write couldn't update this table's indexes, so they may be out of step.",
-                "Call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
+                "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
     }
 
     // An attached index another program has since rebuilt into something Thunder.Dbf can't keep (a
@@ -569,7 +581,8 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.TableAlreadyExists, $"'{Path.GetFileName(existing)}' already exists next to the new table.",
                 "Pick another table name, or move the old files away first; Thunder.Dbf won't adopt or overwrite another table's files.", existing);
 
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        // Unshared, like a table opened EXCLUSIVE, so INDEX ON and PACK can follow straight away.
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
         FileStream? memoStream = null;
         try
         {
@@ -578,7 +591,7 @@ public sealed partial class DbfTable : IDisposable
 
             var table = Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
-            table._exclusive = true; // brand new, and no other program can write to it while it's open here
+            table._exclusive = true; // brand new, and held unshared
             return table;
         }
         catch
@@ -1241,7 +1254,7 @@ public sealed partial class DbfTable : IDisposable
                 }
             }
             throw new DbfException(DbfErrorCode.IndexDamaged, $"Record {recordNumber} was written, but its index entries couldn't be updated.",
-                "Run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
         }
     }
 
@@ -1373,7 +1386,7 @@ public sealed partial class DbfTable : IDisposable
         if (header.HasProductionMdx && !indexMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table says it has a production .mdx index, but it isn't open (missing, or the table was opened from a stream without it), so writing would leave it out of date.",
-                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and call RebuildIndex() afterwards.", path);
+                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and rebuild it afterwards (exclusive: true, RebuildIndex).", path);
         if (header.HasStructuralCdx && !structuralCdxMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table has a FoxPro .cdx index that isn't open for updating (missing, unreadable, or opened from a stream), so writing would leave it out of date.",

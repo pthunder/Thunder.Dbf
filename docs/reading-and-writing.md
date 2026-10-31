@@ -69,7 +69,7 @@ int removed = table.Pack();                                               // lik
 
 `Pack` removes deleted records for good, renumbers the rest and rebuilds every index the table keeps. Memo blocks of removed records stay in the memo file as unused space, as dBASE IV leaves them.
 
-Record numbers change and index pages are replaced, so, as dBASE and FoxPro require `EXCLUSIVE` for `PACK`, the table must be opened with `exclusive: true` (`Exclusive=true` in a connection string); otherwise `Pack` throws `ExclusiveUseRequired`. Opening exclusively fails with `FileInUse` while the legacy app has the table open, and keeps it out until you're done. Rebuild anything that remembered record numbers. The [SQL bridge](sql.md) refuses a packed table until its mirror is rebuilt.
+Record numbers change and index pages are replaced, so, as dBASE and FoxPro require `EXCLUSIVE` for `PACK`, the table must be opened with `exclusive: true` (`Exclusive=true` in a connection string); otherwise `Pack` throws `ExclusiveUseRequired`. Opening exclusively fails with `FileInUse` while the legacy app has the table open, and keeps it out until you're done. That's enforced by Windows, where the legacy apps run; on Linux and macOS .NET's exclusive open is only advisory, and programs that don't ask (Harbour, for one, uses its own locks) aren't kept out, so make sure they're closed. Rebuild anything that remembered record numbers. The [SQL bridge](sql.md) refuses a packed table until its mirror is rebuilt.
 
 It's built not to lose data:
 - Every surviving record's index keys are worked out before anything changes.

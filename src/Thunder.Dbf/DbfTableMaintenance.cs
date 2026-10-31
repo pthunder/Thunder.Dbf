@@ -316,7 +316,7 @@ public sealed partial class DbfTable
         if (PackBackupPath is { } backup && File.Exists(backup))
             throw new DbfException(DbfErrorCode.IncompleteTransaction,
                 "A PACK of this table didn't finish, so its records may be half moved.",
-                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then call RebuildIndex().", _path);
+                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then open the table with exclusive: true and call RebuildIndex().", _path);
     }
 
     private void BackUpForPack(string backup, long bytes)

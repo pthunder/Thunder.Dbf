@@ -74,6 +74,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     bool IMaintainedIndex.CanMaintain => MaintainRefusal is null;
     bool IMaintainedIndex.CanMaintainAfterRebuild => MaintainRefusal is null || _refusedOnlyForOrder;
     string? IMaintainedIndex.CannotMaintainReason => MaintainRefusal;
+    // Refused only for what a rebuild in byte order replaces anyway: keys out of order, or out of step
+    // with the table. MaintainIndex(path, rebuild: true) takes such an index over.
     private bool _refusedOnlyForOrder;
     private bool _rebuildExpected;
 
@@ -144,7 +146,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 return $"Tag {tag.Name} can't be kept up to date: {disorder}.";
             }
             if (tag.CompareSampleWithTable(_table!) is { } mismatch)
+            {
+                // Keys out of step with the table (another program wrote without updating the index, or
+                // an update failed) are what a rebuild replaces, so a takeover with a rebuild can fix it too.
+                _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
                 return $"Tag {tag.Name} can't be kept up to date: {mismatch}.";
+            }
             _verifiedTags.Add(identity);
         }
         return null;

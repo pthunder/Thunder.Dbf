@@ -57,7 +57,7 @@ Like dBASE's `INDEX ON`, it needs the table to itself: open it with `exclusive: 
 table.RebuildIndex();   // like dBASE's REINDEX: every tag, from the table
 ```
 
-Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. Like REINDEX in dBASE and FoxPro it needs the table opened with `exclusive: true` (so does `MaintainIndex(path, rebuild: true)`): a program with the table open would go on reading index pages a rebuild has replaced, which Visual FoxPro reports as a corrupted tag. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
+Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. An index another program left out of step isn't attached when the table opens; take it over with `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table. It rebuilds every index the table keeps, not only the `.mdx`. Like REINDEX in dBASE and FoxPro it needs the table opened with `exclusive: true` (so does `MaintainIndex(path, rebuild: true)`): a program with the table open would go on reading index pages a rebuild has replaced, which Visual FoxPro reports as a corrupted tag. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
 
 ## How it's verified
 

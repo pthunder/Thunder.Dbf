@@ -104,29 +104,40 @@ public sealed partial class CdxWriteTests
     }
 
     // A rebuild's candidate keys are checked among themselves: the old tree says nothing about them.
-    // Another program changed keys behind the index's back. The index no longer matches the table,
-    // so an exclusive open refuses it, rebuild or not, rather than guess why (a sort order this
-    // writer doesn't reproduce looks the same); REINDEX in FoxPro repairs it. A rebuild's own check
-    // of candidate keys is in A_takeover_whose_rebuild_fails_lets_the_index_go.
+    // Another program changed keys behind the index's back, so the index no longer matches the table
+    // and isn't attached when the table opens. Opened exclusively, a takeover with a rebuild repairs
+    // it, and that rebuild checks candidate keys among themselves.
     [Fact]
-    public void An_index_another_program_left_out_of_step_is_refused_not_rebuilt_over()
+    public void A_rebuild_checks_candidate_keys_on_their_own()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int first, second;
         using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
         {
-            var (first, second) = ((int)other.Read(0)["CALL_ID"]!, (int)other.Read(1)["CALL_ID"]!);
+            (first, second) = ((int)other.Read(0)["CALL_ID"]!, (int)other.Read(1)["CALL_ID"]!);
             other.UpdateFields(0, new Dictionary<string, object?> { ["CALL_ID"] = second });
             other.UpdateFields(1, new Dictionary<string, object?> { ["CALL_ID"] = first });
         }
-        var before = SharedFile.ReadAllBytes(cdx);
-
-        using (var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true))
+        using (var shared = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true))
         {
-            Assert.False(table.MaintainsIndex);
-            var error = Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true));
-            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+            Assert.False(shared.MaintainsIndex);
+            Assert.Equal(DbfErrorCode.ExclusiveUseRequired, Assert.Throws<DbfException>(() => shared.MaintainIndex(cdx, rebuild: true)).Code);
         }
+        TakeOverAndRebuild(dbf, cdx); // each key is still unique: the rebuild goes through
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+
+        // Now two records really share one, and the rebuild stops before the index changes.
+        using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+            other.UpdateFields(2, new Dictionary<string, object?> { ["CALL_ID"] = first });
+        var before = SharedFile.ReadAllBytes(cdx);
+        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => TakeOverAndRebuild(dbf, cdx)).Code);
         Assert.Equal(before, SharedFile.ReadAllBytes(cdx));
+    }
+
+    private static void TakeOverAndRebuild(string dbf, string cdx)
+    {
+        using var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true);
+        table.MaintainIndex(cdx, rebuild: true);
     }
 
     // ---- crash ordering ---------------------------------------------------------------------------
