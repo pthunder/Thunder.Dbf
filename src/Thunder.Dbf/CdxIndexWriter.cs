@@ -82,6 +82,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // batch's changes, which the open-time count check reports.
     private Dictionary<long, byte[]>? _deferred;
     private long _deferredFrom; // the file's length when the batch began: pages past it are new
+    private readonly HashSet<long> _deferredFreed = []; // pages the batch put on the free list
 
     bool IMaintainedIndex.BeginDeferredWrites()
     {
@@ -115,6 +116,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         _held = held;
         _holdFailed = false;
         _deferred = [];
+        _deferredFreed.Clear();
         return true;
     }
 
@@ -135,10 +137,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
         }
     }
 
-    void IMaintainedIndex.FinishDeferredWrites(bool toDisk)
+    bool IMaintainedIndex.FinishDeferredWrites(bool toDisk)
     {
         if (_deferred is not { } pages)
-            return;
+            return true;
         _deferred = null;
         var held = _held!;
         _held = null;
@@ -148,13 +150,17 @@ public sealed partial class CdxIndex : IMaintainedIndex
             // that existed (some now pointing at new ones), and the file header (the free list) last.
             // Contiguous pages go in one write. A batch cut off in the middle is still reported by
             // its note in the table's journal; this order keeps what's on disk a tree meanwhile.
-            WriteRuns(pages, pages.Keys.Where(o => o >= _deferredFrom));
+            var freed = _deferredFreed;
+            WriteRuns(pages, pages.Keys.Where(o => o >= _deferredFrom && !freed.Contains(o)));
             if (pages.Keys.Any(o => o >= _deferredFrom))
                 DbfTable.FlushToDisk(_stream, toDisk);
-            WriteRuns(pages, pages.Keys.Where(o => o < _deferredFrom && o >= DefaultPageLength * 2));
+            WriteRuns(pages, pages.Keys.Where(o => o < _deferredFrom && o >= DefaultPageLength * 2 && !freed.Contains(o)));
+            WriteRuns(pages, pages.Keys.Where(o => freed.Contains(o) && o >= DefaultPageLength * 2)); // freed once nothing points at them
             WriteRuns(pages, pages.Keys.Where(o => o < DefaultPageLength * 2));
-            Publish(succeeded: !_holdFailed);
+            var clean = !_holdFailed;
+            Publish(succeeded: clean);
             DbfTable.FlushToDisk(_stream, toDisk);
+            return clean;
         }
         catch
         {
@@ -775,6 +781,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     internal void FreePage(long offset)
     {
         // Like Harbour: a free page holds only the link to the next one, in its first four bytes.
+        if (_deferred is not null)
+            _deferredFreed.Add(offset);
         var page = new byte[PageLength];
         Read(0, DefaultPageLength).AsSpan(FreeListOffset, 4).CopyTo(page);
         Write(offset, page);

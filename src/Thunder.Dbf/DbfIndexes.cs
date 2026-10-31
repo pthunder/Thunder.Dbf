@@ -136,10 +136,12 @@ internal interface IMaintainedIndex : IDisposable
     /// </summary>
     bool BeginDeferredWrites() => false;
 
-    /// <summary>Writes the batch's pages, publishes them and releases the index lock; forced to disk unless <paramref name="toDisk"/> is false.</summary>
-    void FinishDeferredWrites(bool toDisk)
-    {
-    }
+    /// <summary>
+    /// Writes the batch's pages, publishes them and releases the index lock; forced to disk unless
+    /// <paramref name="toDisk"/> is false. False when a change during the batch failed partway, so
+    /// what was written may hold half of it.
+    /// </summary>
+    bool FinishDeferredWrites(bool toDisk) => true;
 
     /// <summary>Pushes every change out of this process, and forces it to the disk unless <paramref name="toDisk"/> is false.</summary>
     void Commit(bool toDisk);

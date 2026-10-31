@@ -686,37 +686,38 @@ public sealed partial class DbfTable : IDisposable
     private void BeginDeferredIndexWrites()
     {
         ReplayJournal(); // a note already waiting is dealt with first: the batch's own would hide it
-        WriteJournal(new DbfJournalEntry(0, [], IsBatch: true));
         var begun = new List<IMaintainedIndex>();
         try
         {
+            // The index locks first (nothing is written yet), then the note, naming every index the
+            // batch defers: a rebuild only clears it once it has rebuilt all of them.
             foreach (var index in MaintainedIndexes)
             {
                 if (index.BeginDeferredWrites())
                     begun.Add(index);
             }
+            if (begun.Count == 0)
+                return; // nothing to defer (no .cdx kept): writes go as usual
+            var files = TagsWithFiles().Where(t => begun.Any(i => i.MaintainedTags.Contains(t.Tag))).Select(t => t.File).Distinct(StringComparer.OrdinalIgnoreCase);
+            WriteJournal(new DbfJournalEntry(0, [.. files.Select(f => new DbfJournalChange(f, "", null, null))], IsBatch: true));
         }
         catch
         {
-            // Each is released, whatever happens to the others; nothing was written yet.
+            // Each is released, whatever happens to the others; no page was written yet.
             foreach (var index in begun)
             {
                 try
                 {
                     index.FinishDeferredWrites(ForcesWrites);
                 }
-                catch (Exception ex) when (ex is IOException or InvalidDataException)
+                catch (Exception)
                 {
-                    _indexesNeedRebuild = true; // the note stays, and says so to any other writer
+                    _indexesNeedRebuild = true;
                 }
             }
-            if (!_indexesNeedRebuild)
-                DbfJournal.Clear(_path!);
             throw;
         }
-        _deferring = begun.Count > 0;
-        if (!_deferring)
-            DbfJournal.Clear(_path!); // nothing to defer (no .cdx kept): writes go as usual
+        _deferring = true;
     }
 
     // Writes every batch's pages and releases the index locks, even when one fails; a failure stops
@@ -727,21 +728,29 @@ public sealed partial class DbfTable : IDisposable
             return;
         _deferring = false;
         Exception? failure = null;
+        var clean = true;
         foreach (var index in MaintainedIndexes)
         {
             try
             {
-                index.FinishDeferredWrites(ForcesWrites);
+                clean &= index.FinishDeferredWrites(ForcesWrites);
             }
             catch (Exception ex)
             {
                 failure ??= ex;
             }
         }
+        // The note goes only when every page is out (and on disk, when writes are forced) and no change
+        // in the batch failed partway; otherwise it stays, and stops every Thunder.Dbf writer until a rebuild.
+        if (failure is null && clean && !_indexesNeedRebuild)
+        {
+            DbfJournal.Clear(_path!);
+            return;
+        }
         if (failure is null)
         {
-            DbfJournal.Clear(_path!); // every page is out (and on disk, when writes are forced)
-            return;
+            _indexesNeedRebuild = true;
+            return; // the failed change already reported itself
         }
         _indexesNeedRebuild = true; // the batch's note stays: other writers and the next open refuse too
         throw new DbfException(DbfErrorCode.IndexDamaged, "The batch's index changes couldn't all be written.",
@@ -1334,15 +1343,28 @@ public sealed partial class DbfTable : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        Exception? unfinished = null;
         try
         {
             FinishDeferredIndexWrites(); // a table disposed before its LockTable() still writes the batch
         }
-        catch (DbfException)
+        catch (Exception ex)
         {
-            // Disposing goes on regardless; the batch's note stays in the journal, so the next write or
-            // open (here or in another Thunder.Dbf process) reports the batch that didn't finish.
+            unfinished = ex; // reported once everything is closed; the batch's note stays in the journal
         }
+        try
+        {
+            DisposeFiles();
+        }
+        finally
+        {
+            if (unfinished is not null)
+                ExceptionDispatchInfo.Throw(unfinished);
+        }
+    }
+
+    private void DisposeFiles()
+    {
         _folderWatcher?.Dispose();
         _memo?.Dispose();
         _index?.Dispose();

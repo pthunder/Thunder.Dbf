@@ -245,6 +245,9 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx);
 
         var copy = Path.Combine(killed, "calls.dbf");
+        var note = DbfJournal.Read(copy)!;
+        Assert.True(note.IsBatch);
+        Assert.Equal(["calls.CDX"], note.Changes.Select(c => c.IndexFile)); // a rebuild clears it only after rebuilding these
         using (var reopened = DbfTable.Open(copy, writable: true, maintainFoxProIndexes: true))
         {
             Assert.True(reopened.HasPendingJournal);
