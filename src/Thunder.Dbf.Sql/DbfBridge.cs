@@ -42,8 +42,10 @@ public sealed class DbfBridge
     private readonly SqlDialect _dialect;
     private readonly SqlTable _sql;
 
+    /// <summary>Pairs a DBF table with its SQL mirror.</summary>
     /// <param name="table">The DBF table, opened writable (so SQL-side changes can be applied).</param>
     /// <param name="connection">An open connection to the SQL database.</param>
+    /// <param name="dialect">The SQL database's dialect, for quoting and types.</param>
     /// <param name="sqlTableName">The mirror table's name; defaults to the DBF table's name.</param>
     public DbfBridge(DbfTable table, DbConnection connection, SqlDialect dialect, string sqlTableName)
     {

@@ -96,12 +96,14 @@ public sealed class ServerHarness : IDisposable
         var settings = BaseSettings(readOnly);
         adjust?.Invoke(settings);
 
-        var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(host =>
+        // Disposing the base factory also disposes the one WithWebHostBuilder derives from it, but not the other way round.
+        var root = new WebApplicationFactory<Program>();
+        _factories.Add(root);
+        var factory = root.WithWebHostBuilder(host =>
         {
             host.UseEnvironment("Development");
             host.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings));
         });
-        _factories.Add(factory);
 
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
         if (apiKey is not null)

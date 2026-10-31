@@ -141,6 +141,7 @@ public sealed class DbfCommand : DbCommand
             using var reader = new DbfDataReader(query, CommandBehavior.Default, connection: null);
             while (reader.Read())
             {
+                // Reading to the end runs the whole SELECT, as ADO.NET expects; the rows themselves aren't wanted.
             }
             return -1;
         }
@@ -173,7 +174,17 @@ public sealed class DbfCommand : DbCommand
         var query = Bind(write: !schemaOnly);
         var closeWith = behavior.HasFlag(CommandBehavior.CloseConnection) ? _connection : null;
         if (query.IsQuery)
-            return new DbfDataReader(query, behavior, closeWith);
+        {
+            try
+            {
+                return new DbfDataReader(query, behavior, closeWith);
+            }
+            catch
+            {
+                query.Dispose(); // no reader took ownership, so nothing else would close the table
+                throw;
+            }
+        }
         if (schemaOnly)
         {
             query.Dispose();

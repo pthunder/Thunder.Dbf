@@ -1,0 +1,21 @@
+#    ______
+#   | ? ?  |    ProjectThunder :: Thunder.Dbf
+#   |  ~   |    What CodeQL runs: the security-and-quality suite, minus the few style rules
+#   |______|    that only ever flagged deliberate code here. Each exclusion says why.
+name: Thunder.Dbf CodeQL config
+
+queries:
+  - uses: security-and-quality
+
+query-filters:
+  # Flags every Path.Combine. Ours join a folder with a file name or relative path, and the
+  # one place a caller's path could be rooted (DbfTable.OpenIndex) checks first. Path.Join, the
+  # suggested fix, treats a rooted second part differently, which would change behavior.
+  - exclude:
+      id: cs/path-combine
+  # Prefer .Where/.Select over a filtering or mapping foreach. Our loops keep the condition next
+  # to the comment that explains it, and several also count or collect as they go.
+  - exclude:
+      id: cs/linq/missed-where
+  - exclude:
+      id: cs/linq/missed-select
