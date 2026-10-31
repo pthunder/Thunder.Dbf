@@ -661,13 +661,15 @@ public sealed partial class DbfTable : IDisposable
         // for good, and the count is reported (CutOffRecordsRemoved, and Check() beforehand).
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         var removed = RecordsPastCount();
-        var cutOff = new byte[_stream.Length - dataEnd];
-        _stream.Position = dataEnd;
-        _stream.ReadExactly(cutOff);
-        var backup = $"{_path}.cutoff-{DateTime.UtcNow:yyyyMMdd'T'HHmmss'Z'}";
-        using (var copy = DbfException.OpenFile(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        var (backup, copy) = NewCutOffBackup();
+        using (copy)
         {
-            copy.Write(cutOff);
+            // Copied in blocks: what lies past the count can be large.
+            _stream.Position = dataEnd;
+            var block = new byte[81920];
+            int read;
+            while ((read = _stream.Read(block, 0, block.Length)) > 0)
+                copy.Write(block, 0, read);
             FlushToDisk(copy);
         }
         _stream.SetLength(dataEnd);
@@ -680,6 +682,24 @@ public sealed partial class DbfTable : IDisposable
             MaintainIndex(FindCompanion(_path!, ".cdx")!, rebuild: true); // rebuilds every index the table keeps
         else if (MaintainsIndex)
             RebuildIndex();
+    }
+
+    // TABLE.DBF.cutoff-<UTC time to the millisecond>, with -2, -3 ... after it if that name is taken
+    // (two opens in the same millisecond, or a clock set back), so taking records off never fails on
+    // an earlier backup.
+    /// <summary>For the tests: the time a cut-off backup is named after.</summary>
+    internal static Func<DateTime> CutOffClock { get; set; } = () => DateTime.UtcNow;
+
+    private (string Path, FileStream Stream) NewCutOffBackup()
+    {
+        var stem = $"{_path}.cutoff-{CutOffClock():yyyyMMdd'T'HHmmss'.'fff'Z'}";
+        for (var attempt = 1; ; attempt++)
+        {
+            var candidate = attempt == 1 ? stem : $"{stem}-{attempt}";
+            if (File.Exists(candidate) && attempt < 100)
+                continue;
+            return (candidate, DbfException.OpenFile(candidate, FileMode.CreateNew, FileAccess.Write, FileShare.None));
+        }
     }
 
     /// <summary>
