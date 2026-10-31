@@ -114,9 +114,27 @@ public sealed partial class CdxIndex : IMaintainedIndex
             MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
             return;
         }
-        CheckPageOwnership();
-        MaintainRefusal = FirstRefusal();
+        // Another program can be between writing a record and adding its keys. It adds keys under
+        // the index lock, so the tree is read under that lock, and a write in progress gets a moment
+        // to finish before the index is called out of step with the table.
+        for (var attempt = 1; ; attempt++)
+        {
+            _outOfStep = false;
+            using (OpenedForWriting ? TakeIndexLock() : null)
+            {
+                _table?.ReloadHeader();
+                CheckPageOwnership();
+                MaintainRefusal = FirstRefusal();
+            }
+            if (MaintainRefusal is null || !_outOfStep || attempt == OutOfStepAttempts)
+                return;
+            Thread.Sleep(OutOfStepPause);
+        }
     }
+
+    private const int OutOfStepAttempts = 5;
+    private static readonly TimeSpan OutOfStepPause = TimeSpan.FromMilliseconds(200);
+    private bool _outOfStep; // the last refusal was keys out of step with the table, which a write in progress can explain
 
     // A .cdx or .idx that shares its name with a different .dbf belongs to that table, even when its
     // expressions happen to name fields this table also has. Updating it from this table's rows
@@ -150,9 +168,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
             // between the two), which a sample of the first and last keys can miss.
             var mismatch = tag.ForExpression is null && !tag.IsUnique && entries != _table!.RecordCount
                 ? $"it holds {entries:N0} keys for {_table.RecordCount:N0} records, so it isn't in step with the table (a write reached the table but not the index)"
-                : tag.CompareSampleWithTable(_table!);
+                : tag.MissingLastKeys(_table!) ?? tag.CompareSampleWithTable(_table!);
             if (mismatch is not null)
             {
+                _outOfStep = true;
                 // Keys out of step with the table (another program wrote without updating the index, or
                 // an update failed) are what a rebuild replaces, so a takeover with a rebuild can fix it too.
                 _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
@@ -532,6 +551,27 @@ public sealed partial class CdxTag : IMaintainedTag
         if (total != KeyLength)
             return (null, $"its {KeyLength}-byte keys don't match the {total} bytes its expression gives");
         return (parts, null);
+    }
+
+    /// <summary>
+    /// Appends only ever add records at the end, so an append cut off between the record and its keys
+    /// leaves the last records without them, which a count can't show in a FOR tag. UNIQUE tags are
+    /// left out: Visual FoxPro itself can drop a key from one between rebuilds.
+    /// </summary>
+    internal string? MissingLastKeys(DbfTable table)
+    {
+        if (IsUnique)
+            return null;
+        for (var index = Math.Max(0, table.RecordCount - 2); index < table.RecordCount; index++)
+        {
+            var row = table.Read(index);
+            if (!Includes(row))
+                continue;
+            var root = ReadNode(RootOffset(), inByteOrder: true);
+            if (Find(root, KeyBytes(row), index + 1, [], depth: 0, visited: [root.Offset]) != Search.Found)
+                return $"record {index + 1}, near the end of the table, has no key in it, so a write reached the table but not the index";
+        }
+        return null;
     }
 
     /// <summary>

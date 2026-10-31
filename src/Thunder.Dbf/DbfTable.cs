@@ -522,6 +522,15 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed.</summary>
     public DbfLock LockTable() => Locks.Table();
 
+    /// <summary>Re-reads only the header's record count and counters, for an index checking itself against the table.</summary>
+    internal void ReloadHeader()
+    {
+        if (_stream is not FileStream)
+            return;
+        DiscardReadBuffer(_stream);
+        Header.Reload(_stream);
+    }
+
     /// <summary>
     /// Re-reads the record count (and autoincrement counters) from disk, to see records other
     /// programs have added since the table was opened. Writes do this on their own, under lock.
@@ -553,6 +562,15 @@ public sealed partial class DbfTable : IDisposable
             throw blocker;
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+        if (UnfinishedAppends(dataEnd) > 0)
+        {
+            using (appending ? null : Locks.AppendBesidesHeader())
+            {
+                Refresh();
+                dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+                UndoUnfinishedAppends(dataEnd);
+            }
+        }
         if (dataEnd > _stream.Length)
             throw new DbfException(DbfErrorCode.NotADbfFile,
                 $"The table's header counts {Header.RecordCount:N0} records, but the file is too short to hold them.",
@@ -560,6 +578,55 @@ public sealed partial class DbfTable : IDisposable
         if (appending && dataEnd + Header.RecordLength + 1 > MaxTableBytes)
             throw new DbfException(DbfErrorCode.InvalidValue, "The table has reached the 2 GB size dBASE and FoxPro can handle.",
                 "Archive or pack older records before adding more.", _path);
+    }
+
+    // An append writes the record, then the header's count, then the keys. Cut off after the first,
+    // it leaves whole records past the count that no index knows about, and Visual FoxPro calls the
+    // table corrupted (error 2091). The count is what was committed, so the next write, holding the
+    // header and append locks, takes them back off. Only bytes that look like records (each starting
+    // with a delete flag, then at most the 0x1A end mark) count; anything else is left alone.
+    private int UnfinishedAppends(long dataEnd)
+    {
+        var extra = _stream.Length - dataEnd;
+        if (extra < Header.RecordLength || _stream is not FileStream)
+            return 0;
+        var whole = (int)Math.Min(extra / Header.RecordLength, 16);
+        var tail = extra - (long)whole * Header.RecordLength;
+        if (whole == 16 || tail > 1)
+            return 0;
+        Span<byte> one = stackalloc byte[1];
+        for (var i = 0; i < whole; i++)
+        {
+            _stream.Position = dataEnd + (long)i * Header.RecordLength;
+            _stream.ReadExactly(one);
+            if (one[0] is not ((byte)' ' or (byte)'*'))
+                return 0;
+        }
+        if (tail == 1)
+        {
+            _stream.Position = _stream.Length - 1;
+            _stream.ReadExactly(one);
+            if (one[0] != EndOfFile)
+                return 0;
+        }
+        return whole;
+    }
+
+    /// <summary>Whole records sit past the header's count: an append was cut off (see the next write).</summary>
+    internal bool HasUnfinishedAppend()
+    {
+        DiscardReadBuffer(_stream);
+        return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength) > 0;
+    }
+
+    private void UndoUnfinishedAppends(long dataEnd)
+    {
+        if (UnfinishedAppends(dataEnd) == 0)
+            return;
+        _stream.SetLength(dataEnd);
+        _stream.Position = dataEnd;
+        _stream.WriteByte(EndOfFile);
+        FlushToDisk(_stream);
     }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>

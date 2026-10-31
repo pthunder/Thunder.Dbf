@@ -96,3 +96,69 @@ public sealed class ExclusiveUseTests : IDisposable
         Assert.Contains(blocked.Check().Tables.Single().Problems, p => p.Code == DbfErrorCode.FileInUse);
     }
 }
+
+public sealed class UnfinishedAppendTests : IDisposable
+{
+    private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-append-");
+
+    public void Dispose() => _dir.Delete(recursive: true);
+
+    private (string Path, int RecordLength, long Committed) TwoRecords()
+    {
+        var path = Path.Combine(_dir.FullName, "PEOPLE.DBF");
+        using var table = DbfTable.Create(path, [DbfFieldDefinition.Character("NAME", 10)]);
+        table.Append("Ada");
+        table.Append("Grace");
+        return (path, table.Header.RecordLength, table.Header.HeaderLength + 2L * table.Header.RecordLength);
+    }
+
+    // Found against Visual FoxPro 9: a writer killed after writing a record but before counting it
+    // left the record past the header's count, and VFP refused the table (error 2091).
+    [Fact]
+    public void A_record_past_the_count_is_taken_off_by_the_next_write()
+    {
+        var (path, length, committed) = TwoRecords();
+        using (var file = SharedFile.OpenWrite(path))
+        {
+            file.SetLength(committed);
+            file.Position = committed;
+            file.Write([(byte)' ', .. "Cut off   "u8, 0x1A]);
+        }
+        Assert.Equal(committed + length + 1, new FileInfo(path).Length);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Tables.Single().Warnings, w => w.Contains("2091"));
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            Assert.Equal(2, table.RecordCount);
+            table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "Ada L" });
+        }
+        Assert.Equal(committed + 1, new FileInfo(path).Length);
+        var bytes = SharedFile.ReadAllBytes(path);
+        Assert.Equal(0x1A, bytes[^1]);
+        using var reopened = DbfTable.Open(path);
+        Assert.Equal(["Ada L", "Grace"], reopened.ReadAll().Select(r => (string)r["NAME"]!));
+    }
+
+    [Fact]
+    public void Bytes_that_dont_look_like_a_record_are_left_alone()
+    {
+        var (path, length, committed) = TwoRecords();
+        var junk = new byte[length + 5];
+        junk[0] = 0x1A;
+        junk[1] = (byte)'?';
+        using (var file = SharedFile.OpenWrite(path))
+        {
+            file.SetLength(committed);
+            file.Position = committed;
+            file.Write(junk);
+        }
+
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append("Hedy");
+        using var reopened = DbfTable.Open(path);
+        Assert.Equal(3, reopened.RecordCount);
+        Assert.Equal("Hedy", reopened.Read(2)["NAME"]);
+    }
+}

@@ -207,15 +207,23 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         else
         {
             script.AppendLine($"""
-                LOCAL lnT, lcTag
+                * Opening and appending to the file once per record is slow enough on a busy PC to
+                * time out a 10,000-record table, so the lines are gathered and written in 1 MB pieces.
+                LOCAL lnT, lcTag, lcOut
+                lcOut = ""
                 FOR lnT = 1 TO TAGCOUNT()
                     lcTag = TAG(lnT)
                     SET ORDER TO TAG (lcTag)
-                    STRTOFILE("TAG " + UPPER(lcTag) + CHR(13) + CHR(10), "{output}", .T.)
+                    lcOut = lcOut + "TAG " + UPPER(lcTag) + CHR(13) + CHR(10)
                     SCAN
-                        STRTOFILE(TRANSFORM(RECNO()) + CHR(13) + CHR(10), "{output}", .T.)
+                        lcOut = lcOut + TRANSFORM(RECNO()) + CHR(13) + CHR(10)
+                        IF LEN(lcOut) > 1000000
+                            STRTOFILE(lcOut, "{output}", .T.)
+                            lcOut = ""
+                        ENDIF
                     ENDSCAN
                 ENDFOR
+                STRTOFILE(lcOut, "{output}", .T.)
                 """);
         }
         script.AppendLine($"""

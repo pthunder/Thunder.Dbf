@@ -488,6 +488,30 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A FOR tag holds fewer keys than records anyway, so its count says nothing; the last records'
+    // keys show an append that reached the table but not the index.
+    [Fact]
+    public void A_FOR_tag_missing_the_last_records_key_is_caught()
+    {
+        var (dbf, cdx) = People();
+        PatchTag(cdx, "SALARY", header =>
+        {
+            var keyLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(510));
+            var filter = "!DELETED()\0"u8;
+            filter.CopyTo(header.AsSpan(512 + keyLength));
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(504), keyLength);
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(506), (ushort)filter.Length);
+            header[14] |= CdxIndex.OptionForFilter;
+        });
+        using (TakeOver(dbf, cdx)) { }
+        using (var killed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+            killed.Append(killed.Read(0).Values.ToArray());
+
+        using var table = DbfTable.Open(dbf);
+        using var index = CdxIndex.Open(cdx, table: table);
+        Assert.Contains($"record {table.RecordCount}", index["SALARY"].MissingLastKeys(table));
+    }
+
     // Found against Visual FoxPro 9: a writer killed between writing a record and its keys left a tag
     // one key short, and the next open took the index as it was, so SEEK couldn't find that record.
     // A short tag is now refused on open, and a takeover with a rebuild repairs it.
