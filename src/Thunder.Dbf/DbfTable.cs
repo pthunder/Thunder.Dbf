@@ -275,6 +275,9 @@ public sealed class DbfTable : IDisposable
                 "Archive or pack older records before adding more.", _path);
     }
 
+    /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>
+    internal string? FilePath => _path;
+
     /// <summary>True when writes keep a production .mdx index up to date.</summary>
     public bool MaintainsIndex => _index is not null;
 
