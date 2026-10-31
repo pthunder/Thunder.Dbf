@@ -33,7 +33,7 @@ public sealed class CdxWriteTests : IDisposable
     [MemberData(nameof(RealIndexes))]
     public void Untouched_leaves_reencode_to_the_bytes_FoxPro_wrote(string indexFixture, string tableFixture)
     {
-        var file = File.ReadAllBytes(Fixture(indexFixture));
+        var file = SharedFile.ReadAllBytes(Fixture(indexFixture));
         using var table = DbfTable.Open(Fixture(tableFixture));
         using var index = CdxIndex.Open(Fixture(indexFixture), table: table);
 
@@ -254,7 +254,7 @@ public sealed class CdxWriteTests : IDisposable
         }
 
         AssertIndexMatchesTable(dbf, cdx);
-        var bytes = File.ReadAllBytes(cdx);
+        var bytes = SharedFile.ReadAllBytes(cdx);
         var free = new List<long>();
         for (var page = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4)); page is not 0 and not uint.MaxValue; page = BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan((int)page)))
         {
@@ -329,7 +329,7 @@ public sealed class CdxWriteTests : IDisposable
     {
         var (dbf, cdx) = People();
         using var table = DbfTable.Open(dbf);
-        var bytes = File.ReadAllBytes(cdx);
+        var bytes = SharedFile.ReadAllBytes(cdx);
         var (rootOffset, tagOffset) = (0, 0);
         using (var index = CdxIndex.Open(cdx, table: table))
         {
@@ -431,7 +431,7 @@ public sealed class CdxWriteTests : IDisposable
     {
         using var table = DbfTable.Open(dbf);
         using var index = CdxIndex.Open(cdx, table: table);
-        var file = File.ReadAllBytes(cdx);
+        var file = SharedFile.ReadAllBytes(cdx);
         Assert.Equal(0, file.Length % 512);
         foreach (var tag in index.Tags)
         {
@@ -463,14 +463,14 @@ public sealed class CdxWriteTests : IDisposable
     private static List<string> TagDirectory(string cdx)
     {
         using var index = CdxIndex.Open(cdx);
-        var bytes = File.ReadAllBytes(cdx);
+        var bytes = SharedFile.ReadAllBytes(cdx);
         var names = CdxTag.LoadDirectory(index).Entries().Select(e => $"{e.Key}@{e.RecordNumber}").ToList();
         return [.. names, .. index.Tags.Select(t => $"{t.Name}:{t.Expression}:{t.ForExpression}:{Convert.ToHexString(bytes, (int)t.HeaderOffset + 12, 4)}")];
     }
 
     private static CdxTag Tag(string cdx, string name)
     {
-        var index = CdxIndex.Open(new MemoryStream(File.ReadAllBytes(cdx)));
+        var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)));
         return index[name];
     }
 
@@ -506,9 +506,9 @@ public sealed class CdxWriteTests : IDisposable
     {
         var dbf = Path.Combine(_dir.FullName, "people.dbf");
         var cdx = Path.Combine(_dir.FullName, "tags.cdx");
-        var table = File.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.DBF"));
+        var table = SharedFile.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.DBF"));
         table[28] = 0;
-        File.WriteAllBytes(dbf, table);
+        SharedFile.WriteAllBytes(dbf, table);
         File.Copy(Fixture("xsharp/rdd-tests/TEST10K.CDX"), cdx);
         return (dbf, cdx);
     }
@@ -518,11 +518,11 @@ public sealed class CdxWriteTests : IDisposable
         long offset;
         using (var index = CdxIndex.Open(cdx))
             offset = index[tagName].HeaderOffset;
-        var bytes = File.ReadAllBytes(cdx);
+        var bytes = SharedFile.ReadAllBytes(cdx);
         var header = bytes.AsSpan((int)offset, CdxIndex.HeaderLength).ToArray();
         patch(header);
         header.CopyTo(bytes, (int)offset);
-        File.WriteAllBytes(cdx, bytes);
+        SharedFile.WriteAllBytes(cdx, bytes);
     }
 
     private static void Mutate(DbfTable table, Random random, int steps)
@@ -577,5 +577,5 @@ public sealed class CdxWriteTests : IDisposable
     }
 
     private Dictionary<string, string> Snapshot() =>
-        Directory.EnumerateFiles(_dir.FullName).ToDictionary(p => Path.GetFileName(p), p => Convert.ToHexString(File.ReadAllBytes(p)));
+        Directory.EnumerateFiles(_dir.FullName).ToDictionary(p => Path.GetFileName(p), p => Convert.ToHexString(SharedFile.ReadAllBytes(p)));
 }
