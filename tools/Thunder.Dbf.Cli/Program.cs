@@ -10,7 +10,9 @@
 //   '
 
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 using Thunder.Dbf;
+using Thunder.Dbf.Sql;
 
 return Cli.Run(args);
 
@@ -26,8 +28,12 @@ internal static class Cli
                  --shape-only                           Create the empty table, without rows
                  --delimiter <c>                        Field separator (detected if omitted)
                  --code-page <n>                        Table code page: 1252 (default), 437, 850, ...
+          thunder-dbf migrate <folder> <file.db>      Copy every table into a SQLite database (the folder is only read)
+                 --include-deleted                      Copy records marked deleted too
+                 --replace                              Recreate SQL tables that already exist
           thunder-dbf export <table.dbf> [file.csv]   Write a table out as CSV (UTF-8)
                  --include-deleted                      Include records marked deleted
+                 --raw                                  Don't protect spreadsheet users from formula text (=, +, -, @)
         """;
 
     public static int Run(string[] args)
@@ -46,6 +52,7 @@ internal static class Cli
                 "info" => Info(args[1]),
                 "import" => Import(args),
                 "export" => Export(args),
+                "migrate" when args.Length > 2 => Migrate(args),
                 _ => Fail($"Unknown command '{args[0]}'.\n\n{Usage}"),
             };
         }
@@ -111,8 +118,28 @@ internal static class Cli
         var path = args[1];
         var csv = args.Length > 2 && !args[2].StartsWith("--", StringComparison.Ordinal) ? args[2] : Path.ChangeExtension(path, ".csv");
         using var table = DbfTable.Open(path);
-        var rows = DbfExport.ToCsv(table, csv, includeDeleted: args.Contains("--include-deleted"));
+        var rows = DbfExport.ToCsv(table, csv, new DbfExportOptions
+        {
+            IncludeDeleted = args.Contains("--include-deleted"),
+            SpreadsheetSafe = !args.Contains("--raw"),
+        });
         Console.WriteLine($"Wrote {rows:N0} rows to {csv}.");
+        return 0;
+    }
+
+    private static int Migrate(string[] args)
+    {
+        using var db = DbfDatabase.Open(args[1]);
+        using var sqlite = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = args[2] }.ToString());
+        sqlite.Open();
+        var result = DbfMigrator.Migrate(db, sqlite, SqlDialect.Sqlite, new DbfMigrationOptions
+        {
+            IncludeDeleted = args.Contains("--include-deleted"),
+            ReplaceExisting = args.Contains("--replace"),
+        });
+        foreach (var table in result.Tables)
+            Console.WriteLine($"  {table.Table,-16} {table.Rows,10:N0} rows" + (table.SkippedDeleted > 0 ? $"  ({table.SkippedDeleted:N0} deleted left out)" : ""));
+        Console.WriteLine($"Migrated {result.Rows:N0} rows from {result.Tables.Count} tables in {result.Elapsed.TotalSeconds:0.0} s.");
         return 0;
     }
 

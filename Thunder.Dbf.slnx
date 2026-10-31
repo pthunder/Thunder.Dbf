@@ -2,10 +2,21 @@
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Thunder.Dbf.Benchmarks/Thunder.Dbf.Benchmarks.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/AdoNet/AdoNet.csproj" />
+    <Project Path="samples/CsvToDbf/CsvToDbf.csproj" />
+    <Project Path="samples/LiveBridge/LiveBridge.csproj" />
+    <Project Path="samples/MigrateToSqlite/MigrateToSqlite.csproj" />
+    <Project Path="samples/ReadLegacyData/ReadLegacyData.csproj" />
+  </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Thunder.Dbf.Server/Thunder.Dbf.Server.csproj" />
+    <Project Path="src/Thunder.Dbf.Sql/Thunder.Dbf.Sql.csproj" />
     <Project Path="src/Thunder.Dbf/Thunder.Dbf.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Thunder.Dbf.Server.Tests/Thunder.Dbf.Server.Tests.csproj" />
+    <Project Path="tests/Thunder.Dbf.Sql.Tests/Thunder.Dbf.Sql.Tests.csproj" />
     <Project Path="tests/Thunder.Dbf.Tests/Thunder.Dbf.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/">

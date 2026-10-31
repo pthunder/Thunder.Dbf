@@ -1,0 +1,22 @@
+<!--
+  ProjectThunder :: Thunder.Dbf
+  Settings and package metadata shared by every project in the repository.
+-->
+<Project>
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Authors>ProjectThunder</Authors>
+    <Company>ProjectThunder</Company>
+    <Copyright>Copyright (c) 2026 ProjectThunder</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/pthunder/Thunder.Dbf</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/pthunder/Thunder.Dbf</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>dbase;foxpro;clipper;xbase;dbf;mdx;cdx;ntx;legacy;migration</PackageTags>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+</Project>
