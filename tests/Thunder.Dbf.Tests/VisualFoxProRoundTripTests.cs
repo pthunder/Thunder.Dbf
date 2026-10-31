@@ -24,7 +24,9 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
 
     public static TheoryData<string, string[]> Tables() => new()
     {
-        { "contacts.dbf", ["infused-dbf/foxprodb/contacts.dbf", "infused-dbf/foxprodb/contacts.CDX", "infused-dbf/foxprodb/contacts.FPT"] },
+        // Written by Visual FoxPro itself. (contacts.dbf indexes long field names from a database
+        // container, which Thunder.Dbf refuses to maintain, so it can't be used here.)
+        { "calls.dbf", ["infused-dbf/foxprodb/calls.dbf", "infused-dbf/foxprodb/calls.CDX", "infused-dbf/foxprodb/calls.FPT"] },
         { "TEST10K.DBF", ["xsharp/rdd-tests/TEST10K.DBF", "xsharp/rdd-tests/TEST10K.CDX"] },
     };
 
@@ -41,13 +43,13 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         var path = Path.Combine(_dir.FullName, table);
 
         // 1. Thunder.Dbf writes: enough appends to split pages, plus updates, deletes and recalls.
-        using (var dbf = IndexedTables.OpenWithIndexes(path))
+        using (var dbf = OpenForWriting(path))
         {
             Assert.True(dbf.MaintainsIndex, "The table's .cdx isn't being kept up to date, so there's nothing to check.");
             var random = new Random(9);
             var count = dbf.RecordCount;
             for (var i = 0; i < 400; i++)
-                dbf.Append(Mutated(dbf, dbf.Read(random.Next(count)).Values.ToArray(), $"T{i:D4}"));
+                dbf.Append(WithNewIds(dbf, Mutated(dbf, dbf.Read(random.Next(count)).Values.ToArray(), $"T{i:D4}"), 900_000 + i));
             for (var i = 0; i < 60; i++)
             {
                 var index = random.Next(dbf.RecordCount);
@@ -72,11 +74,51 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         Directory.CreateDirectory(rebuilt);
         foreach (var file in Directory.GetFiles(_dir.FullName))
             File.Copy(file, Path.Combine(rebuilt, Path.GetFileName(file)));
-        using (var copy = IndexedTables.OpenWithIndexes(Path.Combine(rebuilt, table)))
+        using (var copy = OpenForWriting(Path.Combine(rebuilt, table)))
             copy.RebuildIndex();
         var expected = TagOrders(Path.Combine(rebuilt, table));
         foreach (var (tag, records) in expected)
+        {
+            // A UNIQUE tag keeps whichever record got the key first until FoxPro reindexes, so it
+            // matches a rebuild only right after one. VFP's walk in step 2 already checked it.
+            if (UniqueTags(path).Contains(tag))
+                continue;
             Assert.True(records.SequenceEqual(afterVfp[tag]), $"Tag {tag} after VFP's edits: the file holds {Show(afterVfp[tag])}, a rebuild gives {Show(records)}.");
+        }
+    }
+
+    // Opens with the .cdx preview on, taking over an index sorted case-blind (X#'s TEST10K) by
+    // rebuilding it in byte order first, as MaintainIndex(path, rebuild: true) does.
+    private static DbfTable OpenForWriting(string path)
+    {
+        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        if (!table.MaintainsIndex)
+            table.MaintainIndex(Path.ChangeExtension(path, Path.GetExtension(path).Any(char.IsUpper) ? ".CDX" : ".cdx"), rebuild: true);
+        return table;
+    }
+
+    private static HashSet<string> UniqueTags(string path)
+    {
+        using var table = DbfTable.Open(path);
+        using var index = table.OpenStructuralIndex()!;
+        return index.Tags.Where(t => ((IDbfIndexTag)t).IsUnique).Select(t => t.Name.ToUpperInvariant()).ToHashSet();
+    }
+
+    // New records need their own values in whole-number fields, which is where candidate (primary)
+    // keys like CALL_ID live: a copy would repeat the key, and FoxPro and Thunder.Dbf both refuse that.
+    private static object?[] WithNewIds(DbfTable table, object?[] values, int serial)
+    {
+        for (var i = 0; i < table.Fields.Count; i++)
+        {
+            var field = table.Fields[i];
+            if (field.IsSystem || field.IsAutoIncrement)
+                continue;
+            if (field.Type == 'I')
+                values[i] = serial;
+            else if (field.Type == 'N' && field.DecimalCount == 0 && field.Length >= 7)
+                values[i] = (decimal)serial;
+        }
+        return values;
     }
 
     // A copy of a record with its character fields changed, so new keys land all over each tag.
