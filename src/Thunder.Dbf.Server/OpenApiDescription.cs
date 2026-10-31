@@ -1,9 +1,10 @@
 //      openapi: 3.1            ProjectThunder :: Thunder.Dbf
 //      paths:                  The document at /openapi/v1.json: every route, its
-//        /tables/{name}: ...   ProblemDetails answers, and the X-Api-Key header.
-//      components:
-//        securitySchemes:      Records are described generically (an object keyed by
-//          ApiKey: header      field name); GET /tables/{name} gives the real fields.
+//        /tables/{name}: ...   ProblemDetails answers, the X-Api-Key header and, when
+//      components:             OpenID Connect is on, bearer tokens.
+//        securitySchemes:
+//          ApiKey: header      Records are described generically here, because anyone may read
+//          Bearer: http        this document; TableOpenApi adds a schema per table for callers.
 
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
@@ -38,6 +39,24 @@ internal sealed class OpenApiDescription : IOpenApiDocumentTransformer
         {
             [new OpenApiSecuritySchemeReference(ApiKeyAuthentication.SchemeName, document)] = [],
         });
+
+        // Two requirements means either one will do. The authority isn't named: this document is
+        // served to anyone, and a tenant id is nobody else's business.
+        var thunder = context.ApplicationServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<ThunderOptions>>().Value;
+        if (thunder.OpenIdConnect.Enabled)
+        {
+            document.Components.SecuritySchemes[OidcAuthentication.SchemeName] = new OpenApiSecurityScheme
+            {
+                Type = SecuritySchemeType.Http,
+                Scheme = "bearer",
+                BearerFormat = "JWT",
+                Description = "An access token from the server's OpenID Connect provider, issued for this API. Don't send an API key as well.",
+            };
+            document.Security.Add(new OpenApiSecurityRequirement
+            {
+                [new OpenApiSecuritySchemeReference(OidcAuthentication.SchemeName, document)] = [],
+            });
+        }
         return Task.CompletedTask;
     }
 }

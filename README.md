@@ -147,6 +147,7 @@ Done:
 7. ~~Safe JSON API service~~
 8. ~~Live bridge with SQL Server, PostgreSQL or SQLite~~
 9. ~~Migrator and ADO.NET provider~~
+10. ~~OpenID Connect sign-in for the web service, and an OpenAPI schema per table~~
 
 Next:
 
@@ -154,7 +155,6 @@ Next:
 - Typed records and LINQ: map a table to a C# class, and a LINQ provider that turns `Where` on an indexed field into a seek. Today LINQ to Objects works over `ReadAll()`.
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
 - Creating index tags (`INDEX ON`) and packing tables (`PACK`)
-- OpenID Connect sign-in for the web service, and an OpenAPI schema per table
 - NuGet packages, coming with 0.1.0: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool on nuget.org, and self-contained web service downloads for Windows, Linux and macOS on each GitHub release. The packaging and release workflow are ready.
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).

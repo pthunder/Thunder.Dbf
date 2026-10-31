@@ -185,7 +185,7 @@ public sealed partial class DbfTable
             decimal or double or int or long => 'N',
             DateOnly or DateTime => 'D',
             var other => throw new DbfException(DbfErrorCode.InvalidValue,
-                $"The key expression gives {(other is bool ? "a logical value" : other.GetType().Name)}; .mdx keys are text, numbers or dates.",
+                $"The key expression gives {(other is bool ? "a logical value" : other?.GetType().Name ?? "nothing")}; .mdx keys are text, numbers or dates.",
                 "Convert it, for example IIF(ACTIVE, \"Y\", \"N\") for a logical field.", _path),
         };
         if (type != 'C')

@@ -15,19 +15,23 @@ using Microsoft.Extensions.Options;
 namespace Thunder.Dbf.Server;
 
 /// <summary>
-/// Authenticates requests by the <c>X-Api-Key</c> header. Another scheme (OpenID Connect, say) can sit
-/// beside it later: permissions hang off the <see cref="ApiKeyAuthentication.KeyIdClaim"/> claim, not the scheme.
+/// Authenticates requests by the <c>X-Api-Key</c> header. <see cref="OidcAuthentication"/> sits beside it
+/// for bearer tokens; both name the caller with the <see cref="KeyIdClaim"/> claim, and
+/// <see cref="AccessRegistry"/> turns the caller into permissions, so endpoints don't care which was used.
 /// </summary>
 public sealed class ApiKeyAuthentication(
     IOptionsMonitor<AuthenticationSchemeOptions> options,
     ILoggerFactory logger,
     UrlEncoder encoder,
     AccessRegistry registry,
-    IProblemDetailsService problems)
+    IProblemDetailsService problems,
+    IOptions<ThunderOptions> thunder)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
     public const string SchemeName = "ApiKey";
     public const string HeaderName = "X-Api-Key";
+
+    /// <summary>Who is calling: the API key's id, or <c>oidc:&lt;subject&gt;</c> for a signed-in user.</summary>
     public const string KeyIdClaim = "thunder:key_id";
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
@@ -55,12 +59,18 @@ public sealed class ApiKeyAuthentication(
     protected override async Task HandleChallengeAsync(AuthenticationProperties properties)
     {
         Response.StatusCode = StatusCodes.Status401Unauthorized;
-        Response.Headers.WWWAuthenticate = $"{SchemeName} header=\"{HeaderName}\"";
+        var bearer = thunder.Value.OpenIdConnect.Enabled;
+        Response.Headers.WWWAuthenticate = bearer
+            ? new Microsoft.Extensions.Primitives.StringValues([$"{SchemeName} header=\"{HeaderName}\"", OidcAuthentication.SchemeName])
+            : $"{SchemeName} header=\"{HeaderName}\"";
         await problems.WriteAsync(new ProblemDetailsContext
         {
             HttpContext = Context,
-            ProblemDetails = Problems.Create(StatusCodes.Status401Unauthorized, "An API key is required.",
-                $"Send a valid key in the {HeaderName} header.", "Unauthorized"),
+            ProblemDetails = bearer
+                ? Problems.Create(StatusCodes.Status401Unauthorized, "An API key or a bearer token is required.",
+                    $"Send a valid key in the {HeaderName} header, or a token from the identity provider as Authorization: Bearer.", "Unauthorized")
+                : Problems.Create(StatusCodes.Status401Unauthorized, "An API key is required.",
+                    $"Send a valid key in the {HeaderName} header.", "Unauthorized"),
         });
     }
 
@@ -75,7 +85,10 @@ public sealed class ApiKeyAuthentication(
     }
 }
 
-/// <summary>What one API key may do, resolved from configuration once at startup.</summary>
+/// <summary>
+/// What one caller may do: an API key, or a signed-in user with the permissions of their access
+/// profile. Resolved from configuration once at startup.
+/// </summary>
 public sealed class KeyAccess
 {
     private readonly bool _readAll;
@@ -84,10 +97,9 @@ public sealed class KeyAccess
     private readonly HashSet<string> _write;
     private readonly Dictionary<string, HashSet<string>> _fields;
 
-    internal KeyAccess(ApiKeyOptions options, byte[] hash)
+    internal KeyAccess(string id, AccessOptions options)
     {
-        Id = options.Id;
-        Hash = hash;
+        Id = id;
         CanListTables = options.CanListTables;
         _readAll = options.Read.Contains("*");
         _writeAll = options.Write.Contains("*");
@@ -98,9 +110,25 @@ public sealed class KeyAccess
             _fields[Bare(table)] = new HashSet<string>(fields, StringComparer.OrdinalIgnoreCase);
     }
 
+    // The same permissions under another caller's name: every user mapped to a profile shares its
+    // rules, but the journal and logs must say which user it was.
+    private KeyAccess(KeyAccess profile, string id)
+    {
+        Id = id;
+        CanListTables = profile.CanListTables;
+        _readAll = profile._readAll;
+        _writeAll = profile._writeAll;
+        _read = profile._read;
+        _write = profile._write;
+        _fields = profile._fields;
+    }
+
+    /// <summary>The caller's name in logs and the journal: the key id, or <c>oidc:&lt;subject&gt;</c>.</summary>
     public string Id { get; }
-    internal byte[] Hash { get; }
+
     public bool CanListTables { get; }
+
+    internal KeyAccess As(string id) => new(this, id);
 
     public bool CanRead(string table) => _readAll || _read.Contains(table);
 
@@ -115,16 +143,29 @@ public sealed class KeyAccess
         table.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase) ? table[..^4] : table;
 }
 
-/// <summary>Every configured key, and the constant-time lookup from a presented key to its id.</summary>
+/// <summary>
+/// Every configured key and access profile: the constant-time lookup from a presented key to its id,
+/// and from an authenticated caller to what it may do.
+/// </summary>
 public sealed class AccessRegistry
 {
-    private readonly IReadOnlyList<KeyAccess> _keys;
+    private readonly IReadOnlyList<(KeyAccess Access, byte[] Hash)> _keys;
+    private readonly Dictionary<string, KeyAccess> _profiles;
+    private readonly IReadOnlyList<ClaimMapOptions> _map;
+    private readonly bool _oidcEnabled;
+    private readonly ILogger<AccessRegistry> _logger;
 
-    public AccessRegistry(IOptions<ThunderOptions> options)
+    public AccessRegistry(IOptions<ThunderOptions> options, ILogger<AccessRegistry> logger)
     {
+        _logger = logger;
         _keys = options.Value.ApiKeys
-            .Select(k => new KeyAccess(k, ApiKeyHasher.TryParseHash(k.Sha256) ?? throw new InvalidOperationException($"API key '{k.Id}' has no valid hash.")))
+            .Select(k => (new KeyAccess(k.Id, k), ApiKeyHasher.TryParseHash(k.Sha256) ?? throw new InvalidOperationException($"API key '{k.Id}' has no valid hash.")))
             .ToList();
+
+        var oidc = options.Value.OpenIdConnect;
+        _oidcEnabled = oidc.Enabled;
+        _profiles = oidc.Profiles.ToDictionary(p => p.Key, p => new KeyAccess(p.Key, p.Value), StringComparer.OrdinalIgnoreCase);
+        _map = oidc.Map;
     }
 
     /// <summary>
@@ -135,21 +176,68 @@ public sealed class AccessRegistry
     {
         var hash = ApiKeyHasher.Hash(presentedKey);
         KeyAccess? found = null;
-        foreach (var key in _keys)
+        foreach (var (access, keyHash) in _keys)
         {
-            if (CryptographicOperations.FixedTimeEquals(hash, key.Hash))
-                found ??= key;
+            if (CryptographicOperations.FixedTimeEquals(hash, keyHash))
+                found ??= access;
         }
         return found?.Id;
     }
 
-    /// <summary>The permissions of the authenticated caller. Endpoints only run for authenticated callers.</summary>
+    /// <summary>
+    /// The permissions of the authenticated caller. Endpoints only run for authenticated callers. A
+    /// signed-in user whose token maps to no profile gets a 403 here, before any table is touched.
+    /// </summary>
     public KeyAccess For(ClaimsPrincipal user)
     {
         var id = user.FindFirst(ApiKeyAuthentication.KeyIdClaim)?.Value;
-        return _keys.FirstOrDefault(k => k.Id == id)
-            ?? throw new ApiProblem(StatusCodes.Status401Unauthorized, "An API key is required.", null, "Unauthorized");
+
+        // Which scheme vouched for the caller decides where its permissions come from, so a claim
+        // can never make a token look like an API key, or the other way round.
+        switch (user.Identity?.AuthenticationType)
+        {
+            case ApiKeyAuthentication.SchemeName:
+                foreach (var (access, _) in _keys)
+                {
+                    if (access.Id == id)
+                        return access;
+                }
+                break;
+
+            case OidcAuthentication.SchemeName when _oidcEnabled && id is not null:
+                if (ProfileFor(user) is { } profile)
+                    return profile.As(id);
+                if (RejectionLog.ShouldLog(id, out var suppressed))
+                    _logger.LogWarning("Signed-in user {Caller} has a valid token that no rule in Thunder:OpenIdConnect:Map matches ({Suppressed} more refusals not logged).",
+                        id, suppressed);
+                throw ApiProblem.Forbidden("You're signed in, but your account isn't mapped to any access profile on this server.",
+                    "Ask the server's administrator to map one of your roles or groups to a profile.");
+        }
+        throw new ApiProblem(StatusCodes.Status401Unauthorized, "An API key or a bearer token is required.", null, "Unauthorized");
     }
+
+    // The first rule that matches wins, so a user in two groups gets one profile's permissions,
+    // never a mix of two that nobody wrote down.
+    private KeyAccess? ProfileFor(ClaimsPrincipal user)
+    {
+        foreach (var rule in _map)
+        {
+            var matched =
+                !string.IsNullOrEmpty(rule.Role) ? HasValue(user, rule.Role, "roles", "role") :
+                !string.IsNullOrEmpty(rule.Group) ? HasValue(user, rule.Group, "groups") :
+                !string.IsNullOrEmpty(rule.Claim) && rule.Value is not null && HasValue(user, rule.Value, rule.Claim);
+            if (matched && _profiles.TryGetValue(rule.Profile, out var profile))
+                return profile;
+        }
+        return null;
+    }
+
+    // OAuth scopes come as one space-separated claim ("scope": "dbf.read dbf.write"), so those are split.
+    private static bool HasValue(ClaimsPrincipal user, string value, params string[] types) =>
+        user.Claims.Any(c => types.Contains(c.Type, StringComparer.Ordinal)
+            && (c.Type is "scope" or "scp"
+                ? c.Value.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains(value, StringComparer.Ordinal)
+                : string.Equals(c.Value, value, StringComparison.Ordinal)));
 }
 
 /// <summary>Samples "unknown key" warnings: one line per address per minute, however many guesses.</summary>
