@@ -13,14 +13,15 @@ xBase programs lock bytes far past the end of the file, so locks never cover rea
 
 | Scheme | Header and append | Record *n* | Whole table |
 |---|---|---|---|
-| **dBASE** (dBASE III/IV, the Borland Database Engine, Microsoft Jet and ACE) | 4,026,531,839 (the append byte) | 4,026,531,838 − *n* | 3,026,531,838 for 1,000,000,000 bytes, plus 4,026,531,838 and 4,026,531,839 |
+| **dBASE** (dBASE III/IV, the Borland Database Engine) | 4,026,531,838 (header), 4,026,531,839 (append) | 4,026,531,838 − *n* | 3,026,531,838 for 1,000,000,000 bytes, plus header and append |
+| **Jet** (Microsoft Access, Jet and ACE: ADO or ODBC with the dBASE driver) | 4,026,531,839 (the append byte, for both) | 4,026,531,838 − *n* | as dBASE |
 | **Clipper** (and Harbour's default) | 1,000,000,000 | 1,000,000,000 + *n* | 1,000,000,001 for 1,000,000,000 bytes |
 | **Visual FoxPro**, no `.cdx` | 0x40000000 | 0x40000000 + the record's byte offset | 0x40000001 for 0x3FFFFFFD bytes |
 | **Visual FoxPro**, with a `.cdx` | 0x7FFFFFFE | 0x7FFFFFFE − *n* | 0x77FFFFFF for 0x07FFFFFF bytes |
 
-The Clipper and Visual FoxPro offsets follow Harbour's DBF driver (read, not copied). In the dBASE scheme, header changes (appends, and the index updates every write makes) take the append byte, as Microsoft's Jet does to append: Jet reads a held header byte, 4,026,531,838, as "the table is opened exclusively by another user" and fails at once, so that byte is only held as part of the whole-table lock. Measured against Jet 4.0 on Windows; Jet also honours the record locks and the whole-table range.
+The Clipper and Visual FoxPro offsets follow Harbour's DBF driver (read, not copied). Choose **Jet** when Access, or any program using Microsoft's Jet or ACE dBASE driver, shares the tables. Jet reads a held header byte, 4,026,531,838, as "the table is opened exclusively by another user" and fails at once, so under the dBASE scheme its users get that error whenever Thunder.Dbf appends or updates. The Jet scheme makes those header changes under the append byte, which Jet itself takes to append, and only holds the header byte as part of the whole-table lock. Measured against Jet 4.0 on Windows; Jet also honours the record locks and the whole-table range. `Auto` never picks Jet: a dBASE table doesn't say which program writes it, and the Borland Database Engine (GoldMine) hasn't been measured, so dBASE stays the default.
 
-`Auto`, the default, picks Visual FoxPro for FoxPro tables and dBASE for everything else. Clipper tables look like dBASE ones from the outside, so a Clipper app needs the scheme set explicitly:
+`Auto`, the default, picks Visual FoxPro for FoxPro tables and dBASE for everything else. Clipper tables look like dBASE ones from the outside, so a Clipper app needs the scheme set explicitly, and so do tables Access writes (`Jet`):
 
 ```csharp
 var db = DbfDatabase.Open(folder, new DbfDatabaseOptions { ReadOnly = false, LockScheme = DbfLockScheme.Clipper });
@@ -37,7 +38,7 @@ Inside one process, every `DbfTable` open on the same file shares one set of loc
 | Operation | Locks |
 |---|---|
 | `Append`, `AppendRange` | header + append, for the whole batch; the record count is re-read first |
-| `Update`, `Delete`, `Recall` | that record + the header lock (the append byte in the dBASE scheme) |
+| `Update`, `Delete`, `Recall` | that record + the header lock (the append byte in the Jet scheme) |
 | `RebuildIndex` | the whole table |
 | Reads | nothing, like dBASE |
 

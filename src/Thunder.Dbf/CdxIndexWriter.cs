@@ -138,9 +138,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 damage = ExceptionDispatchInfo.Capture(ex);
             }
 
-            bool settled;
-            using (TryTakeIndexLock())
+            bool settled, locked;
+            using (var held = TryTakeIndexLock())
+            {
+                locked = held is not null;
                 settled = CurrentState() == before && ReloadRecordCount() == records;
+            }
             if (!settled)
             {
                 _verifiedTags.Clear();
@@ -150,7 +153,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 return;
             }
             damage?.Throw();
-            MaintainRefusal = refusal;
+            // Without the lock, a change in progress at both readings goes unseen, so a refusal may
+            // be that change rather than the index (Check's read-only probe, where a lock isn't allowed).
+            MaintainRefusal = refusal is not null && !locked
+                ? refusal + " (checked without Visual FoxPro's index lock, so another program's write in progress could also explain it)"
+                : refusal;
             if (refusal is null || !_outOfStep || attempt == OutOfStepAttempts)
                 return;
             Thread.Sleep(OutOfStepPause);

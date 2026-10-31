@@ -149,12 +149,10 @@ public sealed partial class DbfTable : IDisposable
             {
                 try
                 {
-                    var repaired = table.RemoveUnfinishedAppends(); // before the indexes check themselves against the table
                     if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
                         table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
                     table.AttachOtherIndexes(path, table.Header);
-                    if (repaired && table.MaintainsIndex)
-                        table.RebuildIndex(); // a writer cut off may already have added keys for those records
+                    table.RepairUnfinishedAppends();
                 }
                 catch
                 {
@@ -309,6 +307,7 @@ public sealed partial class DbfTable : IDisposable
 
     private bool _maintainFoxProIndexes;
     private string? _structuralCdxRefusal; // why the structural .cdx wasn't attached, for the write refusal
+    private bool _structuralCdxRebuildable; // and whether a takeover with a rebuild would take it
 
     private bool IsStructuralCdx(string file) =>
         Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase) && _path is not null
@@ -340,7 +339,10 @@ public sealed partial class DbfTable : IDisposable
                     return true;
                 }
                 if (index is IMaintainedIndex refused && IsStructuralCdx(file))
+                {
                     _structuralCdxRefusal = refused.CannotMaintainReason;
+                    _structuralCdxRebuildable = refused.CanMaintainAfterRebuild;
+                }
                 index.Dispose();
                 stream = null;
             }
@@ -480,8 +482,12 @@ public sealed partial class DbfTable : IDisposable
         get => _locks?.Scheme ?? DbfLocks.Resolve(_lockScheme, Header);
         set
         {
-            if (_locks is not null && _locks.Scheme != value && value != DbfLockScheme.Auto)
-                throw new InvalidOperationException("Set LockScheme before the table's first write or lock.");
+            if (_locks is not null && _locks.Scheme != DbfLocks.Resolve(value, Header))
+            {
+                if (!_locks.HoldsNothing)
+                    throw new InvalidOperationException("Set LockScheme while the table holds no lock.");
+                _locks = null; // made again, with the new positions, by the next lock
+            }
             _lockScheme = value;
         }
     }
@@ -625,18 +631,30 @@ public sealed partial class DbfTable : IDisposable
         return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
     }
 
-    // On a writable exclusive open: takes records left past the count back off. The caller then
-    // rebuilds the indexes, since a writer cut off may already have added keys for them.
-    private bool RemoveUnfinishedAppends()
+    // On a writable exclusive open: takes records left past the count back off and rebuilds every
+    // index, since a writer cut off may already have added keys for them, and a key left behind would
+    // point at whatever record is appended there next. So nothing is taken off unless every index
+    // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
+    // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
+    private void RepairUnfinishedAppends()
     {
         if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
-            return false;
+            return;
+        var takeOverCdx = Header.HasStructuralCdx && !HasMaintainedStructuralCdx;
+        if (_unmaintainedIndexes.Any(name => !IsStructuralCdx(name))
+            || (Header.HasProductionMdx && _index is null)
+            || (takeOverCdx && !(_maintainFoxProIndexes && _structuralCdxRebuildable && FindCompanion(_path!, ".cdx") is not null)))
+            return;
+
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         _stream.SetLength(dataEnd);
         _stream.Position = dataEnd;
         _stream.WriteByte(EndOfFile);
         FlushToDisk(_stream);
-        return true;
+        if (takeOverCdx)
+            MaintainIndex(FindCompanion(_path!, ".cdx")!, rebuild: true); // rebuilds every index the table keeps
+        else if (MaintainsIndex)
+            RebuildIndex();
     }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>

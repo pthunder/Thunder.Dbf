@@ -488,6 +488,42 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A writer that adds keys before it publishes the count (Harbour can) and is cut off leaves a
+    // record past the count that the .cdx already has keys for. An exclusive open takes the record
+    // off and rebuilds the .cdx, so no key is left to point at the next record appended there.
+    [Fact]
+    public void A_record_past_the_count_whose_keys_reached_the_cdx_is_repaired_with_its_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int count;
+        using (var table = OpenWritable(dbf))
+        {
+            table.Append(Call(table.Read(0).Values.ToArray(), id: 9001, contact: 1, subject: "cut off"));
+            count = table.RecordCount;
+        }
+        using (var file = SharedFile.OpenWrite(dbf))   // the count never got published
+        {
+            file.Position = 4;
+            file.Write(BitConverter.GetBytes(count - 1));
+        }
+
+        // Without FoxPro index upkeep the .cdx couldn't be rebuilt, so nothing is taken off.
+        var length = new FileInfo(dbf).Length;
+        using (DbfTable.Open(dbf, writable: true, exclusive: true)) { }
+        Assert.Equal(length, new FileInfo(dbf).Length);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Equal(count - 1, table.RecordCount);
+            Assert.True(table.MaintainsIndex);
+        }
+        Assert.True(new FileInfo(dbf).Length < length);
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+        using var reopened = DbfTable.Open(dbf);
+        using var index = CdxIndex.Open(cdx, table: reopened);
+        Assert.Empty(index["CALL_ID"].SeekExact(9001));
+    }
+
     // A FOR tag holds fewer keys than records anyway, so its count says nothing; the last records'
     // keys show an append that reached the table but not the index.
     [Fact]

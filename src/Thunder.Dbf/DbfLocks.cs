@@ -4,7 +4,8 @@
 //     |____|                         and a running legacy app see each other's locks.
 //
 //   scheme          header/append     record n                       whole file
-//   dBASE           4,026,531,839     4,026,531,838 - n              3,026,531,838 for 1e9, + 4,026,531,838-839
+//   dBASE           4,026,531,838     4,026,531,838 - n              3,026,531,838 for 1e9, + 4,026,531,838-839
+//   Jet (Access)    4,026,531,839     (append byte; header byte reads to Jet as an exclusive open)
 //   Clipper         1,000,000,000     1,000,000,000 + n              1,000,000,001 for 1e9
 //   VFP (no .cdx)   0x40000000        0x40000000 + record's offset   0x40000001 for 0x3FFFFFFD
 //   VFP (.cdx)      0x7FFFFFFE        0x7FFFFFFE - n                 0x77FFFFFF for 0x07FFFFFF
@@ -24,7 +25,7 @@ public enum DbfLockScheme
     /// <summary>Pick from the table: FoxPro and Visual FoxPro tables use <see cref="VisualFoxPro"/>, everything else <see cref="Dbase"/>.</summary>
     Auto,
 
-    /// <summary>dBASE IV and the Borland Database Engine (and so GoldMine).</summary>
+    /// <summary>dBASE IV and the Borland Database Engine (and so GoldMine): header changes under the header byte.</summary>
     Dbase,
 
     /// <summary>Clipper (and Harbour's default). Clipper tables look like dBASE ones, so choose this explicitly.</summary>
@@ -32,6 +33,13 @@ public enum DbfLockScheme
 
     /// <summary>FoxPro and Visual FoxPro. Positions differ with and without a structural .cdx.</summary>
     VisualFoxPro,
+
+    /// <summary>
+    /// Microsoft's Jet and ACE (Access, and ADO or ODBC with the dBASE driver): dBASE's positions, but header
+    /// changes under the append byte. Jet reads a held header byte as "opened exclusively" and fails at once,
+    /// so choose this when Access or Jet programs share the tables. Never picked by Auto.
+    /// </summary>
+    Jet,
 }
 
 /// <summary>A held lock. Dispose it to release the lock.</summary>
@@ -115,14 +123,19 @@ internal sealed class DbfLocks
         DbfLockScheme.Clipper => (1_000_000_000, 1),
         DbfLockScheme.VisualFoxPro => (_withCdx ? 0x7FFFFFFEL : 0x40000000L, 1),
         // Microsoft's Jet and ACE (Access) read a held dBASE header byte as "the table is opened
-        // exclusively by another user" and fail at once, so header changes take the append byte
-        // after it, which Jet itself takes to append. The header byte is only held, with the
-        // append byte, as part of the whole-table lock (measured against Jet 4.0 on Windows).
-        _ => (HeaderByte + 1, 1),
+        // exclusively by another user" and fail at once, so their scheme makes header changes under
+        // the append byte after it, which Jet itself takes to append; the header byte is only held
+        // as part of the whole-table lock (measured against Jet 4.0 on Windows).
+        DbfLockScheme.Jet => (HeaderByte + 1, 1),
+        _ => (HeaderByte, 1),
     };
 
-    // Every scheme now appends under its header lock's byte.
-    private (long Offset, long Length) AppendRange => HeaderRange;
+    // Harbour's schemes take the header byte for appends too; dBASE uses the byte after it (and Jet
+    // has only that byte).
+    internal (long Offset, long Length) AppendRange => Scheme == DbfLockScheme.Dbase ? (HeaderByte + 1, 1) : HeaderRange;
+
+    /// <summary>True when this table holds no lock, so its scheme can still change.</summary>
+    internal bool HoldsNothing => _registry is null || !_registry.HeldBy(this);
 
     internal (long Offset, long Length) RecordRange(int recordNumber) => Scheme switch
     {
@@ -309,6 +322,12 @@ internal sealed class DbfLocks
         {
             var full = Path.GetFullPath(path);
             return OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? full.ToUpperInvariant() : full;
+        }
+
+        public bool HeldBy(DbfLocks owner)
+        {
+            lock (_gate)
+                return _held.Any(h => ReferenceEquals(h.Owner, owner));
         }
 
         // Claims a range for owner. False when another owner in this process holds an overlapping

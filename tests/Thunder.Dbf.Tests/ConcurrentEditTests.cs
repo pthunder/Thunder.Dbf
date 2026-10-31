@@ -80,17 +80,32 @@ public sealed class ConcurrentEditTests : IDisposable
     }
 
     // Microsoft's Jet (Access) reads a held header byte, 4,026,531,838, as "the table is opened
-    // exclusively by another user" and fails at once (measured against Jet 4.0), and appends under
-    // the byte after it. So appends and index updates take that append byte, and the header byte is
-    // only held as part of the whole-table lock.
-    [Fact]
-    public void dBASE_header_changes_take_the_append_byte_not_the_one_Jet_reads_as_exclusive()
+    // exclusively by another user" and fails at once, and appends under the byte after it (measured
+    // against Jet 4.0). The Jet scheme makes header changes under that append byte; dBASE (dBASE IV,
+    // the Borland Database Engine) keeps the header byte.
+    [Theory]
+    [InlineData(DbfLockScheme.Dbase, 4_026_531_838L, 4_026_531_839L)]
+    [InlineData(DbfLockScheme.Jet, 4_026_531_839L, 4_026_531_839L)]
+    public void dBASE_and_Jet_take_their_own_header_bytes(DbfLockScheme scheme, long header, long append)
     {
         using var table = DbfTable.Open(_path, writable: true);
-        table.LockScheme = DbfLockScheme.Dbase;
-        Assert.Equal((4_026_531_839L, 1L), table.Locks.HeaderRange);
+        table.LockScheme = scheme;
+        Assert.Equal((header, 1L), table.Locks.HeaderRange);
+        Assert.Equal((append, 1L), table.Locks.AppendRange);
         Assert.Contains((4_026_531_838L, 2L), table.Locks.TableRanges);
         Assert.Contains((3_026_531_838L, 1_000_000_000L), table.Locks.TableRanges);
+        Assert.Equal((4_026_531_835L, 1L), table.Locks.RecordRange(3));
+    }
+
+    [Fact]
+    public void The_lock_scheme_can_change_while_no_lock_is_held()
+    {
+        using var table = DbfTable.Open(_path, writable: true);
+        using (table.LockTable()) { }
+        table.LockScheme = DbfLockScheme.Jet;
+        Assert.Equal(DbfLockScheme.Jet, table.LockScheme);
+        using var held = table.LockTable();
+        Assert.Throws<InvalidOperationException>(() => table.LockScheme = DbfLockScheme.Clipper);
     }
 
     [Fact]

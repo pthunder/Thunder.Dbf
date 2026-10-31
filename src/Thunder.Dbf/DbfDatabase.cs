@@ -439,7 +439,7 @@ public sealed class DbfDatabase : IDisposable
                         LockScheme = Enum.TryParse<DbfLockScheme>(value, ignoreCase: true, out var scheme)
                             ? scheme
                             : throw new DbfException(DbfErrorCode.InvalidConnectionString, $"'{value}' isn't a lock scheme.",
-                                "Use Auto, Dbase, Clipper or VisualFoxPro."),
+                                "Use Auto, Dbase, Clipper, VisualFoxPro or Jet."),
                     };
                     break;
                 case "allowunmaintainedindexes":
