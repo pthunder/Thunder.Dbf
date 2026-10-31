@@ -36,6 +36,7 @@ public sealed class DbfExpression
         _root = root;
     }
 
+    /// <summary>The expression as it was written.</summary>
     public string Text { get; }
 
     /// <summary>
@@ -70,6 +71,7 @@ public sealed class DbfExpression
         }
     }
 
+    /// <summary>Parses <paramref name="text"/>, such as <c>UPPER(LASTNAME)+DTOS(HIRED)</c>, without evaluating it.</summary>
     public static DbfExpression Parse(string text)
     {
         var parser = new Parser(text);

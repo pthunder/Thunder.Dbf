@@ -36,6 +36,8 @@ public sealed partial class NtxIndex : IDisposable
     /// <summary>The one tag, as a list, so code written for .mdx and .cdx tags works here too.</summary>
     public IReadOnlyList<NtxTag> Tags => [Tag];
 
+    /// <summary>The index's one tag, if it's called <paramref name="tagName"/> (in any case).</summary>
+    /// <exception cref="KeyNotFoundException">The tag has another name.</exception>
     public NtxTag this[string tagName] =>
         string.Equals(Tag.Name, tagName, StringComparison.OrdinalIgnoreCase)
             ? Tag
@@ -49,6 +51,8 @@ public sealed partial class NtxIndex : IDisposable
     /// file doesn't say what the text means, so without the table all keys read as strings. With it,
     /// the key expression is evaluated on a blank record to learn its type, as Clipper itself does,
     /// and numeric, date and logical keys read back as numbers, <see cref="DateOnly"/> and bool.</param>
+    /// <param name="path">The .ntx file.</param>
+    /// <param name="encoding">How character keys decode, overriding the table's encoding.</param>
     public static NtxIndex Open(string path, Encoding? encoding = null, DbfTable? table = null)
     {
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -75,6 +79,7 @@ public sealed partial class NtxIndex : IDisposable
         return index;
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (!_leaveOpen)
@@ -139,13 +144,18 @@ public sealed partial class NtxTag
 
     /// <summary>'C', 'N', 'D' or 'L'. Always 'C' unless the index was opened with its table.</summary>
     public char KeyType { get; private init; }
+    /// <inheritdoc />
     public int KeyLength { get; private init; }
 
     /// <summary>Decimal places in a numeric key, as given to STR() when the key was built.</summary>
     public int KeyDecimals { get; private init; }
+    /// <inheritdoc />
     public bool IsDescending { get; private init; }
+    /// <inheritdoc />
     public bool IsUnique { get; private init; }
+    /// <inheritdoc />
     public string Expression { get; private init; } = "";
+    /// <inheritdoc />
     public string? ForExpression { get; private init; }
 
     internal int MaxKeys { get; private init; }

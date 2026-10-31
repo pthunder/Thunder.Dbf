@@ -23,17 +23,24 @@ public sealed class DbfProviderFactory : DbProviderFactory
     {
     }
 
+    /// <inheritdoc />
     public override DbConnection CreateConnection() => new DbfConnection();
 
+    /// <inheritdoc />
     public override DbCommand CreateCommand() => new DbfCommand();
 
+    /// <inheritdoc />
     public override DbParameter CreateParameter() => new DbfParameter();
 
+    /// <inheritdoc />
     public override DbConnectionStringBuilder CreateConnectionStringBuilder() => new();
 
+    /// <inheritdoc />
     public override bool CanCreateDataAdapter => false;
 
+    /// <inheritdoc />
     public override bool CanCreateCommandBuilder => false;
 
+    /// <inheritdoc />
     public override bool CanCreateDataSourceEnumerator => false;
 }

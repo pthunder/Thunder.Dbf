@@ -15,8 +15,10 @@ namespace Thunder.Dbf;
 /// <summary>The Mazovia (Polish DOS) single-byte code page, known as code page 620.</summary>
 public sealed class MazoviaEncoding : Encoding
 {
+    /// <summary>The code page number Mazovia is known by in dBASE and Clipper (620).</summary>
     public const int MazoviaCodePage = 620;
 
+    /// <summary>The one shared instance.</summary>
     public static readonly MazoviaEncoding Instance = new();
 
     private static readonly char[] HighHalf =
@@ -42,13 +44,19 @@ public sealed class MazoviaEncoding : Encoding
     private static readonly Dictionary<char, byte> Reverse =
         HighHalf.Select((c, i) => (c, b: (byte)(0x80 + i))).ToDictionary(x => x.c, x => x.b);
 
+    /// <inheritdoc />
     public override int CodePage => MazoviaCodePage;
+    /// <inheritdoc />
     public override string WebName => "mazovia";
+    /// <inheritdoc />
     public override string EncodingName => "Polish (Mazovia)";
+    /// <inheritdoc />
     public override bool IsSingleByte => true;
 
+    /// <inheritdoc />
     public override int GetByteCount(char[] chars, int index, int count) => count;
 
+    /// <inheritdoc />
     public override int GetBytes(char[] chars, int charIndex, int charCount, byte[] bytes, int byteIndex)
     {
         for (var i = 0; i < charCount; i++)
@@ -66,8 +74,10 @@ public sealed class MazoviaEncoding : Encoding
         return charCount;
     }
 
+    /// <inheritdoc />
     public override int GetCharCount(byte[] bytes, int index, int count) => count;
 
+    /// <inheritdoc />
     public override int GetChars(byte[] bytes, int byteIndex, int byteCount, char[] chars, int charIndex)
     {
         for (var i = 0; i < byteCount; i++)
@@ -78,6 +88,8 @@ public sealed class MazoviaEncoding : Encoding
         return byteCount;
     }
 
+    /// <inheritdoc />
     public override int GetMaxByteCount(int charCount) => charCount;
+    /// <inheritdoc />
     public override int GetMaxCharCount(int byteCount) => byteCount;
 }

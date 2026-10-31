@@ -7,13 +7,17 @@ namespace Thunder.Dbf;
 /// <summary>One tag (B-tree) of any supported index format.</summary>
 public interface IDbfIndexTag
 {
+    /// <summary>The tag's name (for a single-tag file, the file's name).</summary>
     string Name { get; }
 
     /// <summary>'C' (character), 'N' (numeric), 'D' (date) or 'L' (logical).</summary>
     char KeyType { get; }
 
+    /// <summary>Bytes per key.</summary>
     int KeyLength { get; }
+    /// <summary>True when keys are stored in descending order.</summary>
     bool IsDescending { get; }
+    /// <summary>True when the tag keeps only the first record for each key (dBASE UNIQUE).</summary>
     bool IsUnique { get; }
 
     /// <summary>The dBASE key expression, such as <c>UPPER(LASTNAME)+DTOS(HIRED)</c>.</summary>
@@ -35,9 +39,11 @@ public interface IDbfIndexTag
 /// <summary>An open index file of any supported format, with one or more tags.</summary>
 public interface IDbfIndex : IDisposable
 {
+    /// <summary>The tags in the file.</summary>
     IReadOnlyList<IDbfIndexTag> Tags { get; }
 }
 
+/// <summary>Helpers that work on any <see cref="IDbfIndex"/>.</summary>
 public static class DbfIndexExtensions
 {
     /// <summary>The tag called <paramref name="name"/>, in any case.</summary>

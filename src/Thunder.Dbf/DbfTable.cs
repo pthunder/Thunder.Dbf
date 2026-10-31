@@ -73,10 +73,15 @@ public sealed class DbfTable : IDisposable
                 "Copy the memo file next to the table (same name), or open with ignoreMissingMemo: true to read memo fields as null.");
     }
 
+    /// <summary>The table's header: version, record count and field descriptors.</summary>
     public DbfHeader Header { get; }
+    /// <summary>The encoding text fields are read and written with.</summary>
     public Encoding Encoding { get; }
+    /// <summary>The fields, in table order.</summary>
     public IReadOnlyList<DbfField> Fields => Header.Fields;
+    /// <summary>The number of records, including those marked deleted.</summary>
     public int RecordCount => checked((int)Header.RecordCount);
+    /// <summary>True when the table was opened for writing.</summary>
     public bool CanWrite => _stream.CanWrite;
 
     /// <summary>The memo file's format, or null when the table has none (or it was missing and ignored).</summary>
@@ -91,6 +96,9 @@ public sealed class DbfTable : IDisposable
     /// Updates then leave those memo pointers untouched.</param>
     /// <param name="allowUnmaintainedIndexes">Allow writes to a table with a production .mdx or structural .cdx.
     /// Thunder.Dbf doesn't update those yet, so they go stale until something rebuilds them.</param>
+    /// <param name="path">The .dbf file.</param>
+    /// <param name="writable">Open for writing. Read-only by default.</param>
+    /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
         bool allowUnmaintainedIndexes = false)
     {
@@ -634,6 +642,7 @@ public sealed class DbfTable : IDisposable
     /// <summary>Clears the deletion mark, like dBASE's RECALL.</summary>
     public void Recall(int index) => SetDeletionFlag(index, LiveFlag);
 
+    /// <inheritdoc />
     public void Dispose()
     {
         _memo?.Dispose();

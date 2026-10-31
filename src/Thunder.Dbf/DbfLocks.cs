@@ -41,6 +41,7 @@ public sealed class DbfLock : IDisposable
 
     internal DbfLock(Action release) => _release = release;
 
+    /// <inheritdoc />
     public void Dispose()
     {
         _release?.Invoke();

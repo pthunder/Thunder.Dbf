@@ -55,6 +55,8 @@ public sealed partial class CdxIndex : IDisposable
     /// <summary>The tags, in the order they were created.</summary>
     public IReadOnlyList<CdxTag> Tags { get; private set; } = [];
 
+    /// <summary>The tag called <paramref name="tagName"/>, in any case.</summary>
+    /// <exception cref="KeyNotFoundException">The index has no such tag.</exception>
     public CdxTag this[string tagName] =>
         Tags.FirstOrDefault(t => string.Equals(t.Name, tagName, StringComparison.OrdinalIgnoreCase))
         ?? throw new KeyNotFoundException($"The index has no tag named '{tagName}'.");
@@ -67,6 +69,8 @@ public sealed partial class CdxIndex : IDisposable
     /// FoxPro evaluates each key expression to find out. With the table, each expression is evaluated
     /// on a blank record the same way, and numeric, date and logical keys decode to numbers,
     /// <see cref="DateOnly"/> and bool. Without it, every key reads as a string.</param>
+    /// <param name="path">The .cdx or .idx file.</param>
+    /// <param name="encoding">How character keys decode, overriding the table's encoding.</param>
     public static CdxIndex Open(string path, Encoding? encoding = null, DbfTable? table = null)
     {
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -143,6 +147,7 @@ public sealed partial class CdxIndex : IDisposable
             .FirstOrDefault(p => string.Equals(Path.GetFileName(p), wanted, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (!_leaveOpen)
@@ -193,14 +198,20 @@ public sealed partial class CdxTag
         Name = name;
     }
 
+    /// <inheritdoc />
     public string Name { get; }
 
     /// <summary>'C', 'N', 'D' or 'L'. Always 'C' unless the index was opened with its table.</summary>
     public char KeyType { get; private init; }
+    /// <inheritdoc />
     public int KeyLength { get; private init; }
+    /// <inheritdoc />
     public bool IsDescending { get; private init; }
+    /// <inheritdoc />
     public bool IsUnique { get; private init; }
+    /// <inheritdoc />
     public string Expression { get; private init; } = "";
+    /// <inheritdoc />
     public string? ForExpression { get; private init; }
 
     /// <summary>True when keys were upper-cased as they were stored (a CLIP / Harbour extension).</summary>
