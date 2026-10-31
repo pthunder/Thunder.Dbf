@@ -20,6 +20,11 @@
 | Weekly (Monday) | Dependabot update pull requests for NuGet packages and Actions | `.github/dependabot.yml` |
 | Weekly (Monday) | Tests on the latest SDK, vulnerability rescan and editorial check; opens or updates a `maintenance` issue if anything fails | `.github/workflows/weekly-maintenance.yml` |
 | Continuously | Secret scanning with push protection, Dependabot alerts | GitHub settings (below) |
+| Every new issue | Claude labels it, answers from the docs or asks for what's missing to reproduce it, links duplicates, and points security reports to SECURITY.md. It can only read the repo and comment or label. | `.github/workflows/claude-triage.yml` |
+| Every pull request from this repo | Claude reviews it against the [editorial guidelines](editorial-guidelines.md), with comments on the lines | `.github/workflows/claude-review.yml` |
+| A comment mentioning `@claude`, from someone with write access | Claude answers, reviews a fork's pull request, or drafts a fix on a branch. It never merges, and it can't build or run code (a fork's code would run with a write token). | `.github/workflows/claude.yml` |
+
+The three Claude workflows do nothing until the repository has an `ANTHROPIC_API_KEY` secret (an Anthropic API key) or a `CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`, for a Claude subscription). Add one under Settings → Secrets and variables → Actions. A person still decides every merge: branch protection requires a maintainer's approval.
 
 ## What people do
 
