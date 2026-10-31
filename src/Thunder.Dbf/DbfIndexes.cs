@@ -129,6 +129,18 @@ internal interface IMaintainedIndex : IDisposable
     /// </summary>
     IDisposable? Hold() => null;
 
+    /// <summary>
+    /// Starts a batch (DbfTable.DeferIndexWrites under LockTable): the index lock is held until
+    /// <see cref="FinishDeferredWrites"/>, and each changed page is written once, then. False when the
+    /// format doesn't defer (the batch then writes as usual).
+    /// </summary>
+    bool BeginDeferredWrites() => false;
+
+    /// <summary>Writes the batch's pages, publishes them and releases the index lock; forced to disk unless <paramref name="toDisk"/> is false.</summary>
+    void FinishDeferredWrites(bool toDisk)
+    {
+    }
+
     /// <summary>Pushes every change out of this process, and forces it to the disk unless <paramref name="toDisk"/> is false.</summary>
     void Commit(bool toDisk);
 }

@@ -168,4 +168,76 @@ public sealed partial class CdxWriteTests
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         Assert.True(table.FolderLookPending); // refused, so the next write looks again
     }
+
+    // DeferIndexWrites: a batch under LockTable() writes each changed .cdx page once, when the lock
+    // goes. The index then holds exactly what per-record writes would have left.
+    [Fact]
+    public void A_deferred_batch_leaves_the_index_exactly_as_record_by_record_writes_would()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            table.DeferIndexWrites = true;
+            table.FlushWritesToDisk = false;
+            var template = table.Read(0).Values.ToArray();
+            using (table.LockTable())
+            {
+                for (var id = 5000; id < 5600; id++)
+                    table.Append(Call(template, id, contact: id % 13, subject: $"batch {id}"));
+                table.Update(4, Call(template, id: 9000, contact: 3, subject: "changed in the batch"));
+                table.Delete(7);
+                var onDisk = SharedFile.ReadAllBytes(cdx);
+                Assert.Equal(new byte[0x200], onDisk[^0x200..]); // the batch's newest page: still blank on disk
+            }
+            table.Append(Call(template, 9100, contact: 1, subject: "after the batch"));
+        }
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
+    // What a process killed during a batch leaves on disk: the records, and an index without their
+    // keys. It isn't silent: the next writable open refuses the index until it's rebuilt.
+    [Fact]
+    public void A_batch_cut_off_leaves_an_index_the_next_open_reports()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        var killed = Directory.CreateDirectory(Path.Combine(_dir.FullName, "killed")).FullName;
+        using (var table = OpenShared(dbf))
+        {
+            table.DeferIndexWrites = true;
+            var template = table.Read(0).Values.ToArray();
+            using (table.LockTable())
+            {
+                for (var id = 5000; id < 5050; id++)
+                    table.Append(Call(template, id, contact: 2, subject: "cut off"));
+                foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+                    File.WriteAllBytes(Path.Combine(killed, Path.GetFileName(file)), SharedFile.ReadAllBytes(file));
+            }
+        }
+        var error = Assert.Throws<DbfException>(() =>
+        {
+            using var reopened = DbfTable.Open(Path.Combine(killed, "calls.dbf"), writable: true, maintainFoxProIndexes: true);
+            reopened.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" });
+        });
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        AssertIndexMatchesTable(dbf, cdx); // the batch that finished is whole
+    }
+
+    // The journal promises each write's keys are finished on disk before its note goes, so a table
+    // keeping one writes record by record whatever DeferIndexWrites says.
+    [Fact]
+    public void A_table_keeping_a_journal_doesnt_defer()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using var table = OpenShared(dbf);
+        table.DeferIndexWrites = true;
+        table.UseJournal = true;
+        var template = table.Read(0).Values.ToArray();
+        using (table.LockTable())
+        {
+            table.Append(Call(template, 5000, contact: 2, subject: "journaled"));
+            using var reader = DbfTable.Open(dbf);
+            using var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader);
+            Assert.Contains(index["CALL_ID"].RawEntries(), e => e.Record == 17); // already on disk
+        }
+    }
 }

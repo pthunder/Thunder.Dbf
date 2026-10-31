@@ -35,6 +35,21 @@ Forcing each step to the disk (FlushFileBuffers on Windows, fsync elsewhere) is 
 
 PACK forces its writes whatever this says, and so does every write while the journal (`UseJournal`) is on: its note is emptied once what it covers is on disk, so without forced writes a power cut could keep the emptied note and lose the changes. It's on by default.
 
+### Batches: deferring index writes
+
+For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (table.LockTable()) { ... }` keeps the FoxPro `.cdx` changes in memory while the lock is held and writes each changed page once, when it's disposed, instead of after every record. Meanwhile the index lock is held too, so Visual FoxPro users wait for the batch, readers included. A process killed during the batch leaves the records written and the index without their keys; the next writable open reports that the index is short of the table (`IndexWouldGoStale`), and a rebuild (`MaintainIndex(path, rebuild: true)` or REINDEX) puts it right. It's ignored while `UseJournal` is on.
+
+### Choosing
+
+| Setting | A killed process | A power cut | Other programs meanwhile | Speed |
+|---|---|---|---|---|
+| Default (`FlushWritesToDisk` on) | Never leaves a key missing (UNIQUE tags aside); a cut-off write is caught on open | Only the write in progress can be lost | Share the table record by record | Slowest: every step forced to disk |
+| + `UseJournal` | A cut-off write is finished exactly by the next one | The same | The same | Two more forced writes per key change |
+| `FlushWritesToDisk = false` | The same as the default | The latest writes can be lost, and the index left out of step (`Check()`, then a rebuild) | The same | Several times faster |
+| + `DeferIndexWrites` under `LockTable()` | The batch's keys can be missing; reported on the next open | The same as flushes off | Wait for the batch to finish | Fastest: each index page written once per batch |
+
+Visual FoxPro and its OLE DB driver, for comparison, never force writes to disk, and keep no write order a killed process could rely on.
+
 `AppendRange` commits every 10,000 rows (configurable) and at the end. If it fails, the rows before the failure are committed, `RecordCount` says how many, and the original error is what you get back.
 
 Imports (`DbfImport.FromCsv`) build the new table under temporary names and move it into place only when everything succeeded, so a failed import leaves nothing behind. Exports write a temporary file and rename it.

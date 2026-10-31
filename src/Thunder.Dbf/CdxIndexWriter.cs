@@ -72,9 +72,93 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// <summary>True during a locked change that began with the file exactly as this process left it.</summary>
     internal bool Unchanged { get; private set; }
 
-    // One record's changes to every tag of this file, under one lock: see Hold.
+    // One record's changes to every tag of this file, under one lock: see Hold. A batch holds it too.
     private DbfLock? _held;
     private bool _holdFailed;
+
+    // A batch (DbfTable.DeferIndexWrites under LockTable): the index lock is held throughout, nobody else
+    // can read or write the file meanwhile, and page writes collect here, by page, to be written once
+    // each when it ends. Reads see them. A process killed during a batch leaves the index without the
+    // batch's changes, which the open-time count check reports.
+    private Dictionary<long, byte[]>? _deferred;
+
+    bool IMaintainedIndex.BeginDeferredWrites()
+    {
+        if (!OpenedForWriting || _held is not null)
+            return false;
+        var held = TakeIndexLock();
+        try
+        {
+            var state = BeginLockedChange();
+            if (!Unchanged)
+            {
+                // Not yet loaded and checked as of this state (the first write since opening, or another
+                // program wrote): do it now, as the first write of the batch would have.
+                ReloadTagsUnderLock(state);
+                if (MaintainRefusal is not null)
+                {
+                    Unchanged = false;
+                    _lockedCounter = null;
+                    held.Dispose();
+                    return false; // the batch's first write refuses, with the reason, as usual
+                }
+                Unchanged = _ourState == state;
+            }
+        }
+        catch
+        {
+            Unchanged = false;
+            _lockedCounter = null;
+            _nodes.Clear();
+            held.Dispose();
+            throw;
+        }
+        _held = held;
+        _holdFailed = false;
+        _deferred = [];
+        return true;
+    }
+
+    void IMaintainedIndex.FinishDeferredWrites(bool toDisk)
+    {
+        if (_deferred is not { } pages)
+            return;
+        _deferred = null;
+        var held = _held!;
+        _held = null;
+        try
+        {
+            // In offset order, contiguous pages in one write: nobody can read the file until the lock
+            // goes, so the order a crash could expose no longer matters.
+            var offsets = pages.Keys.Order().ToList();
+            for (var start = 0; start < offsets.Count;)
+            {
+                var end = start + 1;
+                while (end < offsets.Count && offsets[end] == offsets[end - 1] + DefaultPageLength)
+                    end++;
+                var run = new byte[(end - start) * DefaultPageLength];
+                for (var i = start; i < end; i++)
+                    pages[offsets[i]].CopyTo(run, (i - start) * DefaultPageLength);
+                _stream.Position = offsets[start];
+                _stream.Write(run);
+                start = end;
+            }
+            Publish(succeeded: !_holdFailed);
+            DbfTable.FlushToDisk(_stream, toDisk);
+        }
+        catch
+        {
+            _ourState = null;
+            _nodes.Clear();
+            throw;
+        }
+        finally
+        {
+            Unchanged = false;
+            _lockedCounter = null;
+            held.Dispose();
+        }
+    }
 
     // Tree nodes as this process last read or wrote them, by page offset, with the tag they belong to.
     // Used only while Unchanged: inside a locked change that began with the file exactly as this
@@ -447,37 +531,43 @@ public sealed partial class CdxIndex : IMaintainedIndex
             return;
         }
 
-        using (TakeIndexLock())
-        {
-            // Nobody changed the file since this process loaded and checked its tags: nothing to reload.
-            var state = CurrentState();
-            if (_ourState == state && MaintainRefusal is null)
-                return;
-            _ourState = null;
-            _nodes.Clear();
-            try
-            {
-                Tags = LoadTags();
-                if (_checkedState != state)
-                    CheckPageOwnership();
-            }
-            catch (InvalidDataException ex)
-            {
-                throw new DbfException(DbfErrorCode.IndexDamaged, $"The FoxPro index is damaged: {ex.Message}",
-                    "REINDEX it in FoxPro (or restore it from a backup) before writing to this table again.", _table?.FilePath, ex);
-            }
+        // Inside a batch (deferred writes) this process holds the index lock: nobody else can have changed it.
+        if (_held is not null)
+            return;
 
-            // Recomputed on every reload, so an index rebuilt into byte order is writable again, and one
-            // FoxPro rebuilt with a collation stops writes.
-            _refusedOnlyForOrder = false;
-            MaintainRefusal = FirstRefusal();
-            if (MaintainRefusal is null)
-                _ourState = state;
-        }
+        using (TakeIndexLock())
+            ReloadTagsUnderLock(CurrentState());
         if (MaintainRefusal is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
                 "Rebuild the tag in FoxPro with MACHINE collation, or open with allowUnmaintainedIndexes: true only if it will be rebuilt (REINDEX) before it's used.",
                 _table?.FilePath);
+    }
+
+    private void ReloadTagsUnderLock((long Length, uint Counter) state)
+    {
+        // Nobody changed the file since this process loaded and checked its tags: nothing to reload.
+        if (_ourState == state && MaintainRefusal is null)
+            return;
+        _ourState = null;
+        _nodes.Clear();
+        try
+        {
+            Tags = LoadTags();
+            if (_checkedState != state)
+                CheckPageOwnership();
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"The FoxPro index is damaged: {ex.Message}",
+                "REINDEX it in FoxPro (or restore it from a backup) before writing to this table again.", _table?.FilePath, ex);
+        }
+
+        // Recomputed on every reload, so an index rebuilt into byte order is writable again, and one
+        // FoxPro rebuilt with a collation stops writes.
+        _refusedOnlyForOrder = false;
+        MaintainRefusal = FirstRefusal();
+        if (MaintainRefusal is null)
+            _ourState = state;
     }
 
     private DbfLock TakeIndexLock(TimeSpan? timeout = null)
@@ -535,6 +625,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// <summary>Bumps the update counter if anything changed (so other programs drop their cached pages) and pushes everything to disk.</summary>
     internal void Commit(bool toDisk = true)
     {
+        if (_deferred is not null)
+            return; // a batch publishes when it ends
         _rebuildExpected = false; // a commit follows the rebuild; from here on order is checked again
         if (_changed)
         {
@@ -565,6 +657,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
         }
         if (_lockedCounter is not null)
             _lockedCounter = next;
+        if (_deferred is not null && _deferred.TryGetValue(0, out var first))
+            BinaryPrimitives.WriteUInt32BigEndian(first.AsSpan(CounterOffset), next); // so writing it back keeps the new counter
         BinaryPrimitives.WriteUInt32BigEndian(counter, next);
         _stream.Position = CounterOffset;
         _stream.Write(counter);
@@ -636,6 +730,16 @@ public sealed partial class CdxIndex : IMaintainedIndex
         }
         for (var page = offset - offset % DefaultPageLength; page < offset + bytes.Length; page += DefaultPageLength)
             _nodes.Remove(page);
+        if (_deferred is { } deferred)
+        {
+            // Writes are whole pages (a tag header is two), so each is kept page by page.
+            if (offset % DefaultPageLength != 0 || bytes.Length % DefaultPageLength != 0)
+                throw new InvalidOperationException($"A batch keeps whole .cdx pages; a {bytes.Length}-byte write at offset {offset} isn't one.");
+            for (var at = 0; at < bytes.Length; at += DefaultPageLength)
+                deferred[offset + at] = bytes.Slice(at, DefaultPageLength).ToArray();
+            _changed = true;
+            return;
+        }
         _stream.Position = offset;
         _stream.Write(bytes);
         _changed = true;
