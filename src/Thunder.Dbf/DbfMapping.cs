@@ -34,7 +34,7 @@ public sealed class DbfRecordNumberAttribute : Attribute;
 public sealed class DbfDeletedAttribute : Attribute;
 
 /// <summary>How one class maps onto one table's fields, worked out once per class and table layout.</summary>
-internal sealed class DbfMapper<T> where T : new()
+internal sealed class DbfMapper<T> where T : class, new()
 {
     private static readonly ConcurrentDictionary<string, DbfMapper<T>> Cache = new();
 
@@ -80,15 +80,22 @@ internal sealed class DbfMapper<T> where T : new()
 
     public static DbfMapper<T> For(DbfTable table)
     {
-        var layout = string.Join(",", table.Fields.Select(f => f.Name + ":" + f.Type));
+        var layout = string.Join(",", table.Fields.Select(f => $"{f.Name}:{f.Type}:{f.Length}:{f.DecimalCount}:{f.IsSystem}"));
         return Cache.GetOrAdd(layout, _ => new DbfMapper<T>(table.Fields));
     }
 
-    /// <summary>The field index a property maps to, or -1. Used by the LINQ provider to spot seekable conditions.</summary>
+    /// <summary>
+    /// The field a property maps to, or -1, for the LINQ provider. Only properties that are set from
+    /// the field when reading count: a get-only property never holds the field's value, so a seek on
+    /// it could disagree with a scan.
+    /// </summary>
     public int FieldOf(MemberInfo member) =>
-        _fields.FirstOrDefault(f => f.Property.Name == member.Name && f.Property.DeclaringType == member.DeclaringType) is { Property: not null } hit
+        _fields.FirstOrDefault(f => f.Property.Name == member.Name && f.Property.DeclaringType == member.DeclaringType) is { Property: { CanWrite: true, CanRead: true } } hit
             ? hit.Field
             : -1;
+
+    /// <summary>The property type a field maps to, for <see cref="FieldOf"/>'s result.</summary>
+    public Type PropertyTypeOf(int field) => _fields.First(f => f.Field == field).Property.PropertyType;
 
     public T ToObject(DbfRecord record)
     {
@@ -126,7 +133,8 @@ internal sealed class DbfMapper<T> where T : new()
     }
 
     // Enums are stored as their number, as legacy code stored codes.
-    private static object? ToField(object? value) => value is Enum e ? System.Convert.ToInt64(e, CultureInfo.InvariantCulture) : value;
+    private static object? ToField(object? value) =>
+        value is Enum e ? System.Convert.ChangeType(e, Enum.GetUnderlyingType(e.GetType()), CultureInfo.InvariantCulture) : value;
 
     private static int IndexOf(IReadOnlyList<DbfField> fields, string name)
     {
@@ -175,11 +183,11 @@ internal sealed class DbfMapper<T> where T : new()
 public static class DbfTypedRecords
 {
     /// <summary>Reads one record as a <typeparamref name="T"/>.</summary>
-    public static T Read<T>(this DbfTable table, int index) where T : new() =>
+    public static T Read<T>(this DbfTable table, int index) where T : class, new() =>
         DbfMapper<T>.For(table).ToObject(table.Read(index));
 
     /// <summary>Every live record as a <typeparamref name="T"/>, streamed in record order. Deleted records are skipped.</summary>
-    public static IEnumerable<T> ReadAll<T>(this DbfTable table) where T : new()
+    public static IEnumerable<T> ReadAll<T>(this DbfTable table) where T : class, new()
     {
         var mapper = DbfMapper<T>.For(table);
         foreach (var record in table.ReadAll())
@@ -193,14 +201,14 @@ public static class DbfTypedRecords
     // would otherwise win overload resolution and treat the object as one field value.
 
     /// <summary>Appends <paramref name="item"/> and returns the new record's 0-based index. Unmapped fields are left blank.</summary>
-    public static int AppendRecord<T>(this DbfTable table, T item) where T : new() =>
+    public static int AppendRecord<T>(this DbfTable table, T item) where T : class, new() =>
         table.Append(DbfMapper<T>.For(table).ToValues(item, table.Fields.Count));
 
     /// <summary>
     /// Writes every mapped property of <paramref name="item"/> to record <paramref name="index"/>, through
     /// <see cref="DbfTable.UpdateFields"/>: unmapped fields keep whatever is on disk at that moment.
     /// </summary>
-    public static void UpdateRecord<T>(this DbfTable table, int index, T item) where T : new() =>
+    public static void UpdateRecord<T>(this DbfTable table, int index, T item) where T : class, new() =>
         table.UpdateFields(index, DbfMapper<T>.For(table).ToChanges(item, table.Fields));
 
     /// <summary>
@@ -208,6 +216,6 @@ public static class DbfTypedRecords
     /// index tag become seeks; everything else runs in memory over a streamed scan. Deleted records are
     /// left out. Use <see cref="DbfQueryable.Explain"/> to see which happened.
     /// </summary>
-    public static IQueryable<T> AsQueryable<T>(this DbfTable table) where T : new() =>
+    public static IQueryable<T> AsQueryable<T>(this DbfTable table) where T : class, new() =>
         new DbfQueryable<T>(new DbfQueryProvider<T>(table));
 }

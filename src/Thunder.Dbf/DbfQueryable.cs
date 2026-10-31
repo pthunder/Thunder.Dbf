@@ -35,7 +35,9 @@ internal sealed class DbfQueryable<TElement>(IQueryProvider provider, Expression
 {
     public Type ElementType => typeof(TElement);
 
-    public Expression Expression { get; } = expression ?? Expression.Constant(null, typeof(DbfQueryable<TElement>));
+    // A table's own query has itself as its root, so the provider can tell its roots from any other
+    // table's when queries are combined.
+    public Expression Expression => expression ?? Expression.Constant(this, typeof(DbfQueryable<TElement>));
 
     public IQueryProvider Provider { get; } = provider;
 
@@ -48,7 +50,7 @@ internal sealed class DbfQueryable<TElement>(IQueryProvider provider, Expression
 /// Runs LINQ over one table. The root of every query is a placeholder; at run time it's replaced by
 /// the candidate records (from a seek or a scan) as LINQ to Objects, and the query runs unchanged on top.
 /// </summary>
-internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbfQueryProvider where T : new()
+internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbfQueryProvider where T : class, new()
 {
     private readonly DbfMapper<T> _mapper = DbfMapper<T>.For(table);
 
@@ -70,10 +72,11 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
     {
         var (_, candidates) = Choose(expression);
         var source = candidates.AsQueryable();
-        var rewritten = new ReplaceRoot(source).Visit(expression);
+        var rewritten = new ReplaceRoot(this, source).Visit(expression);
 
-        // A sequence comes back as a lazy LINQ to Objects query; a single value (Count, First, ...) runs now.
-        return typeof(IEnumerable).IsAssignableFrom(rewritten.Type) && rewritten.Type != typeof(string)
+        // A query comes back as a lazy LINQ to Objects query; anything else (Count, First, even a
+        // First that returns an array) runs now.
+        return typeof(IQueryable).IsAssignableFrom(expression.Type)
             ? source.Provider.CreateQuery(rewritten)
             : source.Provider.Execute(rewritten);
     }
@@ -83,6 +86,12 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
     private (string Plan, IEnumerable<T> Candidates) Choose(Expression expression)
     {
         var name = table.FilePath is { } path ? Path.GetFileNameWithoutExtension(path) : "table";
+
+        // A query that uses this table twice (a Concat or Join with itself) needs every record for
+        // the other use, so it scans.
+        if (new RootCounter(this).Count(expression) != 1)
+            return ($"scan {name}", table.ReadAll<T>());
+
         foreach (var (field, value) in Equalities(expression))
         {
             if (value is not null && TrySeek(field, value, out var records, out var tag))
@@ -124,10 +133,12 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
 
     private (int, object?)? Side(Expression member, Expression value, ParameterExpression parameter)
     {
-        if (StripConvert(member) is not MemberExpression { Expression: { } owner } access || owner != parameter)
+        // The property side may only be lifted to its own nullable type: any other cast (to int, to
+        // float...) changes which values compare equal, and the index can't follow that.
+        if (StripLift(member) is not MemberExpression { Expression: { } owner } access || owner != parameter)
             return null;
         var field = _mapper.FieldOf(access.Member);
-        if (field < 0 || References(value, parameter))
+        if (field < 0 || !IsStable(value) || !Lossless(table.Fields[field], _mapper.PropertyTypeOf(field)))
             return null;
         try
         {
@@ -162,11 +173,20 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
             {
                 if (!tag.Expression.Trim().Equals(dbfField.Name, StringComparison.OrdinalIgnoreCase)
                     || Data.DbfQuery.WhyNotSeek(tag, dbfField, includeDeleted: false) is not null
+                    || (tag.KeyType == 'C' && tag.KeyLength < dbfField.Length) // a short key can't tell long values apart
                     || SeekKey(tag.KeyType, value) is not { } key)
                     continue;
 
                 // Read the record numbers now, while the index is open; the records themselves stream.
-                var numbers = tag.SeekExact(key).Select(e => e.RecordNumber).Distinct().Order().ToList();
+                List<int> numbers;
+                try
+                {
+                    numbers = tag.SeekExact(key).Select(e => e.RecordNumber).Distinct().Order().ToList();
+                }
+                catch (Exception ex) when (ex is ArgumentException or InvalidDataException or OverflowException)
+                {
+                    return false; // a value the index can't encode, or a damaged index: scan instead
+                }
                 records = Load(numbers);
                 tagName = tag.Name;
                 return true;
@@ -196,10 +216,14 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
                 ('C', string s) => s.TrimEnd(' '),
                 ('C', char c) => c.ToString(),
                 ('N', bool) => null,
+                ('N', double d) when !double.IsFinite(d) => null,
+                ('N', float f) when !float.IsFinite(f) => null,
                 ('N', double or float) => System.Convert.ToDouble(value, CultureInfo.InvariantCulture),
                 ('N', IConvertible) when value is not string and not DateTime => System.Convert.ToDecimal(value, CultureInfo.InvariantCulture),
-                ('D', DateOnly d) => d,
-                ('D', DateTime t) when t.TimeOfDay == TimeSpan.Zero => DateOnly.FromDateTime(t),
+                // A blank date reads as the minimum date into a non-nullable property, but its index key
+                // isn't the minimum date's, so equality with that value has to scan.
+                ('D', DateOnly d) when d != DateOnly.MinValue => d,
+                ('D', DateTime t) when t.TimeOfDay == TimeSpan.Zero && t != DateTime.MinValue => DateOnly.FromDateTime(t),
                 _ => null,
             };
         }
@@ -219,14 +243,37 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
     private static Expression StripQuotes(Expression expression) =>
         expression is UnaryExpression { NodeType: ExpressionType.Quote } quote ? quote.Operand : expression;
 
-    private static Expression StripConvert(Expression expression) =>
-        expression is UnaryExpression { NodeType: ExpressionType.Convert or ExpressionType.ConvertChecked } convert ? StripConvert(convert.Operand) : expression;
+    private static Expression StripLift(Expression expression) =>
+        expression is UnaryExpression { NodeType: ExpressionType.Convert } convert && Nullable.GetUnderlyingType(convert.Type) == convert.Operand.Type
+            ? convert.Operand
+            : expression;
 
-    private static bool References(Expression expression, ParameterExpression parameter)
+    // A value worked out once, up front, must be the same value the scan would see: a constant or a
+    // captured variable, possibly lifted to a nullable type. Anything with a method call or a
+    // computation could change or have side effects, so it scans.
+    private static bool IsStable(Expression value) => value switch
     {
-        var finder = new ParameterFinder(parameter);
-        finder.Visit(expression);
-        return finder.Found;
+        ConstantExpression => true,
+        MemberExpression { Member: FieldInfo, Expression: null } => true,
+        MemberExpression { Member: FieldInfo, Expression: { } owner } => IsStable(owner),
+        UnaryExpression { NodeType: ExpressionType.Convert } convert when Nullable.GetUnderlyingType(convert.Type) == convert.Operand.Type => IsStable(convert.Operand),
+        _ => false,
+    };
+
+    // Whether reading the field into this property keeps every distinct value distinct. If two field
+    // values could read as the same property value (1.4 and 1 into an int), the index can't answer.
+    private static bool Lossless(DbfField field, Type propertyType)
+    {
+        var type = Nullable.GetUnderlyingType(propertyType) ?? propertyType;
+        return field.Type switch
+        {
+            'C' => type == typeof(string),
+            'N' or 'F' when field.DecimalCount == 0 && field.Length <= 9 => type == typeof(decimal) || type == typeof(long) || type == typeof(int),
+            'N' or 'F' when field.DecimalCount == 0 && field.Length <= 18 => type == typeof(decimal) || type == typeof(long),
+            'N' or 'F' => type == typeof(decimal),
+            'D' => type == typeof(DateOnly) || type == typeof(DateTime),
+            _ => false,
+        };
     }
 
     private static Type ElementTypeOf(Type sequence) =>
@@ -243,19 +290,32 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
         _ => value.ToString() ?? "",
     };
 
-    private sealed class ReplaceRoot(IQueryable<T> source) : ExpressionVisitor
+    private static bool IsRootOf(ConstantExpression node, IQueryProvider provider) =>
+        node.Value is DbfQueryable<T> root && ReferenceEquals(root.Provider, provider);
+
+    // Swaps this table's root for the candidates. Another table's root stays as it is and runs
+    // through its own provider when LINQ to Objects enumerates it.
+    private sealed class ReplaceRoot(IQueryProvider provider, IQueryable<T> source) : ExpressionVisitor
     {
         protected override Expression VisitConstant(ConstantExpression node) =>
-            node.Type == typeof(DbfQueryable<T>) ? Expression.Constant(source, typeof(IQueryable<T>)) : node;
+            IsRootOf(node, provider) ? Expression.Constant(source, typeof(IQueryable<T>)) : node;
     }
 
-    private sealed class ParameterFinder(ParameterExpression parameter) : ExpressionVisitor
+    private sealed class RootCounter(IQueryProvider provider) : ExpressionVisitor
     {
-        public bool Found { get; private set; }
+        private int _count;
 
-        protected override Expression VisitParameter(ParameterExpression node)
+        public int Count(Expression expression)
         {
-            Found |= node == parameter;
+            _count = 0;
+            Visit(expression);
+            return _count;
+        }
+
+        protected override Expression VisitConstant(ConstantExpression node)
+        {
+            if (IsRootOf(node, provider))
+                _count++;
             return node;
         }
     }

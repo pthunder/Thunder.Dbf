@@ -137,4 +137,57 @@ public sealed class TypedRecordTests : IDisposable
         Assert.Empty(reopened.AsQueryable<Change>().Where(c => c.Id == id).ToList());
         Assert.DoesNotContain(reopened.AsQueryable<Change>().ToList(), c => c.Recno == 1);
     }
+
+    // ---- cases where a seek could disagree with a scan (from the Codex review) ---------------
+
+    public sealed class Narrow
+    {
+        [DbfField("OBJECTID")] public int ObjectId { get; set; }  // N(10,0) into int: may not fit, so no seek
+        [DbfField("USER")] public string User { get; } = "fixed"; // get-only: never holds the field
+        [DbfRecordNumber] public int Recno { get; set; }
+    }
+
+    [Fact]
+    public void Lossy_or_unpopulated_properties_scan()
+    {
+        using var table = DbfTable.Open(_path);
+        var objectId = (int)table.Read<Change>(0).ObjectId!.Value;
+
+        Assert.StartsWith("scan", table.AsQueryable<Narrow>().Where(n => n.ObjectId == objectId).Explain());
+        // A get-only property always reads "fixed", so a scan matches every live record; a seek on USER wouldn't.
+        var fixedUser = table.AsQueryable<Narrow>().Where(n => n.User == "fixed");
+        Assert.StartsWith("scan", fixedUser.Explain());
+        Assert.Equal(table.ReadAll<Narrow>().Count(), fixedUser.Count());
+    }
+
+    [Fact]
+    public void Values_that_arent_plain_constants_or_captured_variables_scan()
+    {
+        using var table = DbfTable.Open(_path);
+        var users = new[] { table.Read<Change>(0).User };
+        Assert.StartsWith("scan", table.AsQueryable<Change>().Where(c => c.User == users.First()).Explain());
+
+        var user = users[0];
+        Assert.Contains("USER_TAG", table.AsQueryable<Change>().Where(c => c.User == user).Explain());
+    }
+
+    [Fact]
+    public void A_query_that_uses_the_table_twice_scans_and_keeps_both_halves()
+    {
+        using var table = DbfTable.Open(_path);
+        var (a, b) = (table.Read<Change>(0).ObjectId, table.Read<Change>(1).ObjectId);
+        var source = table.AsQueryable<Change>();
+
+        var both = source.Where(c => c.ObjectId == a).Concat(source.Where(c => c.ObjectId == b));
+        Assert.StartsWith("scan", both.Explain());
+        Assert.Equal([1, 2], both.Select(c => c.Recno).ToList());
+    }
+
+    [Fact]
+    public void A_single_result_that_is_an_array_comes_back_as_a_value()
+    {
+        using var table = DbfTable.Open(_path);
+        int[] first = table.AsQueryable<Change>().Select(c => new[] { c.Id }).First();
+        Assert.Equal([table.Read<Change>(0).Id], first);
+    }
 }
