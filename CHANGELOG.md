@@ -23,7 +23,7 @@ FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` previ
 - **Takeovers:** `MaintainIndex(path, rebuild: true)` takes over a tag out of byte order anywhere (the root included), rebuilds an index that's already kept, and lets the index go again if the rebuild fails.
 - **FoxPro 2 detection:** a version-0x03 table with the index flag, no `.mdx` and a same-named `.cdx` is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields; otherwise it stays dBASE IV and the missing `.mdx` keeps blocking writes.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-10-31
 
 The first public release.
 
