@@ -349,4 +349,19 @@ public sealed class CrashSafeUpdateTests : IDisposable
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         Assert.IsType<InvalidDataException>(error.InnerException);
     }
+
+    // Clipper's .ntx keys run to 256 bytes, longer than any other format's: a note holding one reads
+    // back whole (review of #17), and a longer key is refused when the note is written, not when it's read.
+    [Fact]
+    public void A_note_holds_keys_as_long_as_any_index_has()
+    {
+        var path = Table();
+        var longest = Enumerable.Range(0, 256).Select(i => (byte)i).ToArray();
+        DbfJournal.Write(path, new DbfJournalEntry(2, [new DbfJournalChange("PEOPLE.NTX", "PEOPLE", longest, [.. longest.Reverse()])]));
+        var read = DbfJournal.Read(path)!;
+        Assert.Equal(longest, read.Changes.Single().OldKey);
+        Assert.Equal(longest.Reverse(), read.Changes.Single().NewKey);
+
+        Assert.Throws<ArgumentException>(() => DbfJournal.Write(path, new DbfJournalEntry(2, [new DbfJournalChange("PEOPLE.NTX", "PEOPLE", null, new byte[257])])));
+    }
 }
