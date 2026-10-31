@@ -520,7 +520,15 @@ public sealed class DbfExpression
             {
                 var name = ReadName();
                 if (TrySymbol("->"))
-                    throw new NotSupportedException($"'{name}->{ReadName()}' refers to another work area or a memory variable; only this table's own fields are supported.");
+                {
+                    // FIELD->NAME (and Harbour's _FIELD->NAME) is Clipper's way of saying "the field
+                    // NAME of this work area", common in index keys. Other aliases name another table
+                    // or a memory variable (M->).
+                    var aliased = ReadName();
+                    if (!name.Equals("FIELD", StringComparison.OrdinalIgnoreCase) && !name.Equals("_FIELD", StringComparison.OrdinalIgnoreCase))
+                        throw new NotSupportedException($"'{name}->{aliased}' refers to another work area or a memory variable; only this table's own fields are supported.");
+                    return new FieldRef(aliased);
+                }
                 if (TrySymbol("("))
                 {
                     var args = new List<Node>();
