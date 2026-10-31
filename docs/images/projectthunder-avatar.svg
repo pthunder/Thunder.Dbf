@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- ProjectThunder profile image (512x512; GitHub shows it in a circle or rounded square) -->
+  <defs>
+    <radialGradient id="sky" cx=".5" cy=".42" r=".7">
+      <stop offset="0" stop-color="#22397d"/>
+      <stop offset="1" stop-color="#0a1230"/>
+    </radialGradient>
+    <linearGradient id="bolt" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff3a6"/>
+      <stop offset=".55" stop-color="#ffd23f"/>
+      <stop offset="1" stop-color="#ff9f1c"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#sky)"/>
+  <circle cx="256" cy="256" r="196" fill="none" stroke="#ffd23f" stroke-opacity=".35" stroke-width="6"/>
+  <circle cx="256" cy="256" r="168" fill="#ffd23f" fill-opacity=".06"/>
+  <path filter="url(#glow)" fill="url(#bolt)" stroke="#fff6c4" stroke-width="5" stroke-linejoin="round"
+        d="M292 72 L150 300 L240 300 L208 440 L370 212 L276 212 L318 72 Z"/>
+</svg>
