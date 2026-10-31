@@ -37,7 +37,8 @@ public enum DbfLockScheme
     /// <summary>
     /// Microsoft's Jet and ACE (Access, and ADO or ODBC with the dBASE driver): dBASE's positions, but header
     /// changes under the append byte. Jet reads a held header byte as "opened exclusively" and fails at once,
-    /// so choose this when Access or Jet programs share the tables. Never picked by Auto.
+    /// so choose this when Access or Jet programs read the tables while Thunder.Dbf writes. Jet itself mustn't
+    /// write while any other program writes: it takes no lock on the .mdx and tears it. Never picked by Auto.
     /// </summary>
     Jet,
 }
