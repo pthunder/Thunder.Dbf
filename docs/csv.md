@@ -13,6 +13,7 @@
 Console.Write(DbfImport.Plan("customers.csv"));                    // look first
 DbfImport.FromCsv("customers.csv", "CUSTOMER.DBF");                 // shape + rows
 DbfImport.FromCsv("customers.csv", "EMPTY.DBF", new() { ShapeOnly = true });   // just the shape
+DbfImport.FromCsv("customers.csv", "VFP.DBF", new() { Format = DbfTableFormat.VisualFoxPro });   // memos go in VFP.FPT
 ```
 
 Or from the command line:

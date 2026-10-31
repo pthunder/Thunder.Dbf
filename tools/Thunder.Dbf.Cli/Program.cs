@@ -28,6 +28,7 @@ internal static class Cli
                  --shape-only                           Create the empty table, without rows
                  --delimiter <c>                        Field separator (detected if omitted)
                  --code-page <n>                        Table code page: 1252 (default), 437, 850, ...
+                 --format <f>                           dbase3, dbase4 (default), foxpro2 or vfp
           thunder-dbf migrate <folder> <file.db>      Copy every table into a SQLite database (the folder is only read)
                  --include-deleted                      Copy records marked deleted too
                  --replace                              Recreate SQL tables that already exist
@@ -94,11 +95,21 @@ internal static class Cli
     {
         var csv = args[1];
         var table = args.Length > 2 && !args[2].StartsWith("--", StringComparison.Ordinal) ? args[2] : Path.ChangeExtension(csv, ".dbf");
+        var format = Option(args, "--format")?.ToLowerInvariant() switch
+        {
+            null or "dbase4" => DbfTableFormat.DbaseIV,
+            "dbase3" => DbfTableFormat.DbaseIII,
+            "foxpro2" => DbfTableFormat.FoxPro2,
+            "vfp" => DbfTableFormat.VisualFoxPro,
+            var other => throw new DbfException(DbfErrorCode.InvalidConnectionString, $"Format '{other}' isn't one the import knows.",
+                "Use dbase3, dbase4, foxpro2 or vfp."),
+        };
         var options = new DbfImportOptions
         {
             ShapeOnly = args.Contains("--shape-only"),
             Delimiter = Option(args, "--delimiter") is { } d ? (d == "\\t" ? '\t' : d[0]) : null,
-            LanguageDriver = Option(args, "--code-page") is { } cp ? DriverFor(int.Parse(cp, CultureInfo.InvariantCulture)) : (byte)0x57,
+            Format = format,
+            LanguageDriver = Option(args, "--code-page") is { } cp ? DriverFor(int.Parse(cp, CultureInfo.InvariantCulture), format) : DriverFor(1252, format),
         };
 
         if (args.Contains("--plan"))
@@ -149,11 +160,11 @@ internal static class Cli
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
     }
 
-    private static byte DriverFor(int codePage) => codePage switch
+    private static byte DriverFor(int codePage, DbfTableFormat format) => codePage switch
     {
         437 => 0x01,
         850 => 0x02,
-        1252 => 0x57,
+        1252 => format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? (byte)0x03 : (byte)0x57,
         852 => 0x64,
         866 => 0x65,
         1250 => 0xC8,

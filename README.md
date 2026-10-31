@@ -153,6 +153,7 @@ Done:
 12. ~~`INDEX ON` (`CreateIndexTag`) and `PACK`~~
 13. ~~Keeping `.ndx` and `.ntx` indexes up to date on writes~~
 14. ~~0.1.0 on nuget.org: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool, plus web service downloads on each GitHub release~~
+15. ~~Creating tables in dBASE III, dBASE IV, FoxPro 2 or Visual FoxPro format~~
 
 Next:
 
