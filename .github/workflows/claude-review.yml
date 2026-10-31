@@ -41,6 +41,9 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # The run's own token, scoped by this job's permissions, instead of the Claude GitHub App:
+          # nothing extra to install, and comments come from github-actions.
+          github_token: ${{ github.token }}
           track_progress: true
           claude_args: >-
             --model claude-sonnet-5-5
