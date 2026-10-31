@@ -48,7 +48,7 @@ public sealed partial class NtxIndex : IMaintainedIndex
     bool IMaintainedIndex.CanMaintain => CannotMaintainReason is null;
     string? IMaintainedIndex.CannotMaintainReason => CannotMaintainReason;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
-    void IMaintainedIndex.Commit() => Commit();
+    void IMaintainedIndex.Commit(bool toDisk) => Commit(toDisk);
 
     /// <summary>
     /// Why this file can't be kept exactly as Clipper would keep it (a custom or changes-only index,
@@ -102,11 +102,11 @@ public sealed partial class NtxIndex : IMaintainedIndex
     /// Bumps the header's update counter when anything changed and pushes everything to disk. Clipper
     /// and Harbour compare that counter to the one they last saw to know their cached pages are stale.
     /// </summary>
-    internal void Commit()
+    internal void Commit(bool toDisk = true)
     {
         if (_changed)
             BumpVersion();
-        DbfTable.FlushToDisk(_stream);
+        DbfTable.FlushToDisk(_stream, toDisk);
     }
 
     private void BumpVersion()

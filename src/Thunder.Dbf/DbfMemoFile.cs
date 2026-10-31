@@ -178,7 +178,7 @@ internal abstract class DbfMemoFile : IDisposable
         return block;
     }
 
-    public void FlushToDisk() => DbfTable.FlushToDisk(Stream);
+    public void FlushToDisk(bool toDisk = true) => DbfTable.FlushToDisk(Stream, toDisk);
 
     public void Dispose()
     {

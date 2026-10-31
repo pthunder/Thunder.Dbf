@@ -34,7 +34,7 @@ public sealed partial class NdxIndex : IMaintainedIndex
     bool IMaintainedIndex.CanMaintain => CannotMaintainReason is null;
     string? IMaintainedIndex.CannotMaintainReason => CannotMaintainReason;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
-    void IMaintainedIndex.Commit() => Commit();
+    void IMaintainedIndex.Commit(bool toDisk) => Commit(toDisk);
 
     /// <summary>
     /// Why this file can't be kept as dBASE III would keep it (keys out of the byte or number order
@@ -55,11 +55,11 @@ public sealed partial class NdxIndex : IMaintainedIndex
     }
 
     /// <summary>Records the file's real length as its page count and pushes everything to disk.</summary>
-    internal void Commit()
+    internal void Commit(bool toDisk = true)
     {
         // dBASE III allocates its next page from this count, so it must never lag behind the file.
         WriteHeaderUInt(PageCountOffset, (uint)(_stream.Length / PageSize));
-        DbfTable.FlushToDisk(_stream);
+        DbfTable.FlushToDisk(_stream, toDisk);
     }
 
     internal void WritePage(uint page, byte[] block)

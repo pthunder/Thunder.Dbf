@@ -144,6 +144,7 @@ public sealed partial class CdxIndex
             Commit();
 
             Tags = LoadTags();
+            _ourState = null; // the next write prepares the tags afresh, the new one with them
             return Tags.Single(t => t.HeaderOffset == headerOffset);
         }
         catch
@@ -153,6 +154,7 @@ public sealed partial class CdxIndex
             if (!published && _stream.Length > originalLength)
             {
                 _stream.SetLength(originalLength);
+                _knownLength = originalLength;
                 DbfTable.FlushToDisk(_stream);
             }
             throw;

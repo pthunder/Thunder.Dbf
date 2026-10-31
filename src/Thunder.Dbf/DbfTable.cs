@@ -371,6 +371,31 @@ public sealed partial class DbfTable : IDisposable
     // ---- indexes that appear after opening ------------------------------------------------
 
     private HashSet<string> _indexFilesAtOpen = new(StringComparer.OrdinalIgnoreCase);
+
+    // The files a write looks for next to the table (an index made after opening, an unfinished PACK's
+    // copy, a journal) are created by other programs, and creating a file changes the folder's
+    // last-write time. While that time is what the last write saw, the folder isn't listed again,
+    // though at least once a second all the same, as a filesystem with coarse times (FAT's are two
+    // seconds) can hide a file made in the same tick. A journal file, once there, can stay empty
+    // between notes, so while one exists it's checked on every write.
+    private const long FolderRecheckMilliseconds = 1000;
+    private DateTime? _folderSeen;
+    private long _folderSeenAt;
+    private bool _journalFileSeen = true;
+
+    private DateTime? FolderStamp()
+    {
+        if (_path is null || !_stream.CanWrite)
+            return null;
+        try
+        {
+            return Directory.GetLastWriteTimeUtc(Path.GetDirectoryName(Path.GetFullPath(_path))!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null; // can't tell: look every time
+        }
+    }
     private readonly Dictionary<string, IMaintainedIndex> _attachedIndexes = new(StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string> IndexFileNames(string tablePath) =>
@@ -580,14 +605,26 @@ public sealed partial class DbfTable : IDisposable
     private void PrepareWrite(bool appending)
     {
         Refresh();
-        ThrowIfPackUnfinished();
+        var folder = FolderStamp();
+        var lookInFolder = folder is not { } stamp || stamp != _folderSeen || Environment.TickCount64 - _folderSeenAt >= FolderRecheckMilliseconds;
+        if (lookInFolder)
+            ThrowIfPackUnfinished();
         ThrowIfIndexesNeedRebuild();
-        ThrowIfIndexAppeared();
+        if (lookInFolder)
+            ThrowIfIndexAppeared();
         ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
                 structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
             throw blocker;
-        ReplayJournal(); // a key change cut off in this or another process; every caller holds the header lock
+        if (lookInFolder && _path is not null)
+            _journalFileSeen = File.Exists(DbfJournal.PathFor(_path));
+        ReplayJournal(lookForNote: _journalFileSeen); // a key change cut off in this or another process; every caller holds the header lock
+        if (lookInFolder && folder is { } seen)
+        {
+            // Only once every check above has passed: one that threw is made again by the next write.
+            _folderSeen = seen;
+            _folderSeenAt = Environment.TickCount64;
+        }
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         if (dataEnd > _stream.Length)
@@ -927,7 +964,7 @@ public sealed partial class DbfTable : IDisposable
     private void CommitIndexes()
     {
         foreach (var index in MaintainedIndexes)
-            index.Commit();
+            index.Commit(FlushWritesToDisk);
     }
 
     /// <summary>
@@ -997,12 +1034,12 @@ public sealed partial class DbfTable : IDisposable
         EncodeFields(values, changed);
         var keys = PlanIndexChanges(current, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
-        _memo?.FlushToDisk();
+        _memo?.FlushToDisk(FlushWritesToDisk);
         var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
         {
             Seek(index);
             _stream.Write(_buffer);
-            FlushToDisk(_stream);
+            FlushWrite(_stream);
         });
         CommitCounters(counters);
         CommitAfterKeyChange(journaled);
@@ -1299,7 +1336,7 @@ public sealed partial class DbfTable : IDisposable
         {
             Seek(index);
             _stream.WriteByte(flag);
-            FlushToDisk(_stream);
+            FlushWrite(_stream);
         });
         CommitAfterKeyChange(journaled);
     }
@@ -1471,6 +1508,15 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether each write is forced through to the disk (FlushFileBuffers, fsync) before the next step starts: on by
+    /// default. Off, writes still leave this process in the same order, so a killed process loses nothing more than
+    /// with it on; only a power cut or an operating-system crash can then lose or reorder the latest writes, as with
+    /// Visual FoxPro and its OLE DB driver, which never force them. Appends and updates run several times faster
+    /// without it. The journal (UseJournal) and PACK always force their writes.
+    /// </summary>
+    public bool FlushWritesToDisk { get; set; } = true;
+
     /// <summary>True when the table's journal holds a note: a write was cut off, or another Thunder.Dbf process is mid-write.</summary>
     public bool HasPendingJournal => _path is not null && DbfJournal.IsPending(_path);
 
@@ -1481,11 +1527,11 @@ public sealed partial class DbfTable : IDisposable
     // file, tag name, key length); a note this table can't match stops writes, rather than being
     // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
     // record has are added and forced to disk before stale ones go, so none goes missing on the way.
-    private void ReplayJournal()
+    private void ReplayJournal(bool lookForNote = true)
     {
         if (_path is null || !_stream.CanWrite)
             return;
-        if (!DbfJournal.IsPending(_path))
+        if (!lookForNote || !DbfJournal.IsPending(_path))
         {
             RecheckAfterReplay();
             return;
@@ -1685,8 +1731,14 @@ public sealed partial class DbfTable : IDisposable
             return;
 
         var done = new List<Action>();
+        var holds = new List<IDisposable>();
         try
         {
+            foreach (var index in MaintainedIndexes)
+            {
+                if (index.Hold() is { } hold)
+                    holds.Add(hold);
+            }
             foreach (var (tag, remove, insert) in changes)
             {
                 // NewKeys: only tags without UNIQUE add keys ahead of the record. OldKeys: those tags drop
@@ -1720,6 +1772,11 @@ public sealed partial class DbfTable : IDisposable
                     ? $"Record {recordNumber} wasn't changed: its new index entries couldn't be added."
                     : $"Record {recordNumber} was written, but its index entries couldn't be updated.",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
+        }
+        finally
+        {
+            for (var i = holds.Count - 1; i >= 0; i--)
+                holds[i].Dispose();
         }
     }
 
@@ -1987,17 +2044,21 @@ public sealed partial class DbfTable : IDisposable
     // docs/durability.md for what a crash can leave behind.
     private void CommitHeader()
     {
-        _memo?.FlushToDisk();
-        FlushToDisk(_stream);
+        _memo?.FlushToDisk(FlushWritesToDisk);
+        FlushWrite(_stream);
         CommitIndexes();
         Header.LastUpdate = DateOnly.FromDateTime(DateTime.Today);
         Header.WriteFixed(_stream);
-        FlushToDisk(_stream);
+        FlushWrite(_stream);
     }
 
-    internal static void FlushToDisk(Stream stream)
+    // An ordinary write's flush: forced to the disk unless FlushWritesToDisk is off, and always out of
+    // this process's buffers, so other programs (and a later reader after a kill) see writes in order.
+    private void FlushWrite(Stream stream) => FlushToDisk(stream, FlushWritesToDisk);
+
+    internal static void FlushToDisk(Stream stream, bool toDisk = true)
     {
-        if (stream is FileStream file)
+        if (stream is FileStream file && toDisk)
             file.Flush(flushToDisk: true);
         else
             stream.Flush();

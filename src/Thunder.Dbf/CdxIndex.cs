@@ -165,14 +165,35 @@ public sealed partial class CdxIndex : IDisposable
     /// <summary>Reads <paramref name="length"/> bytes at <paramref name="offset"/>, which must be page-aligned and inside the file.</summary>
     internal byte[] Read(long offset, int length)
     {
-        if (offset < 0 || offset % DefaultPageLength != 0 || offset + length > _stream.Length)
+        if (offset < 0 || offset % DefaultPageLength != 0 || offset + length > FileLength() && offset + length > FileLength(fresh: true))
             throw new InvalidDataException($"Offset {offset} is outside the .cdx file or not on a page boundary.");
 
         var block = new byte[length];
         DbfTable.DiscardReadBuffer(_stream); // the legacy app may have just changed the page
         _stream.Position = offset;
-        _stream.ReadExactly(block);
+        try
+        {
+            _stream.ReadExactly(block);
+        }
+        catch (EndOfStreamException)
+        {
+            _knownLength = -1; // another program shortened the file
+            throw new InvalidDataException($"Offset {offset} is outside the .cdx file or not on a page boundary.");
+        }
         return block;
+    }
+
+    // The file's length as last seen. Asking the operating system is a system call, and every page
+    // read and write checks it, so a page past it is checked against the real length before it's
+    // refused (another program may have grown the file), and the length is read fresh under the
+    // index lock (see CurrentState).
+    private long _knownLength = -1;
+
+    internal long FileLength(bool fresh = false)
+    {
+        if (fresh || _knownLength < 0)
+            _knownLength = _stream.Length;
+        return _knownLength;
     }
 }
 
@@ -334,7 +355,9 @@ public sealed partial class CdxTag
     private IEnumerable<Hit> Walk(byte[]? probe, bool backwards) =>
         Walk(RootOffset(), probe, position: probe is not null, backwards, depth: 0, visited: []);
 
-    private long RootOffset() => BinaryPrimitives.ReadUInt32LittleEndian(_index.Read(HeaderOffset, 4));
+    // While the file is as this process left it, the root is where the tag was loaded with it: no
+    // change made here moves a root (Visual FoxPro keeps them in place too).
+    private long RootOffset() => _index.Unchanged ? _root : BinaryPrimitives.ReadUInt32LittleEndian(_index.Read(HeaderOffset, 4));
 
     // Like the .mdx walk: interior key i is the highest key under child i, only the outermost path
     // positions, and every page may be visited once. Leaves also link to their neighbours, but

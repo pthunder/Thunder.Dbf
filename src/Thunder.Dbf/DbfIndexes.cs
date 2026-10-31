@@ -123,8 +123,14 @@ internal interface IMaintainedIndex : IDisposable
     /// <summary>Re-reads the tag list, in case another program changed the file.</summary>
     void ReloadTags();
 
-    /// <summary>Flushes every change to disk.</summary>
-    void Commit();
+    /// <summary>
+    /// Holds the index file's lock across one record's changes to its tags (one lock, one check, one
+    /// counter bump), or null when the format takes its lock per change. Disposing publishes and releases.
+    /// </summary>
+    IDisposable? Hold() => null;
+
+    /// <summary>Pushes every change out of this process, and forces it to the disk unless <paramref name="toDisk"/> is false.</summary>
+    void Commit(bool toDisk);
 }
 
 /// <summary>One tag of an <see cref="IMaintainedIndex"/>, with keys in the format's own stored bytes.</summary>
@@ -189,7 +195,7 @@ public sealed partial class MdxIndex : IMaintainedIndex
 {
     IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
-    void IMaintainedIndex.Commit() => Commit();
+    void IMaintainedIndex.Commit(bool toDisk) => Commit(toDisk);
 }
 
 public sealed partial class MdxTag : IMaintainedTag

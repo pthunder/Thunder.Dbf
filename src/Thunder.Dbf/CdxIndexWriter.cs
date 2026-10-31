@@ -63,6 +63,19 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // write doesn't read the same records again. Keyed by everything that decides a tag's keys.
     private readonly HashSet<string> _verifiedTags = [];
 
+    // The file's size and update counter as this process last left it, with its tags loaded and
+    // checked for writing. While the file still says exactly that, no other program has changed it
+    // (FoxPro, Harbour and this library bump the counter on every change, a REINDEX included), so a
+    // write can skip reloading the tags, re-reading their headers and checking their layout.
+    private (long Length, uint Counter)? _ourState;
+
+    /// <summary>True during a locked change that began with the file exactly as this process left it.</summary>
+    internal bool Unchanged { get; private set; }
+
+    // One record's changes to every tag of this file, under one lock: see Hold.
+    private DbfLock? _held;
+    private bool _holdFailed;
+
     /// <summary>The table the index was opened with, whose records its keys are built from.</summary>
     internal DbfTable? Table => _table;
 
@@ -83,7 +96,93 @@ public sealed partial class CdxIndex : IMaintainedIndex
     void IMaintainedIndex.ExpectRebuild() => _rebuildExpected = true;
     void IMaintainedIndex.RebuildAbandoned() => _rebuildExpected = false;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
-    void IMaintainedIndex.Commit() => Commit();
+    void IMaintainedIndex.Commit(bool toDisk) => Commit(toDisk);
+
+    /// <summary>
+    /// Takes the index lock for all of one record's tag changes in this file, and checks the file once:
+    /// its pages (if another program changed it) and whether it's as this process left it. The counter
+    /// is bumped and the changes pushed out once, when the hold is disposed.
+    /// </summary>
+    IDisposable? IMaintainedIndex.Hold()
+    {
+        if (!OpenedForWriting || _held is not null)
+            return null;
+        var held = TakeIndexLock();
+        try
+        {
+            var state = CurrentState();
+            if (_checkedState != state)
+                CheckPageOwnership();
+            Unchanged = _ourState == state;
+        }
+        catch
+        {
+            Unchanged = false;
+            held.Dispose();
+            throw;
+        }
+        _held = held;
+        _holdFailed = false;
+        return new Hold(this);
+    }
+
+    private sealed class Hold(CdxIndex index) : IDisposable
+    {
+        private bool _released;
+
+        public void Dispose()
+        {
+            if (_released)
+                return;
+            _released = true;
+            index.Release();
+        }
+    }
+
+    private void Release()
+    {
+        var held = _held!;
+        _held = null;
+        try
+        {
+            Publish(succeeded: !_holdFailed);
+        }
+        finally
+        {
+            held.Dispose();
+        }
+    }
+
+    // After a locked change: bump the counter (so other programs drop their cached pages) and push the
+    // change out. Half a change (a damaged page met midway) is still published, but then neither the
+    // pages nor the layout count as checked any more.
+    private void Publish(bool succeeded)
+    {
+        try
+        {
+            if (_changed)
+                BumpCounter();
+            _stream.Flush();
+            if (succeeded)
+            {
+                _checkedState = CurrentState(); // this change left every page with one owner
+                _ourState = Unchanged ? _checkedState : null;
+            }
+            else
+            {
+                _ourState = null;
+            }
+        }
+        catch
+        {
+            _ourState = null;
+            throw;
+        }
+        finally
+        {
+            Unchanged = false;
+        }
+    }
 
     /// <summary>
     /// Why this index can't be kept exactly as FoxPro would keep it, or null when it can (or wasn't
@@ -308,10 +407,16 @@ public sealed partial class CdxIndex : IMaintainedIndex
 
         using (TakeIndexLock())
         {
+            // Nobody changed the file since this process loaded and checked its tags: nothing to reload.
+            var state = CurrentState();
+            if (_ourState == state && MaintainRefusal is null)
+                return;
+            _ourState = null;
             try
             {
                 Tags = LoadTags();
-                CheckPageOwnershipIfChanged();
+                if (_checkedState != state)
+                    CheckPageOwnership();
             }
             catch (InvalidDataException ex)
             {
@@ -323,6 +428,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
             // FoxPro rebuilt with a collation stops writes.
             _refusedOnlyForOrder = false;
             MaintainRefusal = FirstRefusal();
+            if (MaintainRefusal is null)
+                _ourState = state;
         }
         if (MaintainRefusal is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
@@ -349,35 +456,53 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// </summary>
     internal T Update<T>(CdxTag tag, Func<T> change)
     {
+        if (_held is not null)
+        {
+            // Inside a hold: the lock is taken and the file checked; Release publishes.
+            try
+            {
+                if (!Unchanged)
+                    tag.CheckLayoutUnchanged();
+                return change();
+            }
+            catch
+            {
+                _holdFailed = true;
+                throw;
+            }
+        }
+
         using var held = TakeIndexLock();
         var succeeded = false;
         try
         {
-            CheckPageOwnershipIfChanged();
-            tag.CheckLayoutUnchanged();
+            var state = CurrentState();
+            if (_checkedState != state)
+                CheckPageOwnership();
+            Unchanged = _ourState == state;
+            if (!Unchanged)
+                tag.CheckLayoutUnchanged();
             var result = change();
             succeeded = true;
             return result;
         }
         finally
         {
-            // Half a change (a damaged page met midway) is still published: other programs must not
-            // keep using pages they cached from before it.
-            if (_changed)
-                BumpCounter();
-            _stream.Flush();
-            if (succeeded)
-                _checkedState = CurrentState(); // this change left every page with one owner
+            Publish(succeeded);
         }
     }
 
     /// <summary>Bumps the update counter if anything changed (so other programs drop their cached pages) and pushes everything to disk.</summary>
-    internal void Commit()
+    internal void Commit(bool toDisk = true)
     {
         _rebuildExpected = false; // a commit follows the rebuild; from here on order is checked again
         if (_changed)
+        {
+            // Changes made outside a locked change (creating a tag): the tags are reloaded and checked before the next write.
+            _ourState = null;
             BumpCounter();
-        DbfTable.FlushToDisk(_stream);
+        }
+        DbfTable.FlushToDisk(_stream, toDisk);
     }
 
     // Harbour keeps this big-endian counter in the file's first header and compares it to spot
@@ -395,13 +520,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     }
 
     private (long Length, uint Counter) CurrentState() =>
-        (_stream.Length, BinaryPrimitives.ReadUInt32BigEndian(Read(0, DefaultPageLength).AsSpan(CounterOffset)));
-
-    private void CheckPageOwnershipIfChanged()
-    {
-        if (_checkedState != CurrentState())
-            CheckPageOwnership();
-    }
+        (FileLength(fresh: true), BinaryPrimitives.ReadUInt32BigEndian(Read(0, DefaultPageLength).AsSpan(CounterOffset)));
 
     /// <summary>
     /// Checks that every page has one owner: the file's headers, the tag directory, one tag's tree,
@@ -436,7 +555,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         var listed = new HashSet<long>();
         while (free is not 0 and not NoPage)
         {
-            if (free % DefaultPageLength != 0 || free + PageLength > _stream.Length || !listed.Add(free))
+            if (free % DefaultPageLength != 0 || free + PageLength > FileLength() || !listed.Add(free))
                 throw new InvalidDataException($"The free page list leads to offset {free}, which isn't a page of the file it can hold; the index is damaged.");
             if (owners.TryGetValue(free, out var owner))
                 throw new InvalidDataException($"The free page list holds the page at offset {free}, which {owner} still uses; the index is damaged.");
@@ -449,11 +568,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// Makes every page written so far reach the disk before the next write: new pages before the
     /// page that starts pointing at them, and a page's replacement before its old copy is freed.
     /// </summary>
-    internal void Barrier() => DbfTable.FlushToDisk(_stream);
+    internal void Barrier() => DbfTable.FlushToDisk(_stream, _table?.FlushWritesToDisk ?? true);
 
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
     {
-        if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > _stream.Length)
+        if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > FileLength() && offset + bytes.Length > FileLength(fresh: true))
             throw new InvalidOperationException($"Can't write the .cdx page at offset {offset}.");
         _stream.Position = offset;
         _stream.Write(bytes);
@@ -467,10 +586,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// </summary>
     internal long AllocatePage()
     {
-        var offset = (_stream.Length + PageLength - 1) / PageLength * PageLength;
+        var offset = (FileLength(fresh: true) + PageLength - 1) / PageLength * PageLength;
         if (offset + PageLength > MaxIndexBytes)
             throw new InvalidDataException("The .cdx index has reached the 2 GB FoxPro can handle.");
         _stream.SetLength(offset + PageLength);
+        _knownLength = offset + PageLength;
         Write(offset, new byte[PageLength]);
         return offset;
     }
@@ -538,6 +658,8 @@ public sealed partial class CdxTag : IMaintainedTag
     // Under the index lock, before a change: the tag must still be the one its keys were planned for.
     internal void CheckLayoutUnchanged()
     {
+        if (_index.Unchanged)
+            return;
         if (!LayoutOf(_index.Read(HeaderOffset, CdxIndex.HeaderLength)).AsSpan().SequenceEqual(Layout))
             throw new InvalidDataException($"Tag {Name} was rebuilt by another program while this write was under way.");
     }
@@ -1034,8 +1156,8 @@ public sealed partial class CdxTag : IMaintainedTag
         if ((attributes & LeafAttribute) != 0)
         {
             var (keys, records) = DecodeLeaf(page, count, offset);
-            node.Keys = [.. keys];
-            node.Records = [.. records];
+            node.Keys = new List<byte[]>(keys);
+            node.Records = new List<int>(records);
         }
         else
         {
@@ -1074,9 +1196,9 @@ public sealed partial class CdxTag : IMaintainedTag
     /// <summary>Writes an empty root leaf over the tag's root page, for a tag just created.</summary>
     internal void WriteEmptyRoot() => WriteNode(new Node { Offset = RootOffset(), Attributes = (ushort)(RootAttribute | LeafAttribute) });
 
-    private void WriteNode(Node node)
+    private void WriteNode(Node node, byte[]? encoded = null)
     {
-        var page = node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node);
+        var page = encoded ?? (node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node));
         _index.Write(node.Offset, page ?? throw new InvalidOperationException($"Tag {Name}'s page at offset {node.Offset} doesn't fit."));
     }
 
@@ -1249,7 +1371,8 @@ public sealed partial class CdxTag : IMaintainedTag
     private sealed class Plan
     {
         public readonly List<Node> Fresh = [];
-        public readonly List<(int Level, Node Node)> Changed = [];
+        // Page: the node already encoded, when Store's fit test did it and nothing changed it since.
+        public readonly List<(int Level, Node Node, byte[]? Page)> Changed = [];
         public readonly List<(uint Offset, bool LeftLink, uint Target)> Links = [];
         public readonly List<long> Freed = [];
     }
@@ -1264,8 +1387,18 @@ public sealed partial class CdxTag : IMaintainedTag
             WriteNode(node);
         if (plan.Fresh.Count > 0)
             _index.Barrier(); // a split's new pages (a grown root's children among them) are on disk before anything points at them
-        foreach (var (_, node) in topDown ? plan.Changed.OrderByDescending(c => c.Level) : plan.Changed.OrderBy(c => c.Level))
-            WriteNode(node);
+        // A stable sort by level, highest first when growing, in place: the list holds a few entries.
+        var changed = plan.Changed;
+        for (var i = 1; i < changed.Count; i++)
+        {
+            var item = changed[i];
+            var j = i - 1;
+            for (; j >= 0 && (topDown ? changed[j].Level < item.Level : changed[j].Level > item.Level); j--)
+                changed[j + 1] = changed[j];
+            changed[j + 1] = item;
+        }
+        foreach (var (_, node, page) in changed)
+            WriteNode(node, page);
         foreach (var (offset, leftLink, target) in plan.Links)
             PatchSibling(offset, leftLink, target);
         if (plan.Freed.Count > 0)
@@ -1313,9 +1446,9 @@ public sealed partial class CdxTag : IMaintainedTag
         for (var level = 0; ; level++)
         {
             GuardDepth(level);
-            if ((node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node)) is not null)
+            if ((node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node)) is { } encoded)
             {
-                plan.Changed.Add((level, node));
+                plan.Changed.Add((level, node, encoded)); // nothing below changes this node again
                 if (path.Count == 0 || node.Count == 0)
                     return;
                 var (parent, slot) = path[^1];
@@ -1344,7 +1477,7 @@ public sealed partial class CdxTag : IMaintainedTag
             if (isRoot)
                 plan.Fresh.Add(node);
             else
-                plan.Changed.Add((level, node));
+                plan.Changed.Add((level, node, null));
             if (right.Right != NoPage)
                 plan.Links.Add((right.Right, true, (uint)right.Offset));
 
@@ -1357,7 +1490,7 @@ public sealed partial class CdxTag : IMaintainedTag
                     Keys = [node.Keys[^1], right.Keys[^1]],
                     Records = [node.Records[^1], right.Records[^1]],
                     Children = [(uint)node.Offset, (uint)right.Offset],
-                }));
+                }, null));
                 return;
             }
 
@@ -1524,7 +1657,7 @@ public sealed partial class CdxTag : IMaintainedTag
             }
             if (path.Count == 0)
             {
-                plan.Changed.Add((level + 1, new Node { Offset = parent.Offset, Attributes = (ushort)(leafAttributes | RootAttribute) }));
+                plan.Changed.Add((level + 1, new Node { Offset = parent.Offset, Attributes = (ushort)(leafAttributes | RootAttribute) }, null));
                 return;
             }
             node = parent;
