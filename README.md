@@ -16,6 +16,7 @@
 [![CI](https://github.com/pthunder/Thunder.Dbf/actions/workflows/ci.yml/badge.svg)](https://github.com/pthunder/Thunder.Dbf/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/pthunder/Thunder.Dbf/actions/workflows/codeql.yml/badge.svg)](https://github.com/pthunder/Thunder.Dbf/actions/workflows/codeql.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![ProjectThunder](https://img.shields.io/badge/by-ProjectThunder-ffd23f.svg)](https://projectthunder.com)
 
 **Put a safe, modern app on top of a legacy dBASE or FoxPro system, while the legacy app keeps running on the same files.**
 
@@ -147,6 +148,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Every change meets the [editorial guidel
 ## Credits
 
 The format notes stand on the shoulders of [Xbase64](https://sourceforge.net/projects/xdb/) and [Harbour](https://github.com/harbour/core), from which formats were learned and no code was copied. Test files come from [infused/dbf](https://github.com/infused/dbf), [dbfread](https://github.com/olemb/dbfread), [DbfDataReader](https://github.com/yellowfeather/DbfDataReader), [DotNetSiemensPLCToolBoxLibrary](https://github.com/dotnetprojects/DotNetSiemensPLCToolBoxLibrary), [retroinv](https://github.com/nrnelson/retroinv), [NDbfReaderEx](https://github.com/emelhu/NDbfReaderEx), [X#](https://github.com/X-Sharp/XSharpPublic) and the US Census Bureau.
+
+## About ProjectThunder
+
+Thunder.Dbf is made by [ProjectThunder](https://projectthunder.com). For help putting a modern app on a legacy system, or migrating off one, visit [projectthunder.com](https://projectthunder.com).
 
 ## License
 

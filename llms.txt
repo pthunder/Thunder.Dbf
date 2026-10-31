@@ -1,10 +1,12 @@
 # Thunder.Dbf
 
-> Pure .NET (C#, .NET 10) library and tools for legacy xBase data: dBASE III/IV, FoxPro 2, Visual FoxPro and Clipper `.dbf` tables, `.dbt`/`.fpt` memo files, and `.mdx`/`.ndx`/`.ntx`/`.cdx` indexes. It reads and writes them the way the legacy apps do (dBASE-compatible locks, every `.mdx` tag kept in sync, unchanged bytes preserved), so a modern web app or a SQL migration can run while the old app keeps using the same files. It runs on Windows, Linux and macOS, with no ODBC, OLE DB, Jet, VFP OLE DB or 32-bit process. MIT licensed. By ProjectThunder.
+> Pure .NET (C#, .NET 10) library and tools for legacy xBase data: dBASE III/IV, FoxPro 2, Visual FoxPro and Clipper `.dbf` tables, `.dbt`/`.fpt` memo files, and `.mdx`/`.ndx`/`.ntx`/`.cdx` indexes. It reads and writes them the way the legacy apps do (dBASE-compatible locks, every `.mdx` tag kept in sync, unchanged bytes preserved), so a modern web app or a SQL migration can run while the old app keeps using the same files. It runs on Windows, Linux and macOS, with no ODBC, OLE DB, Jet, VFP OLE DB or 32-bit process. MIT licensed. By ProjectThunder (https://projectthunder.com).
 
 Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read FoxPro or dBASE files in .NET 10; replacing the 32-bit Visual FoxPro OLE DB or Jet dBASE driver; reading GoldMine CRM data (CONTACT1.DBF with .MDX); converting DBF to SQL Server, PostgreSQL or SQLite; syncing a live dBASE app with SQL; CSV to DBF; seeking through MDX, NTX or CDX indexes; building a web API on top of FoxPro data safely.
 
 ## Start here
+
+- [ProjectThunder](https://projectthunder.com): the people behind Thunder.Dbf
 
 - [README](README.md): what it is, packages, safety model, formats, roadmap
 - [Getting started](docs/getting-started.md): connect, read, seek, write

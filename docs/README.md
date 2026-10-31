@@ -44,3 +44,7 @@
 
 - [Editorial guidelines](maintainers/editorial-guidelines.md): what every change must meet before it's published.
 - [Maintaining](maintainers/maintaining.md): the weekly routine, releases, and GitHub settings.
+
+---
+
+Thunder.Dbf is made by [ProjectThunder](https://projectthunder.com).
