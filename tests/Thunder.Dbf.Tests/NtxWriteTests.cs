@@ -35,9 +35,9 @@ public sealed class NtxWriteTests : IDisposable
     private string CopyTenThousand()
     {
         var table = Path.Combine(_dir.FullName, "TEST10K.DBF");
-        var bytes = File.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.DBF"));
+        var bytes = SharedFile.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.DBF"));
         bytes[28] = 0;
-        File.WriteAllBytes(table, bytes);
+        SharedFile.WriteAllBytes(table, bytes);
         File.Copy(Fixture("xsharp/rdd-tests/10kDate.ntx"), Path.Combine(_dir.FullName, "10kDate.ntx"));
         File.Copy(Fixture("xsharp/rdd-tests/10kSalary.ntx"), Path.Combine(_dir.FullName, "10kSalary.ntx"));
         File.Copy(Fixture("xsharp/rdd-tests/10kName.xxx"), Path.Combine(_dir.FullName, "10kName.ntx"));
@@ -69,14 +69,14 @@ public sealed class NtxWriteTests : IDisposable
         using var table = DbfTable.Open(Fixture(tableFixture));
         using var index = NtxIndex.Open(Fixture(indexFixture), table: table);
 
-        Assert.Equal(Oracle(index.Tag, table), RawTree.Read(File.ReadAllBytes(Fixture(indexFixture))).Entries);
+        Assert.Equal(Oracle(index.Tag, table), RawTree.Read(SharedFile.ReadAllBytes(Fixture(indexFixture))).Entries);
     }
 
     [Fact]
     public void Hundreds_of_appends_split_pages_and_grow_new_roots()
     {
         var path = CopyCustomers();
-        var before = IndexFiles().ToDictionary(f => f, f => RawTree.Read(File.ReadAllBytes(f)));
+        var before = IndexFiles().ToDictionary(f => f, f => RawTree.Read(SharedFile.ReadAllBytes(f)));
         Assert.All(before.Values, tree => Assert.Equal(1, tree.Height));
 
         using (var table = OpenWritable(path))
@@ -87,7 +87,7 @@ public sealed class NtxWriteTests : IDisposable
 
         foreach (var file in IndexFiles())
         {
-            var after = RawTree.Read(File.ReadAllBytes(file));
+            var after = RawTree.Read(SharedFile.ReadAllBytes(file));
             Assert.True(after.Height >= 2, $"{Path.GetFileName(file)} never grew a new root.");
             Assert.True(after.Pages.Count > 3, $"{Path.GetFileName(file)} split only {after.Pages.Count - 1} times.");
             Assert.True(after.Version > before[file].Version);
@@ -171,7 +171,7 @@ public sealed class NtxWriteTests : IDisposable
         {
             table.RebuildIndex();
             table.AppendRange(Enumerable.Range(0, 250).Select(i => Customer(table, random.Next(1, 2000), $"F{random.Next(40):D2}", $"L{random.Next(40):D2}")));
-            Assert.True(RawTree.Read(File.ReadAllBytes(Path.Combine(_dir.FullName, "Custname.ntx"))).Height >= 5);
+            Assert.True(RawTree.Read(SharedFile.ReadAllBytes(Path.Combine(_dir.FullName, "Custname.ntx"))).Height >= 5);
 
             for (var step = 0; step < 250; step++)
             {
@@ -184,7 +184,7 @@ public sealed class NtxWriteTests : IDisposable
         }
 
         AssertIndexesMatchTable(path);
-        Assert.All(IndexFiles(), file => Assert.NotEmpty(RawTree.Read(File.ReadAllBytes(file)).FreePages));
+        Assert.All(IndexFiles(), file => Assert.NotEmpty(RawTree.Read(SharedFile.ReadAllBytes(file)).FreePages));
     }
 
     // Moving most keys to one end of the tree empties pages all over it: they must borrow from a
@@ -196,7 +196,7 @@ public sealed class NtxWriteTests : IDisposable
         using (var table = OpenWritable(path))
         {
             table.AppendRange(Enumerable.Range(0, 300).Select(i => Customer(table, 2000 + i, $"F{i:D4}", $"M{i % 97:D2}")));
-            var heightBefore = RawTree.Read(File.ReadAllBytes(Path.Combine(_dir.FullName, "Custnum.ntx"))).Height;
+            var heightBefore = RawTree.Read(SharedFile.ReadAllBytes(Path.Combine(_dir.FullName, "Custnum.ntx"))).Height;
             Assert.True(heightBefore >= 2);
 
             for (var i = 0; i < table.RecordCount; i++)
@@ -209,7 +209,7 @@ public sealed class NtxWriteTests : IDisposable
         }
 
         AssertIndexesMatchTable(path);
-        var custnum = RawTree.Read(File.ReadAllBytes(Path.Combine(_dir.FullName, "Custnum.ntx")));
+        var custnum = RawTree.Read(SharedFile.ReadAllBytes(Path.Combine(_dir.FullName, "Custnum.ntx")));
         Assert.NotEmpty(custnum.FreePages);
     }
 
@@ -228,14 +228,14 @@ public sealed class NtxWriteTests : IDisposable
                 table.Update(pick, Employee(table, table.Read(pick).Values.ToArray(), random));
             }
         }
-        var maintained = IndexFiles().ToDictionary(f => f, f => RawTree.Read(File.ReadAllBytes(f)).Entries);
+        var maintained = IndexFiles().ToDictionary(f => f, f => RawTree.Read(SharedFile.ReadAllBytes(f)).Entries);
 
         using (var table = OpenWritable(path))
             table.RebuildIndex();
 
         foreach (var file in IndexFiles())
         {
-            var rebuilt = RawTree.Read(File.ReadAllBytes(file));
+            var rebuilt = RawTree.Read(SharedFile.ReadAllBytes(file));
             Assert.Equal(maintained[file], rebuilt.Entries);
             Assert.Empty(rebuilt.FreePages); // a rebuild starts the file over
         }
@@ -344,7 +344,7 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyTenThousand();
         var file = Path.Combine(_dir.FullName, "10kName.ntx");
-        var bytes = File.ReadAllBytes(file);
+        var bytes = SharedFile.ReadAllBytes(file);
         var root = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
         switch (damage)
         {
@@ -362,7 +362,7 @@ public sealed class NtxWriteTests : IDisposable
                 BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root + 2), 1020); // slot 0's item runs off the page
                 break;
         }
-        File.WriteAllBytes(file, bytes);
+        SharedFile.WriteAllBytes(file, bytes);
 
         using var table = IndexedTables.OpenWithIndexes(path);
         var template = table.Read(0).Values.ToArray();
@@ -420,14 +420,14 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyCustomers();
         var ntx = Path.Combine(_dir.FullName, "Custname.ntx");
-        var bytes = File.ReadAllBytes(ntx);
+        var bytes = SharedFile.ReadAllBytes(ntx);
         var root = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
         // Swap the first two items' slots: same keys, now the second sorts before the first.
         var slot0 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 2));
         var slot1 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 4));
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root + 2), slot1);
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root + 4), slot0);
-        File.WriteAllBytes(ntx, bytes);
+        SharedFile.WriteAllBytes(ntx, bytes);
 
         AssertRefused(path, "Custname.ntx", "byte order");
     }
@@ -494,14 +494,14 @@ public sealed class NtxWriteTests : IDisposable
             other.Position = 0;
             other.WriteByte(0x26);
         }
-        var custom = File.ReadAllBytes(ntx);
+        var custom = SharedFile.ReadAllBytes(ntx);
 
         var error = Assert.Throws<DbfException>(() => table.Append(Customer(table, 778, "After", "Custom")));
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         Assert.Contains("custom", error.Diagnostic);
 
         table.RebuildIndex();
-        Assert.Equal(custom, File.ReadAllBytes(ntx));
+        Assert.Equal(custom, SharedFile.ReadAllBytes(ntx));
         Assert.Throws<DbfException>(() => table.Append(Customer(table, 779, "Still", "Custom")));
     }
 
@@ -512,7 +512,7 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyTenThousand();
         var ntx = Path.Combine(_dir.FullName, "10kName.ntx");
-        var bytes = File.ReadAllBytes(ntx);
+        var bytes = SharedFile.ReadAllBytes(ntx);
 
         // Down the leftmost branch to the page whose children are leaves.
         int ChildAt(int page, int slot) =>
@@ -524,7 +524,7 @@ public sealed class NtxWriteTests : IDisposable
         var record = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(leaf + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(leaf + 2)) + 4));
         var slot1 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(parent + 4));
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(parent + slot1), (uint)leaf);
-        File.WriteAllBytes(ntx, bytes);
+        SharedFile.WriteAllBytes(ntx, bytes);
 
         using var table = OpenWritable(path);
         var values = table.Read(record - 1).Values.ToArray();
@@ -532,7 +532,7 @@ public sealed class NtxWriteTests : IDisposable
         var error = Assert.Throws<DbfException>(() => table.Update(record - 1, values));
         Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
         Assert.Contains("twice", Assert.IsType<InvalidDataException>(error.InnerException).Message);
-        var after = File.ReadAllBytes(ntx);
+        var after = SharedFile.ReadAllBytes(ntx);
         Assert.Equal(bytes.AsSpan(8, 4).ToArray(), after.AsSpan(8, 4).ToArray()); // nothing freed
         Assert.Equal(bytes.AsSpan(leaf, PageSize).ToArray(), after.AsSpan(leaf, PageSize).ToArray());
     }
@@ -565,7 +565,7 @@ public sealed class NtxWriteTests : IDisposable
         using var table = DbfTable.Open(tablePath);
         foreach (var file in IndexFiles())
         {
-            var bytes = File.ReadAllBytes(file);
+            var bytes = SharedFile.ReadAllBytes(file);
             using var index = NtxIndex.Open(file, table: table);
             var tree = RawTree.Read(bytes);
             var oracle = Oracle(index.Tag, table);
@@ -596,7 +596,7 @@ public sealed class NtxWriteTests : IDisposable
             "10kDate.ntx" or "10kSalary.ntx" => "xsharp/rdd-tests/" + name,
             _ => "xsharp/explorer/" + name,
         };
-        return File.ReadAllBytes(Fixture(source)).AsSpan(0, PageSize).ToArray();
+        return SharedFile.ReadAllBytes(Fixture(source)).AsSpan(0, PageSize).ToArray();
     }
 
     private void SetHeaderByte(string name, int offset, byte value) => EditHeader(name, header => header[offset] = value);
@@ -605,20 +605,20 @@ public sealed class NtxWriteTests : IDisposable
     private void EmptyTree(string name)
     {
         var file = Path.Combine(_dir.FullName, name);
-        var bytes = File.ReadAllBytes(file);
+        var bytes = SharedFile.ReadAllBytes(file);
         var root = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
         BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root), 0);
         var first = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 2));
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(root + first), 0);
-        File.WriteAllBytes(file, bytes);
+        SharedFile.WriteAllBytes(file, bytes);
     }
 
     private void EditHeader(string name, Action<byte[]> edit)
     {
         var file = Path.Combine(_dir.FullName, name);
-        var bytes = File.ReadAllBytes(file);
+        var bytes = SharedFile.ReadAllBytes(file);
         edit(bytes);
-        File.WriteAllBytes(file, bytes);
+        SharedFile.WriteAllBytes(file, bytes);
         _headers[name] = bytes.AsSpan(0, PageSize).ToArray();
     }
 

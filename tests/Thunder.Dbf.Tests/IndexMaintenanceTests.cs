@@ -21,7 +21,7 @@ public sealed class IndexMaintenanceTests : IDisposable
         if (!withIndex)
         {
             // Clear the header's "has a production .mdx" flag, as a table that never had an index.
-            using var stream = File.OpenWrite(path);
+            using var stream = SharedFile.OpenWrite(path);
             stream.Position = 28;
             stream.WriteByte(0);
         }
@@ -46,8 +46,8 @@ public sealed class IndexMaintenanceTests : IDisposable
             Assert.True(table.Header.HasProductionMdx);
         }
 
-        var ours = File.ReadAllBytes(Path.Combine(_dir.FullName, "CHANGELOG.MDX"));
-        var theirs = File.ReadAllBytes(Path.Combine(Fixtures.Root, "siemens-step7/siprom/CHANGELOG.MDX"));
+        var ours = SharedFile.ReadAllBytes(Path.Combine(_dir.FullName, "CHANGELOG.MDX"));
+        var theirs = SharedFile.ReadAllBytes(Path.Combine(Fixtures.Root, "siemens-step7/siprom/CHANGELOG.MDX"));
 
         // File header: version, name, block factor and size, production flag, slots, entry length, tag count.
         Assert.Equal(theirs[0], ours[0]);
@@ -121,13 +121,13 @@ public sealed class IndexMaintenanceTests : IDisposable
     public void Bad_tags_are_explained_and_change_nothing(string name, string expression, string? filter, string expected)
     {
         var path = CopyChangelog(withIndex: true);
-        var before = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var before = SharedFile.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
         using (var table = DbfTable.Open(path, writable: true))
         {
             var error = Assert.ThrowsAny<Exception>(() => table.CreateIndexTag(name, expression, filter));
             Assert.Contains(expected, error.Message);
         }
-        Assert.Equal(before, File.ReadAllBytes(Path.ChangeExtension(path, ".MDX")));
+        Assert.Equal(before, SharedFile.ReadAllBytes(Path.ChangeExtension(path, ".MDX")));
     }
 
     [Fact]
@@ -200,16 +200,16 @@ public sealed class IndexMaintenanceTests : IDisposable
         long offset;
         using (var probe = DbfTable.Open(path))
             offset = probe.Header.HeaderLength + probe.Header.RecordLength + 1;
-        using (var file = File.OpenWrite(path))
+        using (var file = SharedFile.OpenWrite(path))
         {
             file.Position = offset;
             file.Write("   0"u8);
         }
-        var before = File.ReadAllBytes(path);
+        var before = SharedFile.ReadAllBytes(path);
 
         using var reopened = DbfTable.Open(path, writable: true);
         Assert.ThrowsAny<Exception>(() => reopened.Pack());
-        Assert.Equal(before, File.ReadAllBytes(path));   // not one record moved
+        Assert.Equal(before, SharedFile.ReadAllBytes(path));   // not one record moved
         Assert.False(File.Exists(path + ".packing"));    // and no backup, since nothing started
     }
 
@@ -237,14 +237,14 @@ public sealed class IndexMaintenanceTests : IDisposable
             table.CreateIndexTag("FIRST", "N"); // so the .mdx exists to compare
         }
         var mdx = Path.ChangeExtension(path, ".mdx");
-        var before = File.ReadAllBytes(mdx);
+        var before = SharedFile.ReadAllBytes(mdx);
 
         using (var table = DbfTable.Open(path, writable: true))
         {
             var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("MIXED", "IIF(N = 1, \"text\", N)"));
             Assert.Equal(DbfErrorCode.InvalidValue, error.Code);
         }
-        Assert.Equal(before, File.ReadAllBytes(mdx));
+        Assert.Equal(before, SharedFile.ReadAllBytes(mdx));
     }
 
     [Fact]
@@ -258,7 +258,7 @@ public sealed class IndexMaintenanceTests : IDisposable
             table.CreateIndexTag("BYBORN", "BORN", forExpression: "CITY = \"Québec\"");
         }
 
-        var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".mdx"));
+        var bytes = SharedFile.ReadAllBytes(Path.ChangeExtension(path, ".mdx"));
         var headerPage = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(544));
         Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(headerPage * 512 + 16)));
 

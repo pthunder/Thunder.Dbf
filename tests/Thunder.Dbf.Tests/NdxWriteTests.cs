@@ -248,7 +248,7 @@ public sealed class NdxWriteTests : IDisposable
         var folder = Copy("BIG.DBF", "BIG2.NDX");
         var path = Path.Combine(folder, "BIG.DBF");
         var ndx = Path.Combine(folder, "BIG2.NDX");
-        using (var file = File.OpenWrite(ndx))
+        using (var file = SharedFile.OpenWrite(ndx))
         {
             file.Position = 23;
             file.WriteByte(1);
@@ -311,7 +311,7 @@ public sealed class NdxWriteTests : IDisposable
         var folder = Copy("BIG.DBF", indexFile);
         var path = Path.Combine(folder, "BIG.DBF");
         var ndx = Path.Combine(folder, indexFile);
-        var original = File.ReadAllBytes(ndx);
+        var original = SharedFile.ReadAllBytes(ndx);
         var dBase = Snapshot(path, ndx);
 
         using (var table = OpenWritable(path))
@@ -319,7 +319,7 @@ public sealed class NdxWriteTests : IDisposable
 
         // Key length, keys per page, key type, item length, unique flag and the expression (with
         // dBASE's stray bytes after it) are untouched; only the root and the page count change.
-        var rebuilt = File.ReadAllBytes(ndx);
+        var rebuilt = SharedFile.ReadAllBytes(ndx);
         Assert.Equal(original.AsSpan(8, 504).ToArray(), rebuilt.AsSpan(8, 504).ToArray());
         Assert.Equal((uint)(rebuilt.Length / 512), BinaryPrimitives.ReadUInt32LittleEndian(rebuilt.AsSpan(4)));
 
@@ -344,7 +344,7 @@ public sealed class NdxWriteTests : IDisposable
         var folder = Copy("BIG.DBF", "BIG1.NDX");
         var path = Path.Combine(folder, "BIG.DBF");
         var ndx = Path.Combine(folder, "BIG1.NDX");
-        var bytes = File.ReadAllBytes(ndx);
+        var bytes = SharedFile.ReadAllBytes(ndx);
         var root = BinaryPrimitives.ReadInt32LittleEndian(bytes);
         var rootPage = bytes.AsSpan(root * 512, 512);
         switch (damage)
@@ -363,7 +363,7 @@ public sealed class NdxWriteTests : IDisposable
                 BinaryPrimitives.WriteUInt16LittleEndian(rootPage, 999);
                 break;
         }
-        File.WriteAllBytes(ndx, bytes);
+        SharedFile.WriteAllBytes(ndx, bytes);
 
         var id = damage == Damage.ChildPointsAtTheHeader ? 99_999_999m : 0m;
         using var table = OpenWritable(path);
@@ -389,7 +389,7 @@ public sealed class NdxWriteTests : IDisposable
         var folder = Copy("BIG.DBF", indexFile);
         var path = Path.Combine(folder, "BIG.DBF");
         var ndx = Path.Combine(folder, indexFile);
-        var bytes = File.ReadAllBytes(ndx);
+        var bytes = SharedFile.ReadAllBytes(ndx);
         var itemLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(18));
         var keyLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(12));
 
@@ -401,7 +401,7 @@ public sealed class NdxWriteTests : IDisposable
         Assert.NotEqual(a, b);
         b.CopyTo(bytes.AsSpan(leaf * 512 + 4 + 8));
         a.CopyTo(bytes.AsSpan(leaf * 512 + 4 + (count - 1) * itemLength + 8));
-        File.WriteAllBytes(ndx, bytes);
+        SharedFile.WriteAllBytes(ndx, bytes);
 
         using (var table = DbfTable.Open(path))
         using (var index = NdxIndex.Open(ndx, table: table))
@@ -423,12 +423,12 @@ public sealed class NdxWriteTests : IDisposable
         var folder = Copy("BIG.DBF", "BIG2.NDX");
         var path = Path.Combine(folder, "BIG.DBF");
         var ndx = Path.Combine(folder, "BIG2.NDX");
-        var bytes = File.ReadAllBytes(ndx);
+        var bytes = SharedFile.ReadAllBytes(ndx);
         var itemLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(18));
         var (parent, leaf) = LeftmostParentOfLeaves(bytes);
         var record = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(leaf * 512 + 4 + 4));
         BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(parent * 512 + 4 + itemLength), (uint)leaf); // child 1 = child 0
-        File.WriteAllBytes(ndx, bytes);
+        SharedFile.WriteAllBytes(ndx, bytes);
 
         using var table = OpenWritable(path);
         var values = table.Read(record - 1).Values.ToArray();
@@ -436,7 +436,7 @@ public sealed class NdxWriteTests : IDisposable
         var error = Assert.Throws<DbfException>(() => table.Update(record - 1, values));
         Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
         Assert.Contains("twice", Assert.IsType<InvalidDataException>(error.InnerException).Message);
-        Assert.Equal(bytes, File.ReadAllBytes(ndx));
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(ndx));
     }
 
     // Follows first children from the root to the page whose children are leaves.
@@ -516,7 +516,7 @@ public sealed class NdxWriteTests : IDisposable
     /// </summary>
     private static RawIndex ReadRaw(string path, NdxTag tag)
     {
-        var file = File.ReadAllBytes(path);
+        var file = SharedFile.ReadAllBytes(path);
         Assert.Equal(0, file.Length % 512);
         var pages = BinaryPrimitives.ReadUInt32LittleEndian(file.AsSpan(4));
         Assert.Equal((uint)(file.Length / 512), pages);
@@ -571,7 +571,7 @@ public sealed class NdxWriteTests : IDisposable
 
     private static void PatchExpression(string path, string expression)
     {
-        using var file = File.OpenWrite(path);
+        using var file = SharedFile.OpenWrite(path);
         file.Position = 24;
         var bytes = new byte[488];
         System.Text.Encoding.ASCII.GetBytes(expression).CopyTo(bytes, 0);

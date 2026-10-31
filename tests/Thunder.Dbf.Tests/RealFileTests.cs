@@ -120,8 +120,8 @@ public class RealFileTests
     [InlineData("dbfdatareader/foxpro_currency_01.dbf", null)]
     public void Rewriting_records_with_their_own_values_changes_no_bytes(string fixture, string? memoFixture)
     {
-        var original = File.ReadAllBytes(Path.Combine(FixtureRoot, fixture));
-        var originalMemo = memoFixture is null ? null : File.ReadAllBytes(Path.Combine(FixtureRoot, memoFixture));
+        var original = SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, fixture));
+        var originalMemo = memoFixture is null ? null : SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, memoFixture));
         using var stream = new MemoryStream();
         stream.Write(original);
         using var memoStream = new MemoryStream();
@@ -192,9 +192,9 @@ public class RealFileTests
     public void Memos_appended_to_real_memo_files_read_back(string fixture, string memoFixture, DbfMemoFormat format)
     {
         using var stream = new MemoryStream();
-        stream.Write(File.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
+        stream.Write(SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
         using var memoStream = new MemoryStream();
-        memoStream.Write(File.ReadAllBytes(Path.Combine(FixtureRoot, memoFixture)));
+        memoStream.Write(SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, memoFixture)));
         const string note = "Added by Thunder.Dbf.\r\nSecond line, still the same memo.";
 
         object?[] expected;

@@ -182,7 +182,7 @@ public sealed class MdxWriteTests : IDisposable
 
         foreach (var (name, bytes) in before)
         {
-            var now = File.ReadAllBytes(Path.Combine(_dir.FullName, name));
+            var now = SharedFile.ReadAllBytes(Path.Combine(_dir.FullName, name));
             Assert.True(bytes.AsSpan(4).SequenceEqual(now.AsSpan(4)), $"{name} changed"); // header dates may differ
         }
     }

@@ -250,9 +250,9 @@ public sealed class DbfDatabaseTests : IDisposable
 
     private void PatchByte(string file, int offset, byte value)
     {
-        var bytes = File.ReadAllBytes(PathOf(file));
+        var bytes = SharedFile.ReadAllBytes(PathOf(file));
         bytes[offset] = value;
-        File.WriteAllBytes(PathOf(file), bytes);
+        SharedFile.WriteAllBytes(PathOf(file), bytes);
     }
 
     private static string FindFixtureRoot()

@@ -89,10 +89,10 @@ public sealed class ConnectionRegressionTests : IDisposable
     public void Export_refuses_to_overwrite_table_files(string destination)
     {
         using var table = DbfTable.Open(Path.Combine(_data, "plain.dbf"));
-        var before = File.ReadAllBytes(Path.Combine(_data, "plain.dbf"));
+        var before = SharedFile.ReadAllBytes(Path.Combine(_data, "plain.dbf"));
 
         Assert.Throws<DbfException>(() => DbfExport.ToCsv(table, Path.Combine(_data, destination)));
-        Assert.Equal(before, File.ReadAllBytes(Path.Combine(_data, "plain.dbf")));
+        Assert.Equal(before, SharedFile.ReadAllBytes(Path.Combine(_data, "plain.dbf")));
     }
 
     [Fact]
@@ -195,7 +195,7 @@ public sealed class ConnectionRegressionTests : IDisposable
     public void Invalid_UTF8_in_a_CSV_is_reported()
     {
         var csv = Path.Combine(_root.FullName, "bad.csv");
-        File.WriteAllBytes(csv, [.. "Name\nCaf"u8, 0xE9, (byte)'\n']); // Windows-1252 é in a "UTF-8" file
+        SharedFile.WriteAllBytes(csv, [.. "Name\nCaf"u8, 0xE9, (byte)'\n']); // Windows-1252 é in a "UTF-8" file
         var error = Assert.Throws<DbfException>(() => DbfImport.Plan(csv));
 
         Assert.Equal(DbfErrorCode.InvalidCsv, error.Code);
@@ -337,7 +337,7 @@ public sealed class ConnectionRegressionTests : IDisposable
     private static MemoryStream Copy(string fixture)
     {
         var stream = new MemoryStream();
-        stream.Write(File.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
+        stream.Write(SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
         return stream;
     }
 

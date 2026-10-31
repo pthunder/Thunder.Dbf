@@ -202,7 +202,7 @@ public class CdxIndexTests
     public void Compact_idx_files_hold_one_tag_named_after_the_file()
     {
         var path = Path.Combine(Path.GetTempPath(), $"thunder-{Guid.NewGuid():N}.idx");
-        File.WriteAllBytes(path, new CdxBuilder(compound: false)
+        SharedFile.WriteAllBytes(path, new CdxBuilder(compound: false)
             .Tag("", headerOffset: 0, root: 1024, keyLength: 3, forExpression: "K <> 'zzz'", unique: true)
             .Leaf(1024, 3, (C("abc"), 2), (C("abd"), 1))
             .Build().ToArray());
@@ -292,7 +292,7 @@ public class CdxIndexTests
     [Fact]
     public void Streams_that_return_a_few_bytes_at_a_time_still_open()
     {
-        using var index = CdxIndex.Open(new TrickleStream(File.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.CDX")), chunk: 29));
+        using var index = CdxIndex.Open(new TrickleStream(SharedFile.ReadAllBytes(Fixture("xsharp/rdd-tests/TEST10K.CDX")), chunk: 29));
         Assert.Equal(7, index.Tags.Count);
         Assert.Equal(10_000, index["STATE"].Entries().Count());
     }

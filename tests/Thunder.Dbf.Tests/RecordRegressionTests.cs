@@ -19,7 +19,7 @@ public class RecordRegressionTests
     private static MemoryStream Copy(string fixture)
     {
         var stream = new MemoryStream();
-        stream.Write(File.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
+        stream.Write(SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
         return stream;
     }
 

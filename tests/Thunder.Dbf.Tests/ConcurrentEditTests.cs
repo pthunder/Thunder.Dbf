@@ -117,7 +117,7 @@ public sealed class ConcurrentEditTests : IDisposable
 
         // A healthy .ndx is kept up to date now; a damaged one (no key length) can't be, and nobody
         // can tell it doesn't belong to the table.
-        using (var damage = File.OpenWrite(Path.Combine(folder, "NUM2000.NDX")))
+        using (var damage = SharedFile.OpenWrite(Path.Combine(folder, "NUM2000.NDX")))
         {
             damage.Position = 12;
             damage.Write([0, 0]);
@@ -158,20 +158,20 @@ public sealed class IndexSafetyTests : IDisposable
         var index = Copy("retroinv/BIG1.NDX");
         Copy("retroinv/BIG.DBF");
         var copy = Copy("retroinv/BIG.DBF", "COPY.DBF");
-        var before = File.ReadAllBytes(index);
+        var before = SharedFile.ReadAllBytes(index);
 
         using (var table = DbfTable.Open(copy, writable: true))
         {
             var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
             Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         }
-        Assert.Equal(before, File.ReadAllBytes(index));
+        Assert.Equal(before, SharedFile.ReadAllBytes(index));
 
         // Named explicitly, it's kept up to date.
         using var owner = DbfTable.Open(Path.Combine(_dir.FullName, "BIG.DBF"), writable: true);
         owner.MaintainIndex(index);
         owner.Append(owner.Read(0).Values.ToArray());
-        Assert.NotEqual(before, File.ReadAllBytes(index));
+        Assert.NotEqual(before, SharedFile.ReadAllBytes(index));
     }
 
     [Fact]
