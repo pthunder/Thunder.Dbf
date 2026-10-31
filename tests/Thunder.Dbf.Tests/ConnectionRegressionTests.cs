@@ -149,6 +149,22 @@ public sealed class ConnectionRegressionTests : IDisposable
         Assert.Equal(true, DbfExpression.Parse(expression).Evaluate(AnyRecord()));
     }
 
+    // Clipper and Harbour programs write index keys like INDEX ON FIELD->ID: FIELD-> (or _FIELD->)
+    // means this work area's field. Found by a Harbour-built .ntx on Windows.
+    [Fact]
+    public void FIELD_arrow_names_this_tables_own_field()
+    {
+        using var stream = Copy("infused-dbf/dbase_31.dbf");
+        using var table = DbfTable.Open(stream, leaveOpen: true);
+        var row = table.Read(0);
+        Assert.Equal(DbfExpression.Parse("PRODUCTID").Evaluate(row), DbfExpression.Parse("FIELD->PRODUCTID").Evaluate(row));
+        Assert.Equal(DbfExpression.Parse("STR(PRODUCTID, 5) + QUANTITYPE").Evaluate(row),
+            DbfExpression.Parse("STR(_field->ProductID, 5) + Field->QUANTITYPE").Evaluate(row));
+        Assert.Equal(["PRODUCTID", "QUANTITYPE"], DbfExpression.FieldNamesIn("FIELD->PRODUCTID + FIELD->QUANTITYPE").Select(n => n.ToUpperInvariant()).Order());
+        Assert.Throws<NotSupportedException>(() => DbfExpression.Parse("M->PRODUCTID"));
+        Assert.Throws<NotSupportedException>(() => DbfExpression.Parse("CUSTOMER->NAME"));
+    }
+
     // #8: nullable is not the same as null.
     [Fact]
     public void Blank_nullable_fields_are_blank_not_null()

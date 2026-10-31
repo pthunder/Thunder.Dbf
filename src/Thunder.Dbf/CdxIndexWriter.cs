@@ -138,11 +138,14 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 damage = ExceptionDispatchInfo.Capture(ex);
             }
 
+            // Visual FoxPro appends under the table's header lock, record, count and keys together, so
+            // with that lock held (before the index lock, as writes take them) no append is half done.
             bool settled, locked;
-            using (var held = TryTakeIndexLock())
+            using (var header = TryTakeTableHeaderLock(out var headerBusy))
+            using (var held = headerBusy ? null : TryTakeIndexLock())
             {
-                locked = held is not null;
-                settled = CurrentState() == before && ReloadRecordCount() == records;
+                locked = held is not null && (header is not null || !OpenedForWriting);
+                settled = !headerBusy && CurrentState() == before && ReloadRecordCount() == records;
             }
             if (!settled)
             {
@@ -168,6 +171,29 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         _table?.ReloadHeader();
         return _table?.RecordCount ?? 0;
+    }
+
+    // The table's header lock, for the moment the check confirms its result. Busy (another program
+    // appending, or holding the whole table) means try again; a handle that can't lock at all (Check's
+    // read-only probe on some platforms) goes without.
+    private DbfLock? TryTakeTableHeaderLock(out bool busy)
+    {
+        busy = false;
+        if (_table is null || _table.FilePath is null)
+            return null;
+        try
+        {
+            return _table.Locks.Header();
+        }
+        catch (DbfException ex) when (ex.Code is DbfErrorCode.TableLocked)
+        {
+            busy = true;
+            return null;
+        }
+        catch (Exception ex) when (!OpenedForWriting && ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException or DbfException { Code: DbfErrorCode.LockingUnsupported })
+        {
+            return null;
+        }
     }
 
     // The index lock where this handle can take it; a read-only handle (Check's probe) may not be
