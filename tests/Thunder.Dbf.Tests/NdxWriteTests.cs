@@ -377,6 +377,79 @@ public sealed class NdxWriteTests : IDisposable
         Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
     }
 
+    // ---- what can't be maintained -----------------------------------------------------------
+
+    // A localized dBASE that sorted text by a collation leaves keys out of byte order (numbers out of
+    // number order would be damage). Either way inserting by byte order would misfile keys: refuse.
+    [Theory]
+    [InlineData("BIG2.NDX", "byte order")]   // NAME
+    [InlineData("BIG3.NDX", "number order")] // dates as Julian-day doubles
+    public void Keys_out_of_order_refuse_maintenance(string indexFile, string reason)
+    {
+        var folder = Copy("BIG.DBF", indexFile);
+        var path = Path.Combine(folder, "BIG.DBF");
+        var ndx = Path.Combine(folder, indexFile);
+        var bytes = File.ReadAllBytes(ndx);
+        var itemLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(18));
+        var keyLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(12));
+
+        // Swap the keys of the first and last items in the leftmost leaf.
+        var (_, leaf) = LeftmostParentOfLeaves(bytes);
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(leaf * 512));
+        var a = bytes.AsSpan(leaf * 512 + 4 + 8, keyLength).ToArray();
+        var b = bytes.AsSpan(leaf * 512 + 4 + (count - 1) * itemLength + 8, keyLength).ToArray();
+        Assert.NotEqual(a, b);
+        b.CopyTo(bytes.AsSpan(leaf * 512 + 4 + 8));
+        a.CopyTo(bytes.AsSpan(leaf * 512 + 4 + (count - 1) * itemLength + 8));
+        File.WriteAllBytes(ndx, bytes);
+
+        using (var table = DbfTable.Open(path))
+        using (var index = NdxIndex.Open(ndx, table: table))
+        {
+            Assert.False(((IMaintainedIndex)index).CanMaintain);
+            Assert.Contains(reason, ((IMaintainedIndex)index).CannotMaintainReason);
+        }
+
+        using var writable = DbfTable.Open(path, writable: true);
+        var error = Assert.Throws<DbfException>(() => writable.MaintainIndex(ndx));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+    }
+
+    // Two children of one page pointing at the same leaf is damage: a change there would change both
+    // branches. The write stops with the index untouched.
+    [Fact]
+    public void Two_children_sharing_a_leaf_fail_the_write_as_damage()
+    {
+        var folder = Copy("BIG.DBF", "BIG2.NDX");
+        var path = Path.Combine(folder, "BIG.DBF");
+        var ndx = Path.Combine(folder, "BIG2.NDX");
+        var bytes = File.ReadAllBytes(ndx);
+        var itemLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(18));
+        var (parent, leaf) = LeftmostParentOfLeaves(bytes);
+        var record = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(leaf * 512 + 4 + 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(parent * 512 + 4 + itemLength), (uint)leaf); // child 1 = child 0
+        File.WriteAllBytes(ndx, bytes);
+
+        using var table = OpenWritable(path);
+        var values = table.Read(record - 1).Values.ToArray();
+        values[1] = "zzz";
+        var error = Assert.Throws<DbfException>(() => table.Update(record - 1, values));
+        Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
+        Assert.Contains("twice", Assert.IsType<InvalidDataException>(error.InnerException).Message);
+        Assert.Equal(bytes, File.ReadAllBytes(ndx));
+    }
+
+    // Follows first children from the root to the page whose children are leaves.
+    private static (int Parent, int Leaf) LeftmostParentOfLeaves(byte[] bytes)
+    {
+        int FirstChild(int page) => BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(page * 512 + 4));
+        var parent = BinaryPrimitives.ReadInt32LittleEndian(bytes);
+        Assert.NotEqual(0, FirstChild(parent)); // the root is an inner page
+        while (FirstChild(FirstChild(parent)) != 0)
+            parent = FirstChild(parent);
+        return (parent, FirstChild(parent));
+    }
+
     // ---- the oracle -------------------------------------------------------------------------
 
     private static object?[] BigRow(Random random, int id) =>

@@ -10,6 +10,14 @@
 //
 // The page layout, split rule and free list follow Harbour's src/rdd/dbfntx (read, not copied:
 // Harbour is GPL with a linking exception) and the files X#'s DBFNTX driver writes.
+//
+// Every change runs under Clipper's index lock, the one Harbour's hb_ntxIndexLockWrite takes:
+//
+//   .ntx file   [ header | pages ... ]  ....  byte 1,000,000,000   (large files: 0x7FFFFFFF00000001
+//                                                ^ exclusive              and the 65,536 bytes after)
+//   lock -> re-read header and pages -> change -> bump the update counter -> flush -> unlock
+//
+// Nothing read before the lock is trusted after it, so the lock is taken per tree operation.
 
 using System.Buffers.Binary;
 using System.Globalization;
@@ -24,11 +32,58 @@ public sealed partial class NtxIndex : IMaintainedIndex
     internal const int RootOffset = 4;
     internal const int FreePageOffset = 8;
 
-    private bool _changed;
+    // Clipper's index lock: Harbour's IDX_LOCKPOS_CLIPPER (and _CLIPPER2, the same byte) with no
+    // lock pool, so one byte. A large-file index makes Harbour switch to its HB64 scheme, whose
+    // exclusive lock covers the IDX_LOCKPOS_HB64 byte and the IDX_LOCKPOOL_HB64 pool after it
+    // (include/hbrdddbf.h and hb_dbfLockIdxFile in src/rdd/dbf1.c; read, not copied).
+    internal static readonly (long Offset, long Length) ClipperLock = (1_000_000_000, 1);
+    internal static readonly (long Offset, long Length) LargeFileLock = (0x7FFF_FFFF_0000_0001, 0x1_0001);
 
-    IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
+    private bool _changed;
+    private DbfLocks? _fileLocks;
+
+    IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => CannotMaintainReason is null ? Tags : [];
+    bool IMaintainedIndex.CanMaintain => CannotMaintainReason is null;
+    string? IMaintainedIndex.CannotMaintainReason => CannotMaintainReason;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
     void IMaintainedIndex.Commit() => Commit();
+
+    /// <summary>
+    /// Why this file can't be kept exactly as Clipper would keep it (a custom or changes-only index,
+    /// numeric keys wider than a double's digits, keys out of byte order), or null when it can.
+    /// Checked once per header layout; the key-order walk reads every page once and stops early.
+    /// </summary>
+    internal string? CannotMaintainReason => Tag.MaintenanceProblem();
+
+    /// <summary>
+    /// Runs one tree operation under the index's write lock: the header is re-checked and every page
+    /// re-read inside it, and the update counter is bumped and the change flushed before it's released,
+    /// so Clipper and Harbour see either none of it or all of it, and drop the pages they cached.
+    /// </summary>
+    internal T Update<T>(NtxTag tag, Func<T> change)
+    {
+        var locks = _fileLocks ??= new DbfLocks(_stream as FileStream, (_stream as FileStream)?.Name);
+        if (_table is not null)
+        {
+            locks.Timeout = _table.Locks.Timeout;
+            locks.RequireLocks = _table.Locks.RequireLocks;
+        }
+
+        using var held = locks.Range(tag.LockRange, DbfErrorCode.TableLocked, "Another program is updating one of this table's indexes.");
+        try
+        {
+            tag.CheckHeaderUnchanged();
+            return change();
+        }
+        finally
+        {
+            // Half a change (a damaged page met midway) is still published: other programs must not
+            // keep using pages they cached from before it.
+            if (_changed)
+                BumpVersion();
+            _stream.Flush();
+        }
+    }
 
     /// <summary>
     /// Re-reads the header, in case another program rebuilt the index. The tag object stays the same
@@ -48,17 +103,20 @@ public sealed partial class NtxIndex : IMaintainedIndex
     internal void Commit()
     {
         if (_changed)
-        {
-            Span<byte> version = stackalloc byte[2];
-            DbfTable.DiscardReadBuffer(_stream);
-            _stream.Position = VersionOffset;
-            _stream.ReadExactly(version);
-            BinaryPrimitives.WriteUInt16LittleEndian(version, (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(version) + 1));
-            _stream.Position = VersionOffset;
-            _stream.Write(version);
-            _changed = false;
-        }
+            BumpVersion();
         DbfTable.FlushToDisk(_stream);
+    }
+
+    private void BumpVersion()
+    {
+        Span<byte> version = stackalloc byte[2];
+        DbfTable.DiscardReadBuffer(_stream);
+        _stream.Position = VersionOffset;
+        _stream.ReadExactly(version);
+        BinaryPrimitives.WriteUInt16LittleEndian(version, (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(version) + 1));
+        _stream.Position = VersionOffset;
+        _stream.Write(version);
+        _changed = false;
     }
 
     internal void MarkChanged() => _changed = true;
@@ -116,18 +174,113 @@ public sealed partial class NtxTag : IMaintainedTag
     private DbfExpression? _forExpression;
     private bool _expressionsParsed;
 
+    // Signature flags for maintenance modes Thunder.Dbf doesn't keep: keys the program adds itself
+    // (custom, and Harbour's template and multi-key variants of it), and keys only for changed records.
+    private const ushort FlagCustom = 0x0020;
+    private const ushort FlagChangesOnly = 0x0040;
+    private const ushort FlagTemplate = 0x0080;
+    private const ushort FlagMultiKey = 0x0400;
+
+    // STR() builds a numeric key from a double, good for about 15 significant digits; past that
+    // Clipper's and Harbour's digits are their own (Harbour: hb_itemStrBuf in src/vm/itemapi.c).
+    private const int MaxNumericDigits = 15;
+
+    private bool _problemChecked;
+    private string? _problem;
+
     bool IMaintainedTag.Includes(DbfRecord record) => Includes(record);
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
-    void IMaintainedTag.Insert(byte[] key, int recordNumber) => Insert(key, recordNumber);
-    bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
-    int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
-    void IMaintainedTag.Clear() => Clear();
+    void IMaintainedTag.Insert(byte[] key, int recordNumber) => _index.Update(this, () => { Insert(key, recordNumber); return true; });
+    bool IMaintainedTag.Remove(byte[] key, int recordNumber) => _index.Update(this, () => Remove(key, recordNumber));
+    int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
+    void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
 
     internal bool SameLayoutAs(NtxTag other) =>
         Expression == other.Expression && ForExpression == other.ForExpression && KeyType == other.KeyType
         && KeyLength == other.KeyLength && KeyDecimals == other.KeyDecimals && ItemLength == other.ItemLength
         && MaxKeys == other.MaxKeys && IsUnique == other.IsUnique && IsDescending == other.IsDescending
-        && _largeFile == other._largeFile;
+        && _largeFile == other._largeFile && Signature == other.Signature;
+
+    /// <summary>The byte range Clipper (or, for a large file, Harbour) locks while it changes this index.</summary>
+    internal (long Offset, long Length) LockRange => _largeFile ? NtxIndex.LargeFileLock : NtxIndex.ClipperLock;
+
+    /// <summary>Under the lock: another program may have rebuilt the file differently since the tag was read.</summary>
+    internal void CheckHeaderUnchanged()
+    {
+        var header = _index.ReadPage(0);
+        if (BinaryPrimitives.ReadUInt16LittleEndian(header) != Signature
+            || BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(12)) != ItemLength
+            || BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(14)) != KeyLength
+            || BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(16)) != KeyDecimals
+            || BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(18)) != MaxKeys)
+            throw new InvalidDataException($"Tag {Name} was rebuilt with another layout by another program while this write was under way.");
+    }
+
+    // ---- what can be maintained -----------------------------------------------------------
+
+    /// <inheritdoc cref="NtxIndex.CannotMaintainReason"/>
+    internal string? MaintenanceProblem()
+    {
+        if (!_problemChecked)
+        {
+            _problem = FindMaintenanceProblem();
+            _problemChecked = true;
+        }
+        return _problem;
+    }
+
+    private string? FindMaintenanceProblem()
+    {
+        if ((Signature & FlagCustom) != 0)
+            return $"Tag {Name} is a custom index: the program adds its keys itself, so they can't be worked out from the table.";
+        if ((Signature & FlagChangesOnly) != 0)
+            return $"Tag {Name} is a changes-only index: it holds keys only for records changed since it was built.";
+        if ((Signature & (FlagTemplate | FlagMultiKey)) != 0)
+            return $"Tag {Name} is a template or multi-key index, whose keys the program sets itself.";
+        var digits = KeyLength - (KeyDecimals > 0 ? 1 : 0);
+        if (KeyType == 'N' && digits > MaxNumericDigits)
+            return $"Tag {Name}'s numeric keys hold {digits} digits, more than the {MaxNumericDigits} Clipper's STR() keeps exactly.";
+        return ByteOrderProblem();
+    }
+
+    // The file doesn't record a national sort order. Keys a collation ordered show up as a pair out
+    // of byte order: then byte comparison would route and place new keys wrongly, so refuse. A damaged
+    // tree isn't judged here: the write that meets the damage reports it.
+    private string? ByteOrderProblem()
+    {
+        try
+        {
+            byte[]? previous = null;
+            return InByteOrder(CurrentRoot(), depth: 0, visited: [], ref previous)
+                ? null
+                : $"Tag {Name}'s keys aren't in byte order, so it was probably built with a national sort order.";
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    // One in-order walk that stops at the first pair out of order.
+    private bool InByteOrder(long page, int depth, HashSet<long> visited, ref byte[]? previous)
+    {
+        GuardDepth(depth);
+        if (!visited.Add(page))
+            throw new InvalidDataException($"Tag {Name} reaches the index page at offset {page} twice; the index is corrupt.");
+        var node = ReadNode(page);
+        for (var slot = 0; slot <= node.Items.Count; slot++)
+        {
+            if (!node.IsLeaf && !InByteOrder(node.ChildAt(slot), depth + 1, visited, ref previous))
+                return false;
+            if (slot == node.Items.Count)
+                break;
+            var key = node.Items[slot].Key;
+            if (previous is not null && CompareKeys(previous, key) > 0)
+                return false;
+            previous = key;
+        }
+        return true;
+    }
 
     // ---- keys for records -----------------------------------------------------------------
 
@@ -229,7 +382,7 @@ public sealed partial class NtxTag : IMaintainedTag
         CheckKey(key);
         CheckWritable();
         var root = CurrentRoot();
-        if (InsertInto(root, key, recordNumber, depth: 0) is { } split)
+        if (InsertInto(root, key, recordNumber, depth: 0, path: []) is { } split)
         {
             var newRoot = AllocatePage();
             WriteNode(newRoot, new Node([split.Middle with { Child = root }], split.Right));
@@ -238,10 +391,13 @@ public sealed partial class NtxTag : IMaintainedTag
         _index.MarkChanged();
     }
 
-    private (Item Middle, long Right)? InsertInto(long page, byte[] key, int recordNumber, int depth)
+    private (Item Middle, long Right)? InsertInto(long page, byte[] key, int recordNumber, int depth, HashSet<long> path)
     {
         GuardDepth(depth);
+        if (!path.Add(page))
+            throw new InvalidDataException($"Tag {Name} reaches the index page at offset {page} twice; the index is corrupt.");
         var node = ReadNode(page);
+        CheckChildren(node, page, path);
         var slot = UpperBound(node.Items, key, recordNumber);
 
         if (node.IsLeaf)
@@ -251,7 +407,7 @@ public sealed partial class NtxTag : IMaintainedTag
         else
         {
             var child = node.ChildAt(slot);
-            if (InsertInto(child, key, recordNumber, depth + 1) is not { } split)
+            if (InsertInto(child, key, recordNumber, depth + 1, path) is not { } split)
                 return null;
 
             // The child kept the items before the middle one; the middle item comes up to sit in front
@@ -317,10 +473,14 @@ public sealed partial class NtxTag : IMaintainedTag
             // A key in an inner page is replaced by its predecessor, the last key of the rightmost leaf
             // under its left child; that leaf then loses one key instead.
             var leaf = node.Items[slot].Child;
+            var above = path.Select(p => p.Page).ToHashSet();
             for (var depth = path.Count; ; depth++)
             {
                 GuardDepth(depth);
+                if (!above.Add(leaf))
+                    throw new InvalidDataException($"Tag {Name} reaches the index page at offset {leaf} twice; the index is corrupt.");
                 var below = ReadNode(leaf);
+                CheckChildren(below, leaf, above);
                 if (below.IsLeaf)
                 {
                     if (below.Items.Count == 0)
@@ -352,6 +512,8 @@ public sealed partial class NtxTag : IMaintainedTag
         if (!visited.Add(page))
             throw new InvalidDataException($"Tag {Name} reaches the index page at offset {page} twice; the index is corrupt.");
         var node = ReadNode(page);
+        if (!node.IsLeaf)
+            CheckChildren(node, page, path.Select(p => p.Item1).Append(page).ToHashSet());
 
         for (var i = LowerBound(node.Items, key); i <= node.Items.Count; i++)
         {
@@ -399,6 +561,7 @@ public sealed partial class NtxTag : IMaintainedTag
     // hands the root role to its one child.
     private void Rebalance(List<(long Page, int Slot)> path)
     {
+        var onPath = path.Select(p => p.Page).ToHashSet();
         for (var level = path.Count - 1; level >= 0; level--)
         {
             var page = path[level].Page;
@@ -426,7 +589,7 @@ public sealed partial class NtxTag : IMaintainedTag
             if (slot > 0)
             {
                 var leftPage = parent.ChildAt(slot - 1);
-                var left = ReadSibling(leftPage, node);
+                var left = ReadSibling(leftPage, node, onPath);
                 if (left.Items.Count >= 2)
                 {
                     // Rotate right: the separator comes down to the front of this page, and the left
@@ -447,7 +610,7 @@ public sealed partial class NtxTag : IMaintainedTag
             if (slot < parent.Items.Count)
             {
                 var rightPage = parent.ChildAt(slot + 1);
-                var right = ReadSibling(rightPage, node);
+                var right = ReadSibling(rightPage, node, onPath);
                 if (right.Items.Count >= 2)
                 {
                     // Rotate left: the separator comes down to the end of this page, and the right
@@ -482,7 +645,7 @@ public sealed partial class NtxTag : IMaintainedTag
             // Merge this empty page into its left sibling (one item at most), around the separator.
             {
                 var leftPage = parent.ChildAt(slot - 1);
-                var left = ReadSibling(leftPage, node);
+                var left = ReadSibling(leftPage, node, onPath);
                 left.Items.Add(parent.Items[slot - 1] with { Child = left.LastChild });
                 left.LastChild = node.LastChild;
                 parent.Items.RemoveAt(slot - 1);
@@ -494,8 +657,11 @@ public sealed partial class NtxTag : IMaintainedTag
         }
     }
 
-    private Node ReadSibling(long page, Node of)
+    private Node ReadSibling(long page, Node of, HashSet<long> onPath)
     {
+        // A sibling that is a page of the path itself would be merged with, or freed from under, itself.
+        if (onPath.Contains(page))
+            throw new InvalidDataException($"Tag {Name} uses the index page at offset {page} twice in one branch; the index is corrupt.");
         var sibling = ReadNode(page);
         if (sibling.IsLeaf != of.IsLeaf)
             throw new InvalidDataException($"Tag {Name} has a leaf and an inner page side by side at offset {page}; the index is corrupt.");
@@ -539,6 +705,23 @@ public sealed partial class NtxTag : IMaintainedTag
         if (items.Any(item => (item.Child == 0) != node.IsLeaf))
             throw new InvalidDataException($"The index page at offset {offset} mixes empty and non-empty child pointers; the index is corrupt.");
         return node;
+    }
+
+    /// <summary>
+    /// An inner page's children must be distinct pages, none of them the page or one above it: a page
+    /// referenced twice is damage, and changing it would free or merge a live page with itself.
+    /// </summary>
+    private void CheckChildren(Node node, long page, HashSet<long> above)
+    {
+        if (node.IsLeaf)
+            return;
+        var seen = new HashSet<long>();
+        for (var slot = 0; slot <= node.Items.Count; slot++)
+        {
+            var child = node.ChildAt(slot);
+            if (!seen.Add(child) || above.Contains(child))
+                throw new InvalidDataException($"The index page at offset {page} of tag {Name} points at the page at offset {child} twice, or back up the tree; the index is corrupt.");
+        }
     }
 
     private long ChildOffset(byte[] page, int at)

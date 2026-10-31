@@ -15,6 +15,9 @@
 // Removing a key never merges pages. dBASE III doesn't either: a page that empties leaves the
 // tree and stays in the file, unused. A separator larger than its child's real last key still
 // routes searches correctly, so nothing else needs touching.
+//
+// dBASE III PLUS takes no lock on the .ndx itself: its multi-user commands update indexes under the
+// table's own record and file locks, so this writer relies on the table's locks too.
 
 using System.Buffers.Binary;
 
@@ -27,12 +30,29 @@ public sealed partial class NdxIndex : IMaintainedIndex
     /// <summary>The largest index file the 32-bit offsets dBASE uses can address safely: 2 GB.</summary>
     private const long MaxIndexBytes = int.MaxValue;
 
-    IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => [Tag];
+    IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => CannotMaintainReason is null ? [Tag] : [];
+    bool IMaintainedIndex.CanMaintain => CannotMaintainReason is null;
+    string? IMaintainedIndex.CannotMaintainReason => CannotMaintainReason;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
     void IMaintainedIndex.Commit() => Commit();
 
-    /// <summary>Re-reads the header, in case the legacy app rebuilt or rewrote the file.</summary>
-    internal void ReloadTags() => Tag = NdxTag.Load(this, Tag.Name, _table);
+    /// <summary>
+    /// Why this file can't be kept as dBASE III would keep it (keys out of the byte or number order
+    /// it compares by: a localized sort order), or null when it can. Checked once per header layout
+    /// with one walk that stops at the first pair out of order.
+    /// </summary>
+    internal string? CannotMaintainReason => Tag.MaintenanceProblem();
+
+    /// <summary>
+    /// Re-reads the header, in case the legacy app rebuilt or rewrote the file. The tag object stays
+    /// the same unless its layout changed, so its key-order check isn't repeated on every write.
+    /// </summary>
+    internal void ReloadTags()
+    {
+        var fresh = NdxTag.Load(this, Tag.Name, _table);
+        if (!fresh.SameLayoutAs(Tag))
+            Tag = fresh;
+    }
 
     /// <summary>Records the file's real length as its page count and pushes everything to disk.</summary>
     internal void Commit()
@@ -91,6 +111,68 @@ public sealed partial class NdxTag : IMaintainedTag
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
     int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
     void IMaintainedTag.Clear() => Clear();
+
+    private bool _problemChecked;
+    private string? _problem;
+
+    internal bool SameLayoutAs(NdxTag other) =>
+        Expression == other.Expression && KeyType == other.KeyType && KeyLength == other.KeyLength
+        && ItemLength == other.ItemLength && MaxKeys == other.MaxKeys && IsUnique == other.IsUnique;
+
+    // ---- what can be maintained -----------------------------------------------------------
+
+    /// <inheritdoc cref="NdxIndex.CannotMaintainReason"/>
+    internal string? MaintenanceProblem()
+    {
+        if (!_problemChecked)
+        {
+            _problem = KeyOrderProblem();
+            _problemChecked = true;
+        }
+        return _problem;
+    }
+
+    // The file doesn't record a sort order. A localized dBASE that ordered text by a collation leaves
+    // a pair out of byte order; inserting by byte order would then file keys where dBASE can't find
+    // them. A damaged tree isn't judged here: the write that meets the damage reports it.
+    private string? KeyOrderProblem()
+    {
+        try
+        {
+            byte[]? previous = null;
+            return InKeyOrder(RootPage(), depth: 0, visited: [], ref previous)
+                ? null
+                : $"Index {Name}'s keys aren't in {(KeyType == 'C' ? "byte" : "number")} order, so it was probably built with another sort order.";
+        }
+        catch (InvalidDataException)
+        {
+            return null;
+        }
+    }
+
+    private bool InKeyOrder(uint page, int depth, HashSet<uint> visited, ref byte[]? previous)
+    {
+        GuardDepth(depth);
+        if (!visited.Add(page))
+            throw new InvalidDataException($"Index {Name} reaches page {page} twice; the index is corrupt.");
+        var (items, lastPointer, isLeaf) = ReadNode(page);
+        if (!isLeaf)
+        {
+            for (var i = 0; i <= items.Count; i++)
+            {
+                if (!InKeyOrder(i < items.Count ? items[i].Pointer : lastPointer, depth + 1, visited, ref previous))
+                    return false;
+            }
+            return true;
+        }
+        foreach (var item in items)
+        {
+            if (previous is not null && CompareKeys(previous, item.Key) > 0)
+                return false;
+            previous = item.Key;
+        }
+        return true;
+    }
 
     // ---- keys for records -----------------------------------------------------------------
 
@@ -162,7 +244,7 @@ public sealed partial class NdxTag : IMaintainedTag
             throw new ArgumentOutOfRangeException(nameof(recordNumber));
 
         var root = RootPage();
-        if (InsertInto(root, key, (uint)recordNumber, depth: 0) is { } split)
+        if (InsertInto(root, key, (uint)recordNumber, depth: 0, path: []) is { } split)
         {
             var newRoot = _index.AllocatePage();
             WriteNode(newRoot, [new Item(root, split.LeftLast)], split.Right, isLeaf: false);
@@ -170,10 +252,14 @@ public sealed partial class NdxTag : IMaintainedTag
         }
     }
 
-    private (byte[] LeftLast, uint Right)? InsertInto(uint page, byte[] key, uint recordNumber, int depth)
+    private (byte[] LeftLast, uint Right)? InsertInto(uint page, byte[] key, uint recordNumber, int depth, HashSet<uint> path)
     {
         GuardDepth(depth);
+        if (!path.Add(page))
+            throw new InvalidDataException($"Index {Name} reaches page {page} twice; the index is corrupt.");
         var (items, lastPointer, isLeaf) = ReadNode(page);
+        if (!isLeaf)
+            CheckChildren(items, lastPointer, page, path);
 
         if (isLeaf)
         {
@@ -183,7 +269,7 @@ public sealed partial class NdxTag : IMaintainedTag
         {
             var slot = UpperBound(items, key);
             var child = slot < items.Count ? items[slot].Pointer : lastPointer;
-            if (InsertInto(child, key, recordNumber, depth + 1) is not { } split)
+            if (InsertInto(child, key, recordNumber, depth + 1, path) is not { } split)
                 return null;
 
             // The child split into itself (left) and a new right page: the left keeps this slot with
@@ -308,6 +394,8 @@ public sealed partial class NdxTag : IMaintainedTag
         if (!visited.Add(page))
             throw new InvalidDataException($"Index {Name} reaches page {page} twice; the index is corrupt.");
         var (items, lastPointer, isLeaf) = ReadNode(page);
+        if (!isLeaf)
+            CheckChildren(items, lastPointer, page, path.Select(p => p.Item1).Append(page).ToHashSet());
         var start = LowerBound(items, key);
 
         if (isLeaf)
@@ -392,6 +480,21 @@ public sealed partial class NdxTag : IMaintainedTag
         }
         var lastPointer = isLeaf ? 0 : BinaryPrimitives.ReadUInt32LittleEndian(node.AsSpan(4 + count * ItemLength));
         return (items, lastPointer, isLeaf);
+    }
+
+    /// <summary>
+    /// An inner page's children must be distinct pages, none of them the page or one above it: a page
+    /// referenced twice is damage, and changing it would change two branches at once.
+    /// </summary>
+    private void CheckChildren(List<Item> items, uint lastPointer, uint page, HashSet<uint> above)
+    {
+        var seen = new HashSet<uint>();
+        for (var i = 0; i <= items.Count; i++)
+        {
+            var child = i < items.Count ? items[i].Pointer : lastPointer;
+            if (!seen.Add(child) || above.Contains(child))
+                throw new InvalidDataException($"Index page {page} of {Name} points at page {child} twice, or back up the tree; the index is corrupt.");
+        }
     }
 
     //  leaf item:  [ 0 0 0 0 | record | key ... pad ]
