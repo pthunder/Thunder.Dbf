@@ -29,6 +29,7 @@
 
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 
 namespace Thunder.Dbf;
@@ -114,21 +115,65 @@ public sealed partial class CdxIndex : IMaintainedIndex
             MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
             return;
         }
-        // Another program can be between writing a record and adding its keys. It adds keys under
-        // the index lock, so the tree is read under that lock, and a write in progress gets a moment
-        // to finish before the index is called out of step with the table.
+        // The whole tree is walked without holding Visual FoxPro's index lock, which would stop every
+        // VFP user for as long as a big index takes to read. Then, briefly under the lock, the update
+        // counter (bumped under that lock by VFP and Thunder.Dbf alike) and the record count must be
+        // what they were before the walk; otherwise another program changed something meanwhile and
+        // the walk is repeated. Keys out of step with the table can also be another program between
+        // writing a record and adding its keys, so that result gets a moment to settle too.
         for (var attempt = 1; ; attempt++)
         {
             _outOfStep = false;
-            using (OpenedForWriting ? TakeIndexLock() : null)
+            var before = CurrentState();
+            var records = ReloadRecordCount();
+            string? refusal = null;
+            ExceptionDispatchInfo? damage = null;
+            try
             {
-                _table?.ReloadHeader();
                 CheckPageOwnership();
-                MaintainRefusal = FirstRefusal();
+                refusal = FirstRefusal();
             }
-            if (MaintainRefusal is null || !_outOfStep || attempt == OutOfStepAttempts)
+            catch (InvalidDataException ex)
+            {
+                damage = ExceptionDispatchInfo.Capture(ex);
+            }
+
+            bool settled;
+            using (TryTakeIndexLock())
+                settled = CurrentState() == before && ReloadRecordCount() == records;
+            if (!settled)
+            {
+                _verifiedTags.Clear();
+                if (attempt < OutOfStepAttempts)
+                    continue;
+                MaintainRefusal = "the index kept changing while it was being checked (another program is busy writing to the table); reopen the table to try again.";
+                return;
+            }
+            damage?.Throw();
+            MaintainRefusal = refusal;
+            if (refusal is null || !_outOfStep || attempt == OutOfStepAttempts)
                 return;
             Thread.Sleep(OutOfStepPause);
+        }
+    }
+
+    private int ReloadRecordCount()
+    {
+        _table?.ReloadHeader();
+        return _table?.RecordCount ?? 0;
+    }
+
+    // The index lock where this handle can take it; a read-only handle (Check's probe) may not be
+    // allowed a lock on every platform, and then relies on the counter alone.
+    private DbfLock? TryTakeIndexLock()
+    {
+        try
+        {
+            return TakeIndexLock();
+        }
+        catch (Exception ex) when (!OpenedForWriting && ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException or DbfException { Code: DbfErrorCode.LockingUnsupported })
+        {
+            return null;
         }
     }
 

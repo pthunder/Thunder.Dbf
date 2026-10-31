@@ -147,9 +147,20 @@ public sealed partial class DbfTable : IDisposable
                 table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
             {
-                if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
-                    table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
-                table.AttachOtherIndexes(path, table.Header);
+                try
+                {
+                    var repaired = table.RemoveUnfinishedAppends(); // before the indexes check themselves against the table
+                    if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
+                        table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
+                    table.AttachOtherIndexes(path, table.Header);
+                    if (repaired && table.MaintainsIndex)
+                        table.RebuildIndex(); // a writer cut off may already have added keys for those records
+                }
+                catch
+                {
+                    table.Dispose();
+                    throw;
+                }
             }
             return table;
         }
@@ -562,15 +573,6 @@ public sealed partial class DbfTable : IDisposable
             throw blocker;
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
-        if (UnfinishedAppends(dataEnd) > 0)
-        {
-            using (appending ? null : Locks.AppendBesidesHeader())
-            {
-                Refresh();
-                dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
-                UndoUnfinishedAppends(dataEnd);
-            }
-        }
         if (dataEnd > _stream.Length)
             throw new DbfException(DbfErrorCode.NotADbfFile,
                 $"The table's header counts {Header.RecordCount:N0} records, but the file is too short to hold them.",
@@ -581,23 +583,26 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // An append writes the record, then the header's count, then the keys. Cut off after the first,
-    // it leaves whole records past the count that no index knows about, and Visual FoxPro calls the
-    // table corrupted (error 2091). The count is what was committed, so the next write, holding the
-    // header and append locks, takes them back off. Only bytes that look like records (each starting
-    // with a delete flag, then at most the 0x1A end mark) count; anything else is left alone.
-    private int UnfinishedAppends(long dataEnd)
+    // it leaves whole records past the count, and Visual FoxPro calls the table corrupted (error
+    // 2091). Bytes past the count can also be another program's append in progress (Harbour, for
+    // one, can publish the count later, after releasing its lock), so only a table opened
+    // exclusively, where nobody else can be writing, takes them off. Only bytes that look like
+    // records (each starting with a delete flag, then at most the 0x1A end mark) count.
+    private long UnfinishedAppends(long dataEnd)
     {
-        var extra = _stream.Length - dataEnd;
-        if (extra < Header.RecordLength || _stream is not FileStream)
+        if (_stream is not FileStream)
             return 0;
-        var whole = (int)Math.Min(extra / Header.RecordLength, 16);
-        var tail = extra - (long)whole * Header.RecordLength;
-        if (whole == 16 || tail > 1)
+        var extra = _stream.Length - dataEnd;
+        if (extra < Header.RecordLength)
+            return 0;
+        var whole = extra / Header.RecordLength;
+        var tail = extra - whole * Header.RecordLength;
+        if (tail > 1)
             return 0;
         Span<byte> one = stackalloc byte[1];
-        for (var i = 0; i < whole; i++)
+        for (var i = 0L; i < whole; i++)
         {
-            _stream.Position = dataEnd + (long)i * Header.RecordLength;
+            _stream.Position = dataEnd + i * Header.RecordLength;
             _stream.ReadExactly(one);
             if (one[0] is not ((byte)' ' or (byte)'*'))
                 return 0;
@@ -612,21 +617,26 @@ public sealed partial class DbfTable : IDisposable
         return whole;
     }
 
-    /// <summary>Whole records sit past the header's count: an append was cut off (see the next write).</summary>
-    internal bool HasUnfinishedAppend()
+    /// <summary>How many whole records sit past the header's count, read fresh from disk: an append cut off, or one in progress.</summary>
+    internal long RecordsPastCount()
     {
+        ReloadHeader();
         DiscardReadBuffer(_stream);
-        return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength) > 0;
+        return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
     }
 
-    private void UndoUnfinishedAppends(long dataEnd)
+    // On a writable exclusive open: takes records left past the count back off. The caller then
+    // rebuilds the indexes, since a writer cut off may already have added keys for them.
+    private bool RemoveUnfinishedAppends()
     {
-        if (UnfinishedAppends(dataEnd) == 0)
-            return;
+        if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
+            return false;
+        var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         _stream.SetLength(dataEnd);
         _stream.Position = dataEnd;
         _stream.WriteByte(EndOfFile);
         FlushToDisk(_stream);
+        return true;
     }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>

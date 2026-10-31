@@ -115,7 +115,7 @@ public sealed class UnfinishedAppendTests : IDisposable
     // Found against Visual FoxPro 9: a writer killed after writing a record but before counting it
     // left the record past the header's count, and VFP refused the table (error 2091).
     [Fact]
-    public void A_record_past_the_count_is_taken_off_by_the_next_write()
+    public void A_record_past_the_count_is_reported_and_taken_off_by_an_exclusive_open()
     {
         var (path, length, committed) = TwoRecords();
         using (var file = SharedFile.OpenWrite(path))
@@ -124,21 +124,62 @@ public sealed class UnfinishedAppendTests : IDisposable
             file.Position = committed;
             file.Write([(byte)' ', .. "Cut off   "u8, 0x1A]);
         }
-        Assert.Equal(committed + length + 1, new FileInfo(path).Length);
+        var cutOff = committed + length + 1;
 
         using (var db = DbfDatabase.Open(_dir.FullName))
             Assert.Contains(db.Check().Tables.Single().Warnings, w => w.Contains("2091"));
 
-        using (var table = DbfTable.Open(path, writable: true))
-        {
+        // A shared writer can't tell a cut-off append from one in progress, so it leaves the bytes.
+        using (var shared = DbfTable.Open(path, writable: true))
+            shared.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "Ada L" });
+        Assert.Equal(cutOff, new FileInfo(path).Length);
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
             Assert.Equal(2, table.RecordCount);
-            table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "Ada L" });
-        }
         Assert.Equal(committed + 1, new FileInfo(path).Length);
-        var bytes = SharedFile.ReadAllBytes(path);
-        Assert.Equal(0x1A, bytes[^1]);
+        Assert.Equal(0x1A, SharedFile.ReadAllBytes(path)[^1]);
         using var reopened = DbfTable.Open(path);
         Assert.Equal(["Ada L", "Grace"], reopened.ReadAll().Select(r => (string)r["NAME"]!));
+    }
+
+    [Fact]
+    public void Many_records_past_the_count_are_all_found()
+    {
+        var (path, length, committed) = TwoRecords();
+        using (var file = SharedFile.OpenWrite(path))
+        {
+            file.SetLength(committed);
+            file.Position = committed;
+            for (var i = 0; i < 40; i++)
+                file.Write([(byte)' ', .. "Batch     "u8]);
+        }
+        using (var table = DbfTable.Open(path))
+            Assert.Equal(40, table.RecordsPastCount());
+        using (DbfTable.Open(path, writable: true, exclusive: true)) { }
+        Assert.Equal(committed + 1, new FileInfo(path).Length);
+    }
+
+    [Fact]
+    public void A_repair_rebuilds_the_index_a_cut_off_writer_had_already_reached()
+    {
+        var (path, length, committed) = TwoRecords();
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("NAME", "NAME");
+        using (var file = SharedFile.OpenWrite(path))
+        {
+            file.SetLength(committed);
+            file.Position = committed;
+            file.Write([(byte)' ', .. "Cut off   "u8, 0x1A]);
+        }
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            Assert.True(table.MaintainsIndex);
+            table.Append("Hedy");
+        }
+        using var reopened = DbfTable.Open(path);
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(["Ada", "Grace", "Hedy"], reopened.ReadInOrder(index["NAME"]).Select(r => (string)r["NAME"]!));
     }
 
     [Fact]
@@ -155,8 +196,11 @@ public sealed class UnfinishedAppendTests : IDisposable
             file.Write(junk);
         }
 
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            Assert.Equal(0, table.RecordsPastCount());
             table.Append("Hedy");
+        }
         using var reopened = DbfTable.Open(path);
         Assert.Equal(3, reopened.RecordCount);
         Assert.Equal("Hedy", reopened.Read(2)["NAME"]);

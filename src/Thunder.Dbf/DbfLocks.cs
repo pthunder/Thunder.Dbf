@@ -148,9 +148,6 @@ internal sealed class DbfLocks
     public DbfLock Append() =>
         Take(AppendRange, DbfErrorCode.TableLocked, "Another program is adding records to this table.");
 
-    /// <summary>The append lock, for a caller already holding the header lock; null where the two are one lock.</summary>
-    public DbfLock? AppendBesidesHeader() => AppendRange == HeaderRange ? null : Append();
-
     /// <summary>Every record lock plus the header and append locks: nobody else can change the table.</summary>
     public DbfLock Table()
     {

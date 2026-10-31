@@ -293,8 +293,8 @@ public sealed class DbfDatabase : IDisposable
             }
             if (!Options.ReadOnly && !DbfLocks.PlatformSupportsLocks)
                 warnings.Add("This platform can't take byte-range locks, so writes here aren't coordinated with other programs using the table. Run on Windows or Linux to share the files safely.");
-            if (table.HasUnfinishedAppend())
-                warnings.Add("An append was cut off: a record sits past the header's count, and Visual FoxPro reports the table as corrupted (error 2091) until it's gone. The next write here takes it off.");
+            if (table.RecordsPastCount() is > 0 and var past)
+                warnings.Add($"{past:N0} record(s) sit past the header's count: an append in progress, or one that was cut off. If it was cut off, Visual FoxPro reports the table as corrupted (error 2091); opening it here with exclusive: true (and writable) takes them off and rebuilds its indexes.");
             if (table.Header.HasIncompleteTransaction)
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
