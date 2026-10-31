@@ -40,6 +40,7 @@ public sealed class TableStore : IDisposable
         {
             ReadOnly = true,
             IgnoreMissingMemo = data.IgnoreMissingMemo,
+            MaintainFoxProIndexes = data.MaintainFoxProIndexes,
             Encoding = data.CodePage is { } codePage ? DbfEncoding.GetEncoding(codePage) : null,
         };
         _reader = DbfDatabase.Open(data.Folder, databaseOptions);
@@ -99,10 +100,10 @@ public sealed class TableStore : IDisposable
             // live in the folder (no links pointing elsewhere) before anything is copied.
             using var opened = database.OpenTable(table);
 
-            // DbfTable would refuse this write anyway; refusing here skips a pointless backup. A
-            // production .mdx next to the table is kept up to date, so only a missing .mdx or a
-            // FoxPro .cdx (read-only for now) stands in the way.
-            var staleIndex = opened.Header.HasStructuralCdx || (opened.Header.HasProductionMdx && !opened.MaintainsIndex);
+            // DbfTable would refuse this write anyway; refusing here skips a pointless backup. An index
+            // the table keeps up to date is fine; a missing .mdx, or a FoxPro .cdx without the
+            // Data:MaintainFoxProIndexes preview, stands in the way.
+            var staleIndex = (opened.Header.HasStructuralCdx || opened.Header.HasProductionMdx) && !opened.MaintainsIndex;
             if (staleIndex && !allowStaleIndexes)
                 throw new DbfException(DbfErrorCode.IndexWouldGoStale,
                     "The table has an index that can't be kept up to date (a FoxPro .cdx, or a production .mdx that's missing), so writing would leave it out of date.",

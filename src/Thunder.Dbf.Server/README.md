@@ -140,6 +140,7 @@ Everything lives under `Thunder` in `appsettings.json`, which has a commented ex
 | `Data:CodePage` | (each table's own) | Force a code page, like 1252, 437 or 850. |
 | `Data:IgnoreMissingMemo` | `false` | Read memos as null when a `.dbt`/`.fpt` is missing. |
 | `Tables:{NAME}:AllowWrites` | `false` | Lets keys with write permission change this table. |
+| `Data:MaintainFoxProIndexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes. Off until checked against Visual FoxPro itself. |
 | `Tables:{NAME}:AllowUnmaintainedIndexes` | `false` | Allows writes to a table whose index Thunder.Dbf can't keep up to date: a FoxPro `.cdx`, or a production `.mdx` that's missing. A present `.mdx` is always kept up to date. Only if the legacy app reindexes before relying on it. |
 | `ApiKeys:n:Id` | (required) | The key's name in logs and the journal. |
 | `ApiKeys:n:Sha256` | (required) | SHA-256 of the key, 64 hex digits. |

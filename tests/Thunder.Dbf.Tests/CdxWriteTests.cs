@@ -298,7 +298,15 @@ public sealed class CdxWriteTests : IDisposable
     {
         Copy("infused-dbf/foxprodb", "calls");
         Copy("infused-dbf/foxprodb", "contacts");
-        using var db = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false });
+        // .cdx writing is a preview: without the option, FoxPro tables say why they can't be written.
+        using (var plain = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false }))
+        {
+            var withoutPreview = plain.Check().Tables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+            Assert.False(withoutPreview["calls"].CanWrite);
+            Assert.Contains(withoutPreview["calls"].Warnings, w => w.Contains("Maintain FoxPro Indexes"));
+        }
+
+        using var db = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false, MaintainFoxProIndexes = true });
         var report = db.Check().Tables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
 
         Assert.True(report["calls"].CanWrite);
@@ -470,7 +478,7 @@ public sealed class CdxWriteTests : IDisposable
     // the index is refused until it's taken over and rebuilt in byte order.
     private static DbfTable TakeOver(string dbf, string cdx)
     {
-        var table = DbfTable.Open(dbf, writable: true);
+        var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
         Assert.Throws<DbfException>(() => table.MaintainIndex(cdx));
         table.MaintainIndex(cdx, rebuild: true);
         Assert.True(table.MaintainsIndex);

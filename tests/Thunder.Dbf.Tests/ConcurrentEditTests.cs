@@ -194,7 +194,7 @@ public sealed class IndexSafetyTests : IDisposable
         Copy("xsharp/rdd-tests/TEST10K.CDX");
         var path = Copy("xsharp/rdd-tests/TEST10K.DBF");
 
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
         Assert.True(table.Header.HasStructuralCdx);
         Assert.False(table.Header.HasProductionMdx);
         Assert.Equal(DbfLockScheme.VisualFoxPro, table.LockScheme);
@@ -258,7 +258,7 @@ internal static class IndexedTables
     /// </summary>
     public static DbfTable OpenWithIndexes(string path)
     {
-        var table = DbfTable.Open(path, writable: true);
+        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
         foreach (var index in DbfTable.FindCompanionIndexes(path, table.Header))
             table.MaintainIndex(index);
         return table;

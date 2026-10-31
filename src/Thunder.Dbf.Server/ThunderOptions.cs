@@ -63,6 +63,12 @@ public sealed class DataOptions
 
     /// <summary>Read memo fields as null when a table's .dbt/.fpt is missing, instead of failing.</summary>
     public bool IgnoreMissingMemo { get; set; }
+
+    /// <summary>
+    /// Preview: keep FoxPro .cdx and .idx indexes up to date, so FoxPro tables can take writes. Off by
+    /// default until checked against Visual FoxPro itself (see docs/testing.md).
+    /// </summary>
+    public bool MaintainFoxProIndexes { get; set; }
 }
 
 public sealed class TableOptions

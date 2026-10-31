@@ -98,13 +98,17 @@ public sealed partial class DbfTable : IDisposable
     /// </summary>
     /// <param name="ignoreMissingMemo">Read memo fields as null when the memo file is missing, instead of failing.
     /// Updates then leave those memo pointers untouched.</param>
-    /// <param name="allowUnmaintainedIndexes">Allow writes to a table with a production .mdx or structural .cdx.
-    /// Thunder.Dbf doesn't update those yet, so they go stale until something rebuilds them.</param>
+    /// <param name="allowUnmaintainedIndexes">Allow writes to a table with an index Thunder.Dbf can't keep up to
+    /// date (a missing .mdx, a FoxPro .cdx without <paramref name="maintainFoxProIndexes"/>, an index in a sort
+    /// order or mode it doesn't write). Those indexes go stale until something rebuilds them.</param>
+    /// <param name="maintainFoxProIndexes">Preview: keep FoxPro and Visual FoxPro .cdx and .idx indexes up to date on
+    /// writes. Off by default until it has been checked against Visual FoxPro itself (see docs/testing.md);
+    /// without it, a table with a .cdx refuses writes.</param>
     /// <param name="path">The .dbf file.</param>
     /// <param name="writable">Open for writing. Read-only by default.</param>
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
-        bool allowUnmaintainedIndexes = false)
+        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
@@ -121,6 +125,7 @@ public sealed partial class DbfTable : IDisposable
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
+            table._maintainFoxProIndexes = maintainFoxProIndexes;
             if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is not null)
                 table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
@@ -222,8 +227,13 @@ public sealed partial class DbfTable : IDisposable
             RebuildIndex();
     }
 
+    private bool _maintainFoxProIndexes;
+
     private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
     {
+        // FoxPro index writing is a preview, so it's only used when asked for.
+        if (!_maintainFoxProIndexes && Path.GetExtension(file).ToLowerInvariant() is ".cdx" or ".idx")
+            return false;
         {
             Stream? stream = null;
             try
@@ -1245,7 +1255,7 @@ public sealed partial class DbfTable : IDisposable
         if (header.HasStructuralCdx && !structuralCdxMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table has a FoxPro .cdx index that isn't open for updating (missing, unreadable, or opened from a stream), so writing would leave it out of date.",
-                "Open with allowUnmaintainedIndexes: true only if the index will be rebuilt (REINDEX in FoxPro) before it's used.", path);
+                "Keeping .cdx indexes up to date is a preview: open with maintainFoxProIndexes: true (Maintain FoxPro Indexes=true) to use it. Or open with allowUnmaintainedIndexes: true only if the index will be rebuilt (REINDEX in FoxPro) before it's used.", path);
         if (unmaintainedIndexes is { Count: > 0 })
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 $"An index next to the table ({string.Join(", ", unmaintainedIndexes)}) looks like it belongs to it, and Thunder.Dbf can't keep it up to date (its format isn't supported for writing, or it can't be read).",

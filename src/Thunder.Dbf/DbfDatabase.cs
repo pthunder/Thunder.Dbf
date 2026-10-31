@@ -33,6 +33,12 @@ public sealed record DbfDatabaseOptions
     /// </summary>
     public bool AllowUnmaintainedIndexes { get; init; }
 
+    /// <summary>
+    /// Preview: keep FoxPro and Visual FoxPro .cdx and .idx indexes up to date on writes. Off by default
+    /// until it has been checked against Visual FoxPro itself; without it, FoxPro tables with a .cdx refuse writes.
+    /// </summary>
+    public bool MaintainFoxProIndexes { get; init; }
+
     /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
     public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
@@ -232,7 +238,8 @@ public sealed class DbfDatabase : IDisposable
 
     private DbfTable OpenTableAt(string path)
     {
-        var table = DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes);
+        var table = DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes,
+            Options.MaintainFoxProIndexes);
         table.RefuseLinks = true;
         table.LockScheme = Options.LockScheme;
         return table;
@@ -298,6 +305,8 @@ public sealed class DbfDatabase : IDisposable
                         warnings.Add("The header says there's a structural .cdx index, but no .cdx file is next to the table.");
                     else if (CdxIndex.WhyNotMaintainable(cdxPath, table) is { } refusal)
                         warnings.Add($"The table's FoxPro .cdx index can be read but not kept up to date: {refusal}");
+                    else if (!Options.MaintainFoxProIndexes)
+                        warnings.Add("The table has a FoxPro .cdx index. Keeping it up to date is a preview; set Maintain FoxPro Indexes=true to write to this table.");
                     else
                         cdxMaintained = true;
                 }
@@ -417,9 +426,12 @@ public sealed class DbfDatabase : IDisposable
                 case "allowunmaintainedindexes":
                     options = options with { AllowUnmaintainedIndexes = ParseBool(key, value) };
                     break;
+                case "maintainfoxproindexes":
+                    options = options with { MaintainFoxProIndexes = ParseBool(key, value) };
+                    break;
                 default:
                     throw new DbfException(DbfErrorCode.InvalidConnectionString, $"The connection string has an unknown setting '{key}'.",
-                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Lock Scheme.");
+                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Lock Scheme.");
             }
         }
 
