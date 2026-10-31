@@ -298,6 +298,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
         _checkedState = CurrentState();
     }
 
+    /// <summary>
+    /// Makes every page written so far reach the disk before the next write: new pages before the
+    /// page that starts pointing at them, and a page's replacement before its old copy is freed.
+    /// </summary>
+    internal void Barrier() => DbfTable.FlushToDisk(_stream);
+
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
     {
         if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > _stream.Length)
@@ -1030,10 +1036,14 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         foreach (var node in plan.Fresh)
             WriteNode(node);
+        if (plan.Fresh.Count > 0)
+            _index.Barrier(); // a split's new pages (a grown root's children among them) are on disk before anything points at them
         foreach (var (_, node) in topDown ? plan.Changed.OrderByDescending(c => c.Level) : plan.Changed.OrderBy(c => c.Level))
             WriteNode(node);
         foreach (var (offset, leftLink, target) in plan.Links)
             PatchSibling(offset, leftLink, target);
+        if (plan.Freed.Count > 0)
+            _index.Barrier();
         foreach (var page in plan.Freed)
             _index.FreePage(page);
     }
@@ -1310,6 +1320,7 @@ public sealed partial class CdxTag : IMaintainedTag
             child.Attributes |= RootAttribute;
             child.Left = child.Right = NoPage;
             WriteNode(child);
+            _index.Barrier(); // the root holds the child's entries on disk before the child's page is freed
             _index.FreePage(childPage);
         }
     }
@@ -1385,7 +1396,9 @@ public sealed partial class CdxTag : IMaintainedTag
 
         foreach (var node in built)
             WriteNode(node);
+        _index.Barrier();
         WriteNode(root);
+        _index.Barrier();
         foreach (var page in oldPages.Where(p => p != root.Offset))
             _index.FreePage(page);
     }

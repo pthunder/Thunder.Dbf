@@ -142,12 +142,14 @@ The lock follows the table's `LockTimeout` and `RequireLocks`. On macOS, where .
 
 ### What a crash can leave
 
-There's no journal; the writes are ordered so a crash loses no key that was there before:
+There's no journal; the writes are ordered so a crash loses no key that was there before, with the new pages forced to disk before any page starts pointing at them. A tag's root never moves, because Visual FoxPro reads each root's address once, when it opens the table, and keeps using it.
 
-- **A split** writes the new page first, then the page that makes it reachable (the parent, or the tag header for a new root), and only then shrinks the page whose keys moved. A crash in between leaves those keys listed twice (in both pages) or the new page unused at the end of the file, never missing.
+- **A split** writes the new page first, then the page that makes it reachable (the parent), and only then shrinks the page whose keys moved. A full root moves its keys down into two new pages and is then rewritten in place, in one 512-byte page write. A crash in between leaves those keys listed twice (in both pages) or the new page unused at the end of the file, never missing.
 - **An insert** writes the pages it changes from the top down, so a parent's last key can be ahead of its child's, never behind it.
 - **A removal** writes from the bottom up; an emptied page is dropped from its parent first, then from its neighbours' links, and goes on the free list last, when nothing points at it. A crash can leave a parent's last key behind the child's, a neighbour linking to a page no longer in the tree, or a page that's in neither the tree nor the free list (wasted space).
-- **A rebuild** builds the new tree in new pages and switches the header to it last: a crash leaves the old tree whole (plus unused pages) or the new one, with the old pages possibly not yet on the free list.
+- **A root with one child** takes the child's entries in one write over the root page; the child's page is freed after that reaches the disk.
+- **A rebuild** builds the new tree in new pages and writes its root over the old root last: a crash leaves the old tree whole (plus unused pages) or the new one, with the old pages possibly not yet on the free list. The 512-byte page writes count on the disk writing a sector whole, as the old header switch did.
+- **Not yet covered:** a crash between a split's writes can leave sibling links out of step with the parent. No key is lost, but Thunder.Dbf's page checks then refuse the tag, `RebuildIndex()` included; REINDEX in FoxPro, or deleting the `.cdx` and recreating its tags in FoxPro, repairs it. A journal that makes every intermediate state valid is on the roadmap.
 - **Between the table and the index:** the record is written before its keys, as for every format (see [Durability](../durability.md)), so the index can miss the last write.
 
 Any of these is fixed by `RebuildIndex()` or REINDEX in FoxPro.
