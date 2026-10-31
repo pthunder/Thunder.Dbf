@@ -457,6 +457,11 @@ public sealed partial class CdxTag : IMaintainedTag
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyBytes(record);
     void IMaintainedTag.Insert(byte[] key, int recordNumber) => _index.Update(this, () => { Insert(key, recordNumber); return true; });
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => _index.Update(this, () => Remove(key, recordNumber));
+    bool IMaintainedTag.Contains(byte[] key, int recordNumber) => _index.Update(this, () =>
+    {
+        var root = ReadNode(RootOffset(), inByteOrder: true);
+        return Find(root, key, recordNumber, [], depth: 0, visited: [root.Offset]) == Search.Found;
+    });
     int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
     void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
     void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => _index.Update(this, () => { ReplaceAll(keys); return true; });

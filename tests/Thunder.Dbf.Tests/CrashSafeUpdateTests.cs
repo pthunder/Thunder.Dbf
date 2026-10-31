@@ -74,7 +74,7 @@ public sealed class CrashSafeUpdateTests : IDisposable
     [Theory]
     [InlineData("new keys")]
     [InlineData("record")]
-    public void With_the_journal_the_next_writable_open_finishes_the_change(string step)
+    public void With_the_journal_the_next_write_finishes_the_change(string step)
     {
         var path = Table();
         KilledUpdate(path, step, journal: true);
@@ -85,7 +85,11 @@ public sealed class CrashSafeUpdateTests : IDisposable
             Assert.Contains(db.Check().Tables.Single(t => t.Name.Equals("PEOPLE", StringComparison.OrdinalIgnoreCase)).Warnings, w => w.Contains("journal"));
 
         using (var table = DbfTable.Open(path, writable: true))
+        {
+            Assert.True(table.HasPendingJournal);   // opening alone doesn't touch it: locks may not be set up yet
+            table.UpdateFields(3, new Dictionary<string, object?> { ["AGE"] = 31m });
             Assert.False(table.HasPendingJournal);
+        }
         Assert.Equal(Rebuilt(path), Entries(path));
     }
 
@@ -94,10 +98,8 @@ public sealed class CrashSafeUpdateTests : IDisposable
     {
         var path = Table();
         KilledUpdate(path, "record", journal: true);
-        using var other = DbfTable.Open(path, writable: true);   // already finished on open...
-        Assert.False(other.HasPendingJournal);
-        // ...and a note that appears later is finished by the next write.
-        KilledUpdate(path, "record", journal: true);
+        using var other = DbfTable.Open(path, writable: true);
+        // A note that appears while another table is open is finished by that table's next write.
         other.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m });
         Assert.False(other.HasPendingJournal);
         other.Dispose();
@@ -111,7 +113,10 @@ public sealed class CrashSafeUpdateTests : IDisposable
         var before = Entries(path);
         File.WriteAllBytes(path + ".journal", "TDJ1 torn"u8.ToArray());
         using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 36m });
             Assert.False(table.HasPendingJournal);
+        }
         Assert.Equal(before, Entries(path));
     }
 
@@ -133,5 +138,63 @@ public sealed class CrashSafeUpdateTests : IDisposable
         Assert.True(db["PEOPLE"].UseJournal);
         db["PEOPLE"].UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "Ada L" });
         Assert.Equal(0, new FileInfo(Path.Combine(_dir.FullName, "PEOPLE.DBF.journal")).Length);
+    }
+
+    // A UNIQUE tag keeps one record per key, so its change isn't made ahead of the record: there,
+    // handing the key over first would point it at a record that doesn't hold it yet.
+    [Theory]
+    [InlineData("new keys")]
+    [InlineData("record")]
+    public void A_UNIQUE_tag_changes_after_the_record_and_the_journal_finishes_it(string step)
+    {
+        var path = Table();
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("UAGE", "AGE", unique: true);
+        KilledUpdate(path, step, journal: true);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            using (var index = table.OpenProductionIndex()!)
+            {
+                var holder = index["UAGE"].Entries().Where(e => Convert.ToDecimal(e.Key) == 45m).Select(e => e.RecordNumber);
+                // Cut off at either step, the UNIQUE tag hasn't changed yet: record 2 still holds 45.
+                Assert.Equal([2], holder.ToArray());
+            }
+            table.UpdateFields(3, new Dictionary<string, object?> { ["AGE"] = 31m });
+        }
+        Assert.Equal(Rebuilt(path), Entries(path));
+    }
+
+    // A note this table can't match (the cut-off writer kept an index this one doesn't) stops writes
+    // rather than being written over and lost.
+    [Fact]
+    public void A_note_for_an_index_this_table_doesnt_keep_stops_writes()
+    {
+        var path = Table();
+        KilledUpdate(path, "record", journal: true);
+        var mdx = Path.ChangeExtension(path, ".MDX");
+        File.Move(mdx, mdx + ".away");
+        File.Move(path + ".journal", path + ".journal.keep");
+        using (var fresh = DbfTable.Open(path, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
+            fresh.CreateIndexTag("OTHER", "NAME");   // a different .mdx now, without tags NAME and AGE
+        File.Move(path + ".journal.keep", path + ".journal");
+
+        using var table = DbfTable.Open(path, writable: true);
+        var error = Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m }));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        Assert.Contains("cut off", error.Message);
+        Assert.True(table.HasPendingJournal);
+    }
+
+    [Fact]
+    public void Replaying_never_drops_a_key_the_record_has()
+    {
+        var path = Table();
+        KilledUpdate(path, "record", journal: true);
+        using var table = DbfTable.Open(path, writable: true);
+        table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 36m });   // finishes the note
+        using var index = table.OpenProductionIndex()!;
+        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Zelda");
+        Assert.DoesNotContain(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Grace");
     }
 }

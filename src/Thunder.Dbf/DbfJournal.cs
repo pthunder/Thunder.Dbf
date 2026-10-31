@@ -6,10 +6,10 @@
 //
 //   TABLE.DBF.journal, empty when nothing's in flight:
 //
-//   +------+--------+-------+-----------------------------------------+----------+
-//   | TDJ1 | record | count | per tag: name, old key, new key          | SHA-256  |
-//   +------+--------+-------+-----------------------------------------+----------+
-//     4      4        4       1 + name, 2 + old (-1: none), 2 + new      32
+//   +------+--------+-------+---------------------------------------------------+----------+
+//   | TDJ1 | record | count | per tag: index file, tag, old key, new key        | SHA-256  |
+//   +------+--------+-------+---------------------------------------------------+----------+
+//     4      4        4       1 + file, 1 + tag, 2 + old (-1: none), 2 + new       32
 
 using System.Buffers.Binary;
 using System.Security.Cryptography;
@@ -18,7 +18,10 @@ using System.Text;
 namespace Thunder.Dbf;
 
 /// <summary>One record's key changes, noted before they're made.</summary>
-internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<(string Tag, byte[]? OldKey, byte[]? NewKey)> Changes);
+internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<DbfJournalChange> Changes);
+
+/// <summary>One tag's part of a key change. The index file's name and the key length pin down which tag.</summary>
+internal sealed record DbfJournalChange(string IndexFile, string Tag, byte[]? OldKey, byte[]? NewKey);
 
 /// <summary>
 /// The note next to a table that makes a cut-off key change recoverable. It's written, and forced to
@@ -39,13 +42,12 @@ internal static class DbfJournal
         body.Write(Magic);
         WriteInt(body, entry.RecordNumber);
         WriteInt(body, entry.Changes.Count);
-        foreach (var (tag, oldKey, newKey) in entry.Changes)
+        foreach (var change in entry.Changes)
         {
-            var name = Encoding.ASCII.GetBytes(tag);
-            body.WriteByte(checked((byte)name.Length));
-            body.Write(name);
-            WriteKey(body, oldKey);
-            WriteKey(body, newKey);
+            WriteName(body, change.IndexFile);
+            WriteName(body, change.Tag);
+            WriteKey(body, change.OldKey);
+            WriteKey(body, change.NewKey);
         }
         var bytes = body.ToArray();
 
@@ -79,15 +81,14 @@ internal static class DbfJournal
         var record = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at));
         var count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at + 4));
         at += 8;
-        var changes = new List<(string, byte[]?, byte[]?)>();
+        var changes = new List<DbfJournalChange>();
         for (var i = 0; i < count; i++)
         {
-            int nameLength = bytes[at++];
-            var name = Encoding.ASCII.GetString(bytes, at, nameLength);
-            at += nameLength;
+            var file = ReadName(bytes, ref at);
+            var tag = ReadName(bytes, ref at);
             var oldKey = ReadKey(bytes, ref at);
             var newKey = ReadKey(bytes, ref at);
-            changes.Add((name, oldKey, newKey));
+            changes.Add(new DbfJournalChange(file, tag, oldKey, newKey));
         }
         return new DbfJournalEntry(record, changes);
     }
@@ -116,6 +117,21 @@ internal static class DbfJournal
         Span<byte> bytes = stackalloc byte[4];
         BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
         stream.Write(bytes);
+    }
+
+    private static void WriteName(Stream stream, string name)
+    {
+        var bytes = Encoding.UTF8.GetBytes(name);
+        stream.WriteByte(checked((byte)bytes.Length));
+        stream.Write(bytes);
+    }
+
+    private static string ReadName(byte[] bytes, ref int at)
+    {
+        int length = bytes[at++];
+        var name = Encoding.UTF8.GetString(bytes, at, length);
+        at += length;
+        return name;
     }
 
     private static void WriteKey(Stream stream, byte[]? key)
