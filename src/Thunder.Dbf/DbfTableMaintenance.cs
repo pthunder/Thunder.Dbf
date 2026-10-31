@@ -20,21 +20,35 @@ public sealed partial class DbfTable
     /// as dBASE does) and kept up to date by every write after that.
     /// </summary>
     /// <remarks>
-    /// Takes the table lock. dBASE needs the table opened EXCLUSIVE for INDEX ON, so do this while the legacy
-    /// app is closed: a program that already has the .mdx open won't see the new tag until it reopens it.
-    /// dBASE IV tables only; FoxPro tables use .cdx indexes.
+    /// Needs the table opened exclusively (as dBASE needs EXCLUSIVE for INDEX ON), so the legacy app must be
+    /// closed: a program that already had the .mdx open wouldn't see the new tag until it reopened it.
+    /// On a FoxPro or Visual FoxPro table the tag goes in the structural .cdx (created when there's none),
+    /// like Visual FoxPro's <c>INDEX ON ... TAG</c>; that needs <c>maintainFoxProIndexes</c>, so the table
+    /// keeps it up to date afterwards.
     /// </remarks>
     public void CreateIndexTag(string name, string expression, string? forExpression = null, bool unique = false, bool descending = false)
+        => CreateIndexTag(name, expression, forExpression, unique, descending, candidate: false);
+
+    /// <summary>
+    /// <inheritdoc cref="CreateIndexTag(string, string, string?, bool, bool)"/> With <paramref name="candidate"/>, a Visual
+    /// FoxPro CANDIDATE tag: no two records may share its key, and a write that would give one a taken key is refused.
+    /// </summary>
+    public void CreateIndexTag(string name, string expression, string? forExpression, bool unique, bool descending, bool candidate)
     {
         EnsureWritable();
         var tagName = ValidTagName(name);
         if (Header.IsFoxPro || Header.IsFoxProByCompanion)
-            throw new DbfException(DbfErrorCode.UnsupportedFormat, "FoxPro tables keep their tags in a .cdx file, which Thunder.Dbf can't create yet.",
-                "Create the tag in FoxPro (INDEX ON ... TAG ...).", _path);
+        {
+            CreateCdxTag(tagName, expression, forExpression, unique, descending, candidate);
+            return;
+        }
+        if (candidate)
+            throw new ArgumentException("CANDIDATE tags are Visual FoxPro's; a dBASE .mdx tag can be UNIQUE instead.", nameof(candidate));
         if (_path is null && _index is null)
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't get a new .mdx file.",
                 "Open the table by path, or pass its .mdx stream to DbfTable.Open.");
 
+        RequireExclusive("INDEX ON");
         var parsed = ParseIndexExpression(expression, "key expression");
         var filter = forExpression is null ? null : ParseIndexExpression(forExpression, "FOR filter");
 
@@ -109,6 +123,110 @@ public sealed partial class DbfTable
         _index.Commit();
         _index.PublishTag(tag);
         _index.Commit();
+    }
+
+    // Visual FoxPro's INDEX ON ... TAG: the tag goes in the structural .cdx, created when there's none.
+    // Everything is checked first, with the whole tag built in a scratch .cdx in memory, so a refusal
+    // writes nothing at all, not even a new .cdx or the header flag for it.
+    private void CreateCdxTag(string tagName, string expression, string? forExpression, bool unique, bool descending, bool candidate)
+    {
+        if (_path is null)
+            throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't get a new .cdx tag.", "Open the table by path.");
+        if (!_maintainFoxProIndexes)
+            throw new DbfException(DbfErrorCode.UnsupportedFormat, "Creating .cdx tags is part of the FoxPro index preview, and this table wasn't opened with it.",
+                "Open with maintainFoxProIndexes: true (Maintain FoxPro Indexes=true), so the table keeps the new tag up to date afterwards.", _path);
+        if (unique && candidate)
+            throw new ArgumentException("A tag is UNIQUE or CANDIDATE, not both.", nameof(candidate));
+        RequireExclusive("INDEX ON");
+        expression = expression.Trim();
+        forExpression = forExpression?.Trim();
+        ParseIndexExpression(expression, "key expression");
+        var filter = forExpression is null ? null : ParseIndexExpression(forExpression, "FOR filter");
+
+        using (Locks.Table())
+        {
+            Refresh();
+            ThrowIfPackUnfinished();
+            ReplayJournal(); // a cut-off write's note is finished before the index grows
+
+            var existing = StructuralCdx();
+            if (existing is not null && existing.Tags.Any(t => t.Name.Equals(tagName, StringComparison.OrdinalIgnoreCase)))
+                throw new DbfException(DbfErrorCode.InvalidValue, $"The index already has a tag named {tagName}.",
+                    "Pick another name, or rebuild the existing tag with RebuildIndex.", _path);
+
+            // Visual FoxPro wants a logical FOR filter.
+            if (filter is not null)
+            {
+                foreach (var record in ReadAll().Prepend(IndexKeys.BlankRecord(this)))
+                {
+                    if (filter.Evaluate(record) is not (bool or null))
+                        throw new DbfException(DbfErrorCode.InvalidValue, "A FOR filter must be a logical expression, like status = \"A\" or !DELETED().",
+                            "Write the filter as a condition.", _path);
+                }
+            }
+
+            int keyLength;
+            try
+            {
+                keyLength = CdxIndex.KeyLengthFor(this, expression);
+            }
+            catch (Exception ex) when (ex is FormatException or NotSupportedException or InvalidOperationException or ArgumentException)
+            {
+                throw new DbfException(DbfErrorCode.InvalidValue, $"The key expression can't be evaluated: {ex.Message}",
+                    "Use the table's fields, with UPPER(), DTOS() or STR(), joined with +.", _path, ex);
+            }
+            var nullableKey = Fields.FirstOrDefault(f => f.Name.Equals(expression, StringComparison.OrdinalIgnoreCase)) is { IsNullable: true };
+
+            using (var scratch = new MemoryStream())
+            {
+                CdxIndex.WriteEmptyCompound(scratch);
+                using var dry = CdxIndex.Open(scratch, Encoding, leaveOpen: true, table: this);
+                dry.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
+            }
+
+            var index = existing ?? CreateStructuralCdx();
+            index.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
+        }
+        // A structural .cdx moves Visual FoxPro's lock positions; the next lock takes the new ones.
+        if (_locks is { HoldsNothing: true })
+            _locks = null;
+    }
+
+    private CdxIndex? StructuralCdx()
+    {
+        if (CdxIndex.FindFor(_path!) is not { } path)
+            return null;
+        if (_attachedIndexes.TryGetValue(Path.GetFullPath(path), out var attached) && attached is CdxIndex index)
+            return index;
+        throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's .cdx isn't one Thunder.Dbf keeps up to date, so a tag can't be added to it.",
+            "Rebuild it in Visual FoxPro (REINDEX), or take it over with MaintainIndex(path, rebuild: true) first.", _path,
+            diagnostic: _structuralCdxRefusal);
+    }
+
+    // A new structural .cdx next to the table: attached first, and only then named in the table's
+    // header (the flag that tells FoxPro to open it). Until that flag is written, a failure takes the
+    // file away again; after it, the file stays, since FoxPro now expects it.
+    private CdxIndex CreateStructuralCdx()
+    {
+        var path = Path.ChangeExtension(_path!, Path.GetExtension(_path!).Any(char.IsUpper) ? ".CDX" : ".cdx");
+        using (var stream = DbfException.OpenFile(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite))
+            CdxIndex.WriteEmptyCompound(stream);
+        try
+        {
+            if (!TryAttachIndex(path))
+                throw new InvalidDataException("The new .cdx couldn't be opened for updating.");
+            _indexFilesAtOpen.Add(Path.GetFileName(path)); // made and kept here, so not one that "appeared"
+        }
+        catch
+        {
+            File.Delete(path);
+            throw;
+        }
+        Header.MarkStructuralCdx();
+        if (Header.Version is not (0x30 or 0x31 or 0x32 or 0xF5 or 0xFB))
+            Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos says 0x03, like dBASE
+        CommitHeader();
+        return (CdxIndex)_attachedIndexes[Path.GetFullPath(path)];
     }
 
     // A new .mdx next to the table, and the header flag that tells dBASE to open it.
@@ -235,8 +353,8 @@ public sealed partial class DbfTable
     /// </summary>
     /// <remarks>
     /// Record numbers change, so anything that remembered one (a web page, the SQL bridge, another
-    /// program's open table) is wrong afterwards. dBASE needs the table opened EXCLUSIVE for PACK: run it
-    /// while the legacy app is closed. A copy of the .dbf is kept beside it (<c>.dbf.packing</c>) until
+    /// program's open table) is wrong afterwards, so, as dBASE needs EXCLUSIVE for PACK, the table must be
+    /// opened exclusively (the legacy app closed). A copy of the .dbf is kept beside it (<c>.dbf.packing</c>) until
     /// the pack has finished. If a crash interrupts it, every write is refused until the table is put
     /// back: replace the .dbf with that copy, delete the copy, and call <see cref="RebuildIndex"/>.
     /// </remarks>
@@ -246,6 +364,7 @@ public sealed partial class DbfTable
         if (_path is null)
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't be packed, because there's nowhere to keep its safety copy.",
                 "Open the table by path.");
+        RequireExclusive("PACK");
 
         using var tableLock = Locks.Table();
         PrepareWrite(appending: false); // also refuses while an earlier pack is unfinished
@@ -314,7 +433,7 @@ public sealed partial class DbfTable
         if (PackBackupPath is { } backup && File.Exists(backup))
             throw new DbfException(DbfErrorCode.IncompleteTransaction,
                 "A PACK of this table didn't finish, so its records may be half moved.",
-                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then call RebuildIndex().", _path);
+                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then open the table with exclusive: true and call RebuildIndex().", _path);
     }
 
     private void BackUpForPack(string backup, long bytes)

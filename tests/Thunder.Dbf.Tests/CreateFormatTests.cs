@@ -101,9 +101,9 @@ public sealed class CreateFormatTests : IDisposable
     public void Tables_without_nullable_fields_have_no_null_flags_field()
     {
         var path = PathOf("PLAIN.DBF");
-        using var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Integer("QTY"), DbfFieldDefinition.Character("NAME", 8)]);
-        Assert.Equal(2, table.Fields.Count);
-        Assert.Equal(0x30, SharedFile.ReadAllBytes(path)[0]);
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Integer("QTY"), DbfFieldDefinition.Character("NAME", 8)]))
+            Assert.Equal(2, table.Fields.Count);
+        Assert.Equal(0x30, SharedFile.ReadAllBytes(path)[0]);   // read once it's closed: new tables are held unshared
     }
 
     [Fact]
@@ -161,10 +161,13 @@ public sealed class CreateFormatTests : IDisposable
     public void A_new_FoxPro_2_table_without_memos_refuses_an_mdx_and_locks_like_FoxPro()
     {
         var path = PathOf("PLAIN.DBF");
-        using var table = DbfTable.Create(path, DbfTableFormat.FoxPro2, [DbfFieldDefinition.Character("NAME", 10)]);
+        using (var table = DbfTable.Create(path, DbfTableFormat.FoxPro2, [DbfFieldDefinition.Character("NAME", 10)]))
+        {
+            // A .cdx tag, not an .mdx one; this table wasn't opened with the FoxPro index preview, so neither.
+            var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("NAME", "NAME"));
+            Assert.Equal(DbfErrorCode.UnsupportedFormat, error.Code);
+        }
         Assert.Equal(0x03, SharedFile.ReadAllBytes(path)[0]);   // the same byte dBASE uses
-        var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("NAME", "NAME"));
-        Assert.Equal(DbfErrorCode.UnsupportedFormat, error.Code);
         Assert.False(File.Exists(Path.ChangeExtension(path, ".mdx")));
     }
 

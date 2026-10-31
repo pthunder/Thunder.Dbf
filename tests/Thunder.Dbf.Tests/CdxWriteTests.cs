@@ -21,7 +21,10 @@ public sealed partial class CdxWriteTests : IDisposable
         { "infused-dbf/foxprodb/contacts.CDX", "infused-dbf/foxprodb/contacts.dbf" },
         { "infused-dbf/foxprodb/setup.CDX", "infused-dbf/foxprodb/setup.dbf" },
         { "infused-dbf/foxprodb/types.CDX", "infused-dbf/foxprodb/types.dbf" },
-        { "xsharp/rdd-tests/TEST10K.CDX", "xsharp/rdd-tests/TEST10K.DBF" },
+        { "vfp9/kinds.CDX", "vfp9/kinds.DBF" },
+        // Not X#'s TEST10K: X# (like Harbour) lets a key's shared prefix run into the previous key's
+        // trailing blanks, which Visual FoxPro 9 doesn't, so its leaves pack tighter than these would.
+        // VFP reads both; this writer writes VFP's.
     };
 
     // ---- fidelity with what FoxPro and X# wrote -----------------------------------------------
@@ -55,6 +58,7 @@ public sealed partial class CdxWriteTests : IDisposable
         { "infused-dbf/foxprodb/calls.CDX", "infused-dbf/foxprodb/calls.dbf" },
         { "infused-dbf/foxprodb/setup.CDX", "infused-dbf/foxprodb/setup.dbf" },
         { "xsharp/rdd-tests/TEST10K.CDX", "xsharp/rdd-tests/TEST10K.DBF" },
+        { "vfp9/kinds.CDX", "vfp9/kinds.DBF" },
     };
 
     // Every key FoxPro and X# stored is the key built here for the same record, so maintained keys
@@ -66,11 +70,13 @@ public sealed partial class CdxWriteTests : IDisposable
         using var table = DbfTable.Open(Fixture(tableFixture));
         using var index = CdxIndex.Open(Fixture(indexFixture), table: table);
         var checkedTags = 0;
-        foreach (var tag in index.Tags.Where(t => Evaluates(t, table)))
+        // kinds.CDX's GNAME is sorted by VFP's GENERAL collation, which stays refused.
+        foreach (var tag in index.Tags.Where(t => Evaluates(t, table) && t.Name != "GNAME"))
         {
             // X# sorted these character tags without regard to case; their keys are still byte-exact.
             var byteOrdered = !(indexFixture.Contains("TEST10K") && tag.Name is "CITY" or "FIRST" or "LAST");
-            AssertExactKeys(tag, table, byteOrdered);
+            // A Visual FoxPro UNIQUE tag keeps the first record it met with each key.
+            AssertExactKeys(tag, table, byteOrdered, firstCome: indexFixture.Contains("kinds") && tag.IsUnique);
             checkedTags++;
         }
         Assert.True(checkedTags > 0);
@@ -83,6 +89,7 @@ public sealed partial class CdxWriteTests : IDisposable
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
         var before = TagDirectory(cdx);
+        var roots = Roots(cdx);
         using (var table = OpenWritable(dbf))
         {
             Assert.Equal(1, Tag(cdx, "CALL_ID").Height());
@@ -95,6 +102,7 @@ public sealed partial class CdxWriteTests : IDisposable
         Assert.Equal(3, Tag(cdx, "CALL_ID").Height()); // the root leaf split, then the root above it
         Assert.True(Tag(cdx, "CONTACT_ID").Height() >= 2);
         Assert.Equal(before, TagDirectory(cdx));
+        Assert.Equal(roots, Roots(cdx));   // grown in place: Visual FoxPro keeps reading each root where it was
 
         using var reopened = DbfTable.Open(dbf);
         using var index = CdxIndex.Open(cdx, table: reopened);
@@ -102,6 +110,36 @@ public sealed partial class CdxWriteTests : IDisposable
         Assert.Equal(17 + 4321, reopened.Read(hit.RecordNumber - 1)["CALL_ID"]);
         Assert.Equal(reopened.ReadAll().Count(r => (int)r["CONTACT_ID"]! == 7), index["CONTACT_ID"].SeekExact(7).Count());
     }
+
+    // Visual FoxPro reads each tag's root address when it opens the table and never again, so a root
+    // that moved would leave it walking a page that no longer heads the tree (found by the round trip).
+    [Fact]
+    public void Roots_stay_where_they_are_through_growth_shrinking_and_rebuilds()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        var roots = Roots(cdx);
+        using (var table = OpenWritable(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            var first = table.RecordCount;
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+            Assert.True(Tag(cdx, "CALL_ID").Height() >= 2);
+            Assert.Equal(roots, Roots(cdx));
+
+            // Changing every key empties pages and collapses the tree back toward one page.
+            for (var i = first; i < table.RecordCount; i++)
+                table.UpdateFields(i, new Dictionary<string, object?> { ["CALL_ID"] = -i });
+            Assert.Equal(roots, Roots(cdx));
+
+            table.RebuildIndex();
+            Assert.Equal(roots, Roots(cdx));
+        }
+
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
+    private static Dictionary<string, long> Roots(string cdx) =>
+        CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx))).Tags.ToDictionary(t => t.Name, t => t.RootPage);
 
     [Fact]
     public void Updates_deletes_and_recalls_keep_every_tag_exact()
@@ -227,20 +265,24 @@ public sealed partial class CdxWriteTests : IDisposable
         }
 
         AssertIndexMatchesTable(dbf, cdx);
-        using var reopened = DbfTable.Open(dbf);
-        using var index = CdxIndex.Open(cdx, table: reopened);
-        Assert.True(index["AGE"].IsDescending);
-        Assert.Equal(reopened.ReadAll().Max(r => (decimal)r["AGE"]!), index["AGE"].Entries().First().Key);
-        Assert.Equal(reopened.ReadAll().Count(r => !r.IsDeleted), index["SALARY"].Entries().Count());
-        Assert.DoesNotContain(1, index["SALARY"].Entries().Select(e => e.RecordNumber));   // deleted
-        Assert.Contains(15, index["SALARY"].Entries().Select(e => e.RecordNumber));        // recalled
+        using (var reopened = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(cdx, table: reopened))
+        {
+            Assert.True(index["AGE"].IsDescending);
+            Assert.Equal(reopened.ReadAll().Max(r => (decimal)r["AGE"]!), index["AGE"].Entries().First().Key);
+            Assert.Equal(reopened.ReadAll().Count(r => !r.IsDeleted), index["SALARY"].Entries().Count());
+            Assert.DoesNotContain(1, index["SALARY"].Entries().Select(e => e.RecordNumber));   // deleted
+            Assert.Contains(15, index["SALARY"].Entries().Select(e => e.RecordNumber));        // recalled
+        }
 
         // Between rebuilds a Visual FoxPro UNIQUE tag can lose a key whose holder left; a rebuild
         // gives every key back to its lowest record.
         using (var table = IndexedTables.OpenWithIndexes(dbf))
             table.RebuildIndex();
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
-        Assert.Equal(reopened.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), index["STATE"].Entries().Count());
+        using var after = DbfTable.Open(dbf);
+        using var rebuilt = CdxIndex.Open(cdx, table: after);
+        Assert.Equal(after.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), rebuilt["STATE"].Entries().Count());
     }
 
     [Fact]
@@ -499,7 +541,7 @@ public sealed partial class CdxWriteTests : IDisposable
     // the index is refused until it's taken over and rebuilt in byte order.
     private static DbfTable TakeOver(string dbf, string cdx)
     {
-        var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+        var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.Throws<DbfException>(() => table.MaintainIndex(cdx));
         table.MaintainIndex(cdx, rebuild: true);
         Assert.True(table.MaintainsIndex);

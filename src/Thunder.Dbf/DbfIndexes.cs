@@ -144,6 +144,9 @@ internal interface IMaintainedTag
     /// <summary>Removes the entry for exactly this key and record; false when there wasn't one.</summary>
     bool Remove(byte[] key, int recordNumber);
 
+    /// <summary>True when the tag holds exactly this key for this record.</summary>
+    bool Contains(byte[] key, int recordNumber);
+
     /// <summary>The record number stored under <paramref name="key"/>, or null. Used for unique tags.</summary>
     int? FirstRecordFor(byte[] key);
 
@@ -195,6 +198,7 @@ public sealed partial class MdxTag : IMaintainedTag
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
     void IMaintainedTag.Insert(byte[] key, int recordNumber) => Insert(key, recordNumber);
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
+    bool IMaintainedTag.Contains(byte[] key, int recordNumber) => Contains(key, recordNumber);
     int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
     void IMaintainedTag.Clear() => Clear();
 }

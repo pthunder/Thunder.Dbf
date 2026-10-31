@@ -49,7 +49,18 @@ This adds a tag to the production `.mdx`, creating the file (and setting the tab
 - **A crash can't leave a half-filled tag.** The tag is filled while it's still unlisted, and listed last.
 - **Expressions and filters are stored in the table's code page.** A character the code page can't hold is refused.
 
-dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app is closed, because a program that already has the `.mdx` open won't see the new tag until it reopens it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
+Like dBASE's `INDEX ON`, it needs the table to itself: open it with `exclusive: true`, or it throws `ExclusiveUseRequired`. A program that already had the `.mdx` open wouldn't see the new tag until it reopened it.
+
+**On a FoxPro or Visual FoxPro table** the tag goes in the structural `.cdx`, as Visual FoxPro's `INDEX ON ... TAG` puts it, and the `.cdx` is created (and flagged in the table's header) when there's none. It needs `maintainFoxProIndexes: true` too, so the table keeps the tag up to date afterwards, and it takes one more option:
+
+```csharp
+using var table = DbfTable.Open(path, writable: true, exclusive: true, maintainFoxProIndexes: true);
+table.CreateIndexTag("ID", "id", null, unique: false, descending: false, candidate: true);   // INDEX ON id TAG id CANDIDATE
+table.CreateIndexTag("LIVE", "id", forExpression: "status=\"A\"");                             // ... FOR status = "A"
+table.CreateIndexTag("NAMED", "name", descending: true);
+```
+
+Each tag is laid out as Visual FoxPro 9 lays one out (its header, then its root on the next page, the expressions in the header's pool, the same options bits), and filled with the keys VFP would build: the tests make every tag of a VFP-built table again, one of each kind (character, `UPPER()`, joined keys, numbers, currency, double, dates, datetimes, logicals, nullable, UNIQUE, CANDIDATE, FOR, DESCENDING), and compare them key for key with the ones VFP 9 wrote. A key the `.cdx` writer can't build exactly (anything past fields, `UPPER()`, `DTOS()` and `STR()` of whole numbers joined with `+`; numbers past a bare field; the GENERAL collation) is refused with nothing written, and so is a CANDIDATE tag the records would give a key twice. Visual FoxPro's statistics for its query optimiser are set to the key counts; VFP brings the rest up to date on REINDEX.
 
 ## Rebuilding
 
@@ -57,7 +68,7 @@ dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app i
 table.RebuildIndex();   // like dBASE's REINDEX: every tag, from the table
 ```
 
-Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
+Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. An index another program left out of step isn't attached when the table opens; take it over with `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table. It rebuilds every index the table keeps, not only the `.mdx`. Like REINDEX in dBASE and FoxPro it needs the table opened with `exclusive: true` (so does `MaintainIndex(path, rebuild: true)`): a program with the table open would go on reading index pages a rebuild has replaced, which Visual FoxPro reports as a corrupted tag. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
 
 ## How it's verified
 
@@ -96,11 +107,16 @@ Thunder.Dbf keeps an index only when it can write exactly what the legacy progra
 - **Keys not in byte order:** an index built with a national or case-blind sort order. `MaintainIndex(path, rebuild: true)` takes it over and rebuilds it in byte order, like REINDEX with `SET COLLATE TO "MACHINE"`, wherever in the tree the disorder is. If that rebuild fails, the index is let go and keeps blocking writes. On an index that's already kept, `rebuild: true` still rebuilds it.
 - **Clipper's custom, changes-only, template and multi-key indexes,** whose keys the program sets itself.
 - **Numeric `.ntx` keys wider than 15 significant digits,** which Clipper formats differently.
-- **`.cdx` tags over nullable, datetime or currency fields,** or with a collation other than MACHINE.
+- **`.cdx` tags with a collation other than MACHINE,** and nullable, datetime or currency fields in anything more than a bare field (a bare one keys exactly as Visual FoxPro 9 does).
 - **`.cdx` keys this library can't build byte for byte:** a numeric key that's more than a bare field (FoxPro computes `AGE+0` or `VAL(ZIP)` in binary floating point, this library in decimal), and a character key built with anything but fields, `UPPER()`, `DTOS()` and `STR()` of a whole-number field joined with `+` (no `SUBSTR`, `ALLTRIM`, `PADR` or literals). In a double-byte code page (Japanese, Chinese, Korean) `UPPER()` and FOR filters over text are refused too, because FoxPro's string functions count bytes there.
 - **A damaged `.cdx`:** pages shared by two tags, a free page still in a tree, or sibling links that don't point back. Reported as damage, not as a sort order, so `rebuild: true` doesn't take it over: REINDEX it in FoxPro.
 - **A stray `.cdx` next to a dBASE IV table** whose `.mdx` is missing: the table is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields. Otherwise the missing `.mdx` keeps blocking writes.
 - **An index created next to the table after it was opened:** reopen the table.
+- **A `.cdx` out of step with the table:** a tag holding a different number of keys than the table has records (when it has no FOR filter and no UNIQUE), the last records missing from a tag that should hold them, or stored keys that aren't the ones the table's records give. A write cut off between the record and its keys leaves this. Open the table with `writable: true, exclusive: true, maintainFoxProIndexes: true` and call `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table.
+
+Harbour 3.0's `.cdx` driver doesn't maintain Visual FoxPro CANDIDATE tags (it reads their option bit as "custom index, the program keeps it"), so on a table a Harbour or Clipper program also writes, those tags go out of date, and Thunder.Dbf then refuses the index as out of step with the table. REINDEX in Visual FoxPro repairs it.
+
+Microsoft's Jet and ACE drivers (Access, and ADO with `Extended Properties=dBASE IV`) keep a `.mdx`'s plain tags but not its FOR tags: a FOR tag on a table that an Access or Jet program writes to goes out of date, and Jet can't create one either. Keep FOR tags off such tables, or rebuild them after Jet has written.
 
 If an index update fails partway, every later write to that table stops until `RebuildIndex()` succeeds. A half-applied change is never built on.
 

@@ -107,12 +107,27 @@ public sealed partial class DbfTable : IDisposable
     /// <param name="path">The .dbf file.</param>
     /// <param name="writable">Open for writing. Read-only by default.</param>
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
+    /// <param name="exclusive">Open the .dbf so no other program can open it, like dBASE and FoxPro's
+    /// <c>USE ... EXCLUSIVE</c>; fails with <see cref="DbfErrorCode.FileInUse"/> while another program has it
+    /// open. <see cref="Pack"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/> and
+    /// <c>MaintainIndex(path, rebuild: true)</c> need it.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
-        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false)
+        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false, bool exclusive = false)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive);
+
+    /// <summary>Opens a table shared: the 0.1.0 signature, kept so code compiled against it still runs.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public static DbfTable Open(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive: false);
+
+    private static DbfTable OpenPath(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes, bool exclusive)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
-        var stream = DbfException.OpenFile(path, FileMode.Open, access, share);
+        // Every program has to open the .dbf to use the table, so holding it unshared is enough.
+        var stream = DbfException.OpenFile(path, FileMode.Open, access, exclusive ? FileShare.None : share);
         FileStream? memoStream = null;
         try
         {
@@ -125,15 +140,26 @@ public sealed partial class DbfTable : IDisposable
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
+            table._exclusive = exclusive;
             table._maintainFoxProIndexes = maintainFoxProIndexes;
             if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is { } cdx
                 && IsIndexOver(cdx, table.Header))
                 table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
             {
-                if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
-                    table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
-                table.AttachOtherIndexes(path, table.Header);
+                try
+                {
+                    if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
+                        table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
+                    table._journalPending = DbfJournal.IsPending(path);
+                    table.AttachOtherIndexes(path, table.Header);
+                    table.RepairUnfinishedAppends();
+                }
+                catch
+                {
+                    table.Dispose();
+                    throw;
+                }
             }
             return table;
         }
@@ -147,7 +173,9 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Opens a table from a seekable stream, with its memo file in <paramref name="memoStream"/> if it has memo fields.
-    /// Text uses <paramref name="encoding"/>, else the header's language driver.
+    /// Text uses <paramref name="encoding"/>, else the header's language driver. PACK, rebuilds and INDEX ON don't
+    /// check for exclusive use on a stream: when it's a file other programs could have open, keeping them out
+    /// (opening it with <see cref="FileShare.None"/>) is the caller's job.
     /// </summary>
     public static DbfTable Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false, Stream? memoStream = null,
         bool ignoreMissingMemo = false, bool allowUnmaintainedIndexes = false, Stream? indexStream = null)
@@ -190,7 +218,7 @@ public sealed partial class DbfTable : IDisposable
                 unmaintained.Add(Path.GetFileName(file));
                 continue;
             }
-            if (!TryAttachIndex(file))
+            if (!TryAttachIndex(file, forJournal: _journalPending))
                 unmaintained.Add(Path.GetFileName(file));
         }
         _unmaintainedIndexes = unmaintained;
@@ -236,6 +264,8 @@ public sealed partial class DbfTable : IDisposable
     public void MaintainIndex(string path, bool rebuild = false)
     {
         EnsureWritable();
+        if (rebuild)
+            RequireExclusive("Rebuilding an index");
         var full = Path.GetFullPath(path);
         var name = Path.GetFileName(full);
         if (_attachedIndexes.ContainsKey(full))
@@ -277,8 +307,17 @@ public sealed partial class DbfTable : IDisposable
     }
 
     private bool _maintainFoxProIndexes;
+    private string? _structuralCdxRefusal; // why the structural .cdx wasn't attached, for the write refusal
+    private bool _structuralCdxRebuildable; // and whether a takeover with a rebuild would take it
 
-    private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
+    private bool IsStructuralCdx(string file) =>
+        Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase) && _path is not null
+        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase);
+
+    // forJournal: a journal note is waiting, and a cut-off key change leaves an index out of step
+    // with the table in just the way the note will put right. Such an index is attached on
+    // probation: writes wait for the replay, which then checks it again.
+    private bool TryAttachIndex(string file, bool acceptAfterRebuild = false, bool forJournal = false)
     {
         // FoxPro index writing is a preview, so it's only used when asked for.
         if (!_maintainFoxProIndexes && Path.GetExtension(file).ToLowerInvariant() is ".cdx" or ".idx")
@@ -289,18 +328,29 @@ public sealed partial class DbfTable : IDisposable
             {
                 stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
                 IDbfIndex index = OpenAnyIndex(file, stream, Encoding, this);
-                if (index is IMaintainedIndex maintained && (maintained.CanMaintain || (acceptAfterRebuild && maintained.CanMaintainAfterRebuild)))
+                if (index is IMaintainedIndex maintained
+                    && (maintained.CanMaintain || ((acceptAfterRebuild || forJournal) && maintained.CanMaintainAfterRebuild)))
                 {
                     if (!maintained.CanMaintain)
+                    {
                         maintained.ExpectRebuild();
+                        if (!acceptAfterRebuild)
+                            _awaitingReplay.Add(maintained);
+                    }
                     _otherIndexes.Add(maintained);
                     _attachedIndexes[Path.GetFullPath(file)] = maintained;
-                    if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)
-                        && _path is not null
-                        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase))
+                    if (IsStructuralCdx(file))
+                    {
                         HasMaintainedStructuralCdx = true;
+                        _structuralCdxRefusal = null;
+                    }
                     stream = null; // the index owns it now
                     return true;
+                }
+                if (index is IMaintainedIndex refused && IsStructuralCdx(file))
+                {
+                    _structuralCdxRefusal = refused.CannotMaintainReason;
+                    _structuralCdxRebuildable = refused.CanMaintainAfterRebuild;
                 }
                 index.Dispose();
                 stream = null;
@@ -354,14 +404,14 @@ public sealed partial class DbfTable : IDisposable
     {
         if (_indexesNeedRebuild)
             throw new DbfException(DbfErrorCode.IndexDamaged, "An earlier write couldn't update this table's indexes, so they may be out of step.",
-                "Call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
+                "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
     }
 
     // An attached index another program has since rebuilt into something Thunder.Dbf can't keep (a
     // custom .ntx, say) stops writes, like one that was that way at open. Its tags are left alone.
     private void ThrowIfIndexCantBeMaintained()
     {
-        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain) is not { } index)
+        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain && !_awaitingReplay.Contains(i)) is not { } index)
             return;
         throw new DbfException(DbfErrorCode.IndexWouldGoStale,
             "One of this table's indexes was changed by another program into a kind Thunder.Dbf can't keep up to date.",
@@ -409,6 +459,22 @@ public sealed partial class DbfTable : IDisposable
     // ---- locking ---------------------------------------------------------------------------
 
     private DbfLocks? _locks;
+    private bool _exclusive;
+
+    /// <summary>True when this table holds its .dbf so no other program can open it (see the <c>exclusive</c> parameter of Open).</summary>
+    public bool IsExclusive => _exclusive;
+
+    // PACK, REINDEX and INDEX ON rewrite pages and renumber records other programs may hold in their
+    // caches, so dBASE and FoxPro only run them on a table opened EXCLUSIVE; so does Thunder.Dbf.
+    // A table opened from a stream is the caller's to share or not.
+    private void RequireExclusive(string operation)
+    {
+        if (_path is null || _exclusive)
+            return;
+        throw new DbfException(DbfErrorCode.ExclusiveUseRequired,
+            $"{operation} needs the table opened exclusively, as dBASE and FoxPro require: other programs could be holding its records or index pages.",
+            "Close the legacy app, then open the table with exclusive: true (Exclusive=true in a connection string).", _path);
+    }
     internal DbfLocks Locks => _locks ??= new DbfLocks(_stream as FileStream, _path, _lockScheme, Header) { Timeout = _lockTimeout, RequireLocks = _requireLocks };
     private TimeSpan _lockTimeout = TimeSpan.FromSeconds(3);
     private bool _requireLocks;
@@ -425,8 +491,12 @@ public sealed partial class DbfTable : IDisposable
         get => _locks?.Scheme ?? DbfLocks.Resolve(_lockScheme, Header);
         set
         {
-            if (_locks is not null && _locks.Scheme != value && value != DbfLockScheme.Auto)
-                throw new InvalidOperationException("Set LockScheme before the table's first write or lock.");
+            if (_locks is not null && _locks.Scheme != DbfLocks.Resolve(value, Header))
+            {
+                if (!_locks.HoldsNothing)
+                    throw new InvalidOperationException("Set LockScheme while the table holds no lock.");
+                _locks = null; // made again, with the new positions, by the next lock
+            }
             _lockScheme = value;
         }
     }
@@ -478,6 +548,15 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed.</summary>
     public DbfLock LockTable() => Locks.Table();
 
+    /// <summary>Re-reads only the header's record count and counters, for an index checking itself against the table.</summary>
+    internal void ReloadHeader()
+    {
+        if (_stream is not FileStream)
+            return;
+        DiscardReadBuffer(_stream);
+        Header.Reload(_stream);
+    }
+
     /// <summary>
     /// Re-reads the record count (and autoincrement counters) from disk, to see records other
     /// programs have added since the table was opened. Writes do this on their own, under lock.
@@ -505,8 +584,9 @@ public sealed partial class DbfTable : IDisposable
         ThrowIfIndexAppeared();
         ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
-                structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
+                structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
             throw blocker;
+        ReplayJournal(); // a key change cut off in this or another process; every caller holds the header lock
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         if (dataEnd > _stream.Length)
@@ -516,6 +596,75 @@ public sealed partial class DbfTable : IDisposable
         if (appending && dataEnd + Header.RecordLength + 1 > MaxTableBytes)
             throw new DbfException(DbfErrorCode.InvalidValue, "The table has reached the 2 GB size dBASE and FoxPro can handle.",
                 "Archive or pack older records before adding more.", _path);
+    }
+
+    // An append writes the record, then the header's count, then the keys. Cut off after the first,
+    // it leaves whole records past the count, and Visual FoxPro calls the table corrupted (error
+    // 2091). Bytes past the count can also be another program's append in progress (Harbour, for
+    // one, can publish the count later, after releasing its lock), so only a table opened
+    // exclusively, where nobody else can be writing, takes them off. Only bytes that look like
+    // records (each starting with a delete flag, then at most the 0x1A end mark) count.
+    private long UnfinishedAppends(long dataEnd)
+    {
+        if (_stream is not FileStream)
+            return 0;
+        var extra = _stream.Length - dataEnd;
+        if (extra < Header.RecordLength)
+            return 0;
+        var whole = extra / Header.RecordLength;
+        var tail = extra - whole * Header.RecordLength;
+        if (tail > 1)
+            return 0;
+        Span<byte> one = stackalloc byte[1];
+        for (var i = 0L; i < whole; i++)
+        {
+            _stream.Position = dataEnd + i * Header.RecordLength;
+            _stream.ReadExactly(one);
+            if (one[0] is not ((byte)' ' or (byte)'*'))
+                return 0;
+        }
+        if (tail == 1)
+        {
+            _stream.Position = _stream.Length - 1;
+            _stream.ReadExactly(one);
+            if (one[0] != EndOfFile)
+                return 0;
+        }
+        return whole;
+    }
+
+    /// <summary>How many whole records sit past the header's count, read fresh from disk: an append cut off, or one in progress.</summary>
+    internal long RecordsPastCount()
+    {
+        ReloadHeader();
+        DiscardReadBuffer(_stream);
+        return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
+    }
+
+    // On a writable exclusive open: takes records left past the count back off and rebuilds every
+    // index, since a writer cut off may already have added keys for them, and a key left behind would
+    // point at whatever record is appended there next. So nothing is taken off unless every index
+    // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
+    // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
+    private void RepairUnfinishedAppends()
+    {
+        if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
+            return;
+        var takeOverCdx = Header.HasStructuralCdx && !HasMaintainedStructuralCdx;
+        if (_unmaintainedIndexes.Any(name => !IsStructuralCdx(name))
+            || (Header.HasProductionMdx && _index is null)
+            || (takeOverCdx && !(_maintainFoxProIndexes && _structuralCdxRebuildable && FindCompanion(_path!, ".cdx") is not null)))
+            return;
+
+        var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+        _stream.SetLength(dataEnd);
+        _stream.Position = dataEnd;
+        _stream.WriteByte(EndOfFile);
+        FlushToDisk(_stream);
+        if (takeOverCdx)
+            MaintainIndex(FindCompanion(_path!, ".cdx")!, rebuild: true); // rebuilds every index the table keeps
+        else if (MaintainsIndex)
+            RebuildIndex();
     }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>
@@ -553,7 +702,8 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.TableAlreadyExists, $"'{Path.GetFileName(existing)}' already exists next to the new table.",
                 "Pick another table name, or move the old files away first; Thunder.Dbf won't adopt or overwrite another table's files.", existing);
 
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        // Unshared, like a table opened EXCLUSIVE, so INDEX ON and PACK can follow straight away.
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
         FileStream? memoStream = null;
         try
         {
@@ -562,6 +712,7 @@ public sealed partial class DbfTable : IDisposable
 
             var table = Create(stream, format, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
+            table._exclusive = true; // brand new, and held unshared
             return table;
         }
         catch
@@ -714,8 +865,18 @@ public sealed partial class DbfTable : IDisposable
         EncodeFields(values, changed: null);
         var keys = PlanIndexChanges(before: null, after: !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
+        // The first row of a batch notes where the batch starts, before any of it is written.
+        if (_useJournal && _path is not null && !_appendNoted)
+        {
+            DbfJournal.Write(_path, new DbfJournalEntry(index + 1,
+                TagsWithFiles().Select(t => t.File).Distinct(StringComparer.OrdinalIgnoreCase).Select(f => new DbfJournalChange(f, "", null, null)).ToList(),
+                IsAppend: true));
+            _appendNoted = true;
+        }
+
         Seek(index, forAppend: true);
         _stream.Write(_buffer);
+        CrashPoint?.Invoke("appended record");
 
         // The row's index entries wait for the commit, after the header counts the row: a crash in
         // between leaves keys missing (RebuildIndex repairs that), never keys for an uncounted row.
@@ -740,13 +901,21 @@ public sealed partial class DbfTable : IDisposable
             Header.WriteAutoIncrement(_stream, field);
         _dirtyCounters.Clear();
         CommitHeader();
+        CrashPoint?.Invoke("counted");
 
         var pending = _pendingIndexChanges.ToList();
         _pendingIndexChanges.Clear();
         foreach (var (changes, recordNumber) in pending)
             ApplyIndexChanges(changes, recordNumber);
         CommitIndexes();
+        if (_appendNoted)
+        {
+            DbfJournal.Clear(_path!);
+            _appendNoted = false;
+        }
     }
+
+    private bool _appendNoted; // the current batch of appends has its note
 
     private void CommitIndexes()
     {
@@ -809,7 +978,7 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // Writes a record's new values under the caller's locks. Order: memos (inside EncodeFields), the
-    // record, then index entries; each reaches the disk before the next starts.
+    // new index entries, the record, then the old entries go; each reaches the disk before the next.
     // named: the fields UpdateFields was given. An empty memo or blank field also reads back as null,
     // so null only means .NULL. for a field named there; anywhere else it's the value it already has.
     private void UpdateCore(int index, DbfRecord current, object?[] values, bool[]? named = null)
@@ -829,12 +998,14 @@ public sealed partial class DbfTable : IDisposable
         var keys = PlanIndexChanges(current, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
         _memo?.FlushToDisk();
-        Seek(index);
-        _stream.Write(_buffer);
-        FlushToDisk(_stream);
-        ApplyIndexChanges(keys, index + 1);
+        var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
+        {
+            Seek(index);
+            _stream.Write(_buffer);
+            FlushToDisk(_stream);
+        });
         CommitCounters(counters);
-        CommitHeader();
+        CommitAfterKeyChange(journaled);
     }
 
     /// <summary>
@@ -1124,11 +1295,13 @@ public sealed partial class DbfTable : IDisposable
         _buffer[0] = flag;
         var keys = PlanIndexChanges(before, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
-        Seek(index);
-        _stream.WriteByte(flag);
-        FlushToDisk(_stream);
-        ApplyIndexChanges(keys, index + 1);
-        CommitHeader();
+        var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
+        {
+            Seek(index);
+            _stream.WriteByte(flag);
+            FlushToDisk(_stream);
+        });
+        CommitAfterKeyChange(journaled);
     }
 
     // ---- index maintenance ----------------------------------------------------------------
@@ -1205,9 +1378,328 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
-    // Applies one record's index changes. If one fails partway (a damaged node, a full disk), the
-    // ones already made are undone, so the index never holds half of a record's change.
-    private void ApplyIndexChanges(List<TagChange>? changes, int recordNumber)
+    private enum KeyPhase { All, NewKeys, OldKeys }
+
+    // Changing a record's keys goes new keys, record, old keys: each step reaches the disk before the
+    // next, so a crash in between leaves the record with an extra key (still found by its new key and,
+    // until the old one goes, its old key too), never without one. UNIQUE tags are the exception:
+    // there a key belongs to one record, and adding it first would hand it over before the record
+    // says so, so they change after the record, old key then new, as before. Appends write the record
+    // first too, since a key for a record past the count would send other programs past the end of
+    // the table. Returns whether a journal note was written, for the caller to clear once committed.
+    private bool ChangeRecordAndKeys(List<TagChange>? keys, int recordNumber, Action writeRecord)
+    {
+        var journaled = _useJournal && _path is not null && keys is { Count: > 0 };
+        if (journaled)
+            DbfJournal.Write(_path!, new DbfJournalEntry(recordNumber,
+                keys!.Select(k => new DbfJournalChange(IndexFileOf(k.Tag), k.Tag.Name, k.Remove, k.Insert)).ToList()));
+
+        ApplyIndexChanges(keys, recordNumber, KeyPhase.NewKeys);
+        try
+        {
+            if (keys is not null && keys.Any(k => k.Insert is not null && !k.Tag.IsUnique))
+                CommitIndexes();
+            CrashPoint?.Invoke("new keys");
+            writeRecord();
+            CrashPoint?.Invoke("record");
+        }
+        catch (IOException ex)
+        {
+            // New keys may be on disk for a record that isn't: the index no longer matches the table.
+            _indexesNeedRebuild = true;
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"Record {recordNumber} couldn't be written after its new index entries were.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex() before writing again.", _path, ex);
+        }
+        ApplyIndexChanges(keys, recordNumber, KeyPhase.OldKeys);
+        return journaled;
+    }
+
+    // A failed commit leaves the index's state on disk unknown, so writes wait for a rebuild; the note
+    // stays, and is cleared only once everything it covers is committed.
+    private void CommitAfterKeyChange(bool journaled)
+    {
+        try
+        {
+            CommitHeader();
+        }
+        catch (IOException)
+        {
+            _indexesNeedRebuild = true;
+            throw;
+        }
+        if (journaled)
+            DbfJournal.Clear(_path!);
+    }
+
+    // The index file a tag lives in, by name, so a journal note finds the same tag in another process.
+    private string IndexFileOf(IMaintainedTag tag)
+    {
+        foreach (var (file, index) in _attachedIndexes)
+        {
+            if (index.MaintainedTags.Contains(tag))
+                return Path.GetFileName(file);
+        }
+        return _index is not null && _path is not null && MdxIndex.FindFor(_path) is { } mdx ? Path.GetFileName(mdx) : "";
+    }
+
+    private IEnumerable<(string File, IMaintainedTag Tag)> TagsWithFiles() =>
+        MaintainedIndexes.SelectMany(i => i.MaintainedTags).Select(t => (IndexFileOf(t), t));
+
+    private bool _useJournal;
+    private bool _journalPending; // a note was waiting when the table opened
+    private readonly HashSet<IMaintainedIndex> _awaitingReplay = [];
+
+    /// <summary>For the tests: called between a key change's steps, where throwing stands in for a killed process.</summary>
+    internal Action<string>? CrashPoint { get; set; }
+
+    /// <summary>
+    /// Opt-in: note each record's key changes, and each batch of appends, in <c>TABLE.DBF.journal</c> before making
+    /// them, so an update, delete, recall or append cut off partway (a crash, a killed process) is finished by the next
+    /// write, here or in another Thunder.Dbf process keeping the same indexes. Costs two extra forced disk writes (the
+    /// note and its clearing) per such write or batch. Without it, a cut-off key change leaves the record with an
+    /// extra key (never a missing one, UNIQUE tags aside) until a rebuild, and an append cut off before its count
+    /// waits for an exclusive open.
+    /// </summary>
+    public bool UseJournal
+    {
+        get => _useJournal;
+        set
+        {
+            if (value && _path is null)
+                throw new InvalidOperationException("Only a table opened by path can keep a journal next to it.");
+            _useJournal = value;
+        }
+    }
+
+    /// <summary>True when the table's journal holds a note: a write was cut off, or another Thunder.Dbf process is mid-write.</summary>
+    public bool HasPendingJournal => _path is not null && DbfJournal.IsPending(_path);
+
+    // Finishes a key change a writer was cut off in the middle of. Every journaled write holds the
+    // header lock, which the caller holds now; the record is locked too, against legacy programs
+    // editing it meanwhile (without waiting: whoever holds it may be waiting for this header lock,
+    // and will finish the note itself). Each noted change is matched to exactly one kept tag (index
+    // file, tag name, key length); a note this table can't match stops writes, rather than being
+    // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
+    // record has are added and forced to disk before stale ones go, so none goes missing on the way.
+    private void ReplayJournal()
+    {
+        if (_path is null || !_stream.CanWrite)
+            return;
+        if (!DbfJournal.IsPending(_path))
+        {
+            RecheckAfterReplay();
+            return;
+        }
+
+        DbfJournalEntry? entry;
+        try
+        {
+            entry = DbfJournal.Read(_path);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's journal holds a note in a format this version doesn't read.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears it.", _path, ex);
+        }
+        if (entry is null)
+        {
+            DbfJournal.Clear(_path); // torn: cut off while noting, before any index change
+            RecheckAfterReplay();
+            return;
+        }
+        if (entry.IsAppend)
+        {
+            ReplayAppend(entry);
+            DbfJournal.Clear(_path);
+            RecheckAfterReplay();
+            return;
+        }
+
+        var record = entry.RecordNumber >= 1 && entry.RecordNumber <= RecordCount ? Read(entry.RecordNumber - 1) : null;
+        var tags = TagsWithFiles().ToList();
+        var matched = new List<(DbfJournalChange Change, IMaintainedTag Tag)>();
+        foreach (var change in entry.Changes)
+        {
+            var candidates = tags.Where(t => string.Equals(t.File, change.IndexFile, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(t.Tag.Name, change.Tag, StringComparison.OrdinalIgnoreCase)).ToList();
+            var noted = (change.OldKey ?? change.NewKey)?.Length;
+            if (candidates.Count != 1 || (record is not null && noted is { } length && candidates[0].Tag.KeyFor(record).Length != length))
+                throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                    $"A Thunder.Dbf write to record {entry.RecordNumber} was cut off while changing keys in {change.IndexFile} (tag {change.Tag}), which this table doesn't keep, so it can't be finished here.",
+                    "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
+            matched.Add((change, candidates[0].Tag));
+        }
+
+        using var recordLock = entry.RecordNumber >= 1 ? TryLockRecordNow(entry.RecordNumber) : null;
+        try
+        {
+            // Keys the record has go in first, and reach the disk, before anything is taken out.
+            foreach (var (change, tag) in matched)
+                Reconcile(tag, change, record, entry.RecordNumber, adding: true);
+            CommitIndexes();
+            foreach (var (change, tag) in matched)
+                Reconcile(tag, change, record, entry.RecordNumber, adding: false);
+            CommitIndexes();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException)
+        {
+            _indexesNeedRebuild = true;
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"A cut-off write to record {entry.RecordNumber} couldn't be finished in the index.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex().", _path, ex);
+        }
+        DbfJournal.Clear(_path);
+        RecheckAfterReplay();
+    }
+
+    // Finishes a batch of appends that was cut off. The note says where the batch started (F). If the
+    // header's count never reached F, nothing of it was counted, and the records past the count are
+    // that batch's, so they come off (under the append lock too, taken without waiting: a dBASE
+    // writer holding it may be waiting for the header lock held here). If the count got to F or past
+    // it, those records were counted and only their keys may be missing: every kept tag gets the key
+    // of each record from F on that it doesn't hold yet.
+    private void ReplayAppend(DbfJournalEntry entry)
+    {
+        var files = TagsWithFiles().Select(t => t.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (entry.Changes.FirstOrDefault(c => !files.Contains(c.IndexFile)) is { } missing)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                $"A Thunder.Dbf append from record {entry.RecordNumber} was cut off while keeping {missing.IndexFile}, which this table doesn't keep, so it can't be finished here.",
+                "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
+
+        if (RecordCount < entry.RecordNumber)
+        {
+            if (RecordsPastCount() == 0)
+                return;
+            var timeout = Locks.Timeout;
+            Locks.Timeout = TimeSpan.Zero;
+            DbfLock append;
+            try
+            {
+                append = Locks.Append();
+            }
+            finally
+            {
+                Locks.Timeout = timeout;
+            }
+            using (append)
+            {
+                var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+                _stream.SetLength(dataEnd);
+                _stream.Position = dataEnd;
+                _stream.WriteByte(EndOfFile);
+                FlushToDisk(_stream);
+            }
+            return;
+        }
+
+        var tags = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToList();
+        var done = new List<Action>();
+        try
+        {
+            for (var number = entry.RecordNumber; number <= RecordCount; number++)
+            {
+                var record = Read(number - 1);
+                foreach (var tag in tags)
+                {
+                    if (!tag.Includes(record))
+                        continue;
+                    var key = tag.KeyFor(record);
+                    if (!tag.Contains(key, number))
+                        InsertKey(tag, key, number, done);
+                }
+            }
+            CommitIndexes();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException)
+        {
+            _indexesNeedRebuild = true;
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"A cut-off append from record {entry.RecordNumber} couldn't be finished in the index.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex().", _path, ex);
+        }
+    }
+
+    private DbfLock TryLockRecordNow(int recordNumber)
+    {
+        var timeout = Locks.Timeout;
+        Locks.Timeout = TimeSpan.Zero;
+        try
+        {
+            return Locks.Record(recordNumber, "finished after a cut-off write");
+        }
+        finally
+        {
+            Locks.Timeout = timeout;
+        }
+    }
+
+    // An index attached on probation (out of step with the table when it opened, while a note was
+    // waiting) is checked again once the note is finished: if it still doesn't match, writes stop
+    // until a rebuild.
+    private void RecheckAfterReplay()
+    {
+        foreach (var index in _awaitingReplay.ToList())
+        {
+            _awaitingReplay.Remove(index);
+            index.RebuildAbandoned();
+            try
+            {
+                index.ReloadTags();
+            }
+            catch (DbfException)
+            {
+                _indexesNeedRebuild = true;
+                throw;
+            }
+        }
+    }
+
+    // Makes one tag hold what the record has now, in two passes: adding (the record's key, if it's
+    // missing) and removing (noted keys that are now stale). A UNIQUE tag changed only after the
+    // record was written: if the record has its new key, or has left the tag, that change is finished
+    // the way the write would have (the key goes to its holder by the tag's rules, the old one is let
+    // go); if it still has its old key, nothing in the tag had changed yet, and only a noted new key
+    // pointing at it is taken back, never the old key added (a Visual FoxPro UNIQUE tag can rightly
+    // lack it).
+    private void Reconcile(IMaintainedTag tag, DbfJournalChange change, DbfRecord? record, int recordNumber, bool adding)
+    {
+        var current = record is not null && tag.Includes(record) ? tag.KeyFor(record) : null;
+        var done = new List<Action>();
+        static bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && a.AsSpan().SequenceEqual(b);
+
+        if (!tag.IsUnique)
+        {
+            if (adding && current is not null && !tag.Contains(current, recordNumber))
+                tag.Insert(current, recordNumber);
+            if (!adding)
+            {
+                foreach (var stale in new[] { change.OldKey, change.NewKey }.OfType<byte[]>().Where(k => !Same(k, current)))
+                    tag.Remove(stale, recordNumber);
+            }
+            return;
+        }
+
+        // Out of the tag now: written if the change was the record leaving (or moving within) the tag;
+        // if it was the record coming in, the record wasn't written yet. In the tag: written if it has
+        // the new key.
+        var written = current is null ? change.OldKey is not null : Same(current, change.NewKey) && !Same(current, change.OldKey);
+        if (written)
+        {
+            if (adding && current is not null && !tag.Contains(current, recordNumber))
+                InsertKey(tag, current, recordNumber, done);
+            if (!adding)
+            {
+                foreach (var stale in new[] { change.OldKey, change.NewKey }.OfType<byte[]>().Where(k => !Same(k, current)))
+                    RemoveKey(tag, stale, recordNumber, done, mayBeMissing: true);
+            }
+        }
+        else if (!adding && change.NewKey is { } added && !Same(added, current))
+        {
+            RemoveKey(tag, added, recordNumber, done, mayBeMissing: true);
+        }
+    }
+
+    // Applies one record's index changes (or one phase of them). If one fails partway (a damaged
+    // node, a full disk), the ones already made are undone, so the index never holds half of a change.
+    private void ApplyIndexChanges(List<TagChange>? changes, int recordNumber, KeyPhase phase = KeyPhase.All)
     {
         if (changes is null)
             return;
@@ -1217,9 +1709,13 @@ public sealed partial class DbfTable : IDisposable
         {
             foreach (var (tag, remove, insert) in changes)
             {
-                if (remove is not null)
+                // NewKeys: only tags without UNIQUE add keys ahead of the record. OldKeys: those tags drop
+                // their old keys, and UNIQUE tags make their whole change, old key out, new key in.
+                var addNow = phase switch { KeyPhase.NewKeys => !tag.IsUnique, KeyPhase.OldKeys => tag.IsUnique, _ => true };
+                var removeNow = phase != KeyPhase.NewKeys;
+                if (remove is not null && removeNow)
                     RemoveKey(tag, remove, recordNumber, done);
-                if (insert is not null)
+                if (insert is not null && addNow)
                     InsertKey(tag, insert, recordNumber, done);
             }
         }
@@ -1239,8 +1735,11 @@ public sealed partial class DbfTable : IDisposable
                     break; // the index is damaged beyond undoing here; the error below says what to do
                 }
             }
-            throw new DbfException(DbfErrorCode.IndexDamaged, $"Record {recordNumber} was written, but its index entries couldn't be updated.",
-                "Run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
+            throw new DbfException(DbfErrorCode.IndexDamaged,
+                phase == KeyPhase.NewKeys
+                    ? $"Record {recordNumber} wasn't changed: its new index entries couldn't be added."
+                    : $"Record {recordNumber} was written, but its index entries couldn't be updated.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
         }
     }
 
@@ -1259,13 +1758,14 @@ public sealed partial class DbfTable : IDisposable
         done.Add(() => tag.Remove(key, recordNumber));
     }
 
-    private void RemoveKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done)
+    private void RemoveKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done, bool mayBeMissing = false)
     {
         if (!tag.Remove(key, recordNumber))
         {
             // A unique tag may hold another record under this key. Any other tag must have had this
-            // entry: if it's missing, the index is already out of step with the table.
-            if (!tag.IsUnique)
+            // entry: if it's missing, the index is already out of step with the table. (A journal
+            // replay doesn't know how far the cut-off write got, so there it may be missing.)
+            if (!tag.IsUnique && !mayBeMissing)
                 throw new InvalidDataException($"Index tag {tag.Name} has no entry for record {recordNumber}, which it should.");
             return;
         }
@@ -1302,6 +1802,7 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.IndexDamaged, "The table has no index open that Thunder.Dbf can rebuild.",
                 "Open the table by path, writable, with its index files next to it.", _path);
 
+        RequireExclusive("Rebuilding the indexes");
         using var tableLock = Locks.Table();
         Refresh();
         if (Header.HasIncompleteTransaction)
@@ -1333,6 +1834,23 @@ public sealed partial class DbfTable : IDisposable
             tag.ReplaceAll(keys);
         CommitIndexes();
         _indexesNeedRebuild = false;
+        // Rebuilt from the table, so a note about these indexes is moot; one naming an index this
+        // table doesn't keep stays for a process that does.
+        if (_path is not null)
+        {
+            DbfJournalEntry? note;
+            try
+            {
+                note = DbfJournal.Read(_path);
+            }
+            catch (InvalidDataException)
+            {
+                note = null; // a format this version can't read: the rebuild is the way past it
+            }
+            var files = TagsWithFiles().Select(t => t.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (note is null || note.Changes.All(c => files.Contains(c.IndexFile)))
+                DbfJournal.Clear(_path);
+        }
     }
 
     private void CheckValueCount(object?[] values)
@@ -1361,7 +1879,7 @@ public sealed partial class DbfTable : IDisposable
     /// Shared by writes and <see cref="DbfDatabase.Check"/> so the handshake never promises what writes refuse.
     /// </summary>
     internal static DbfException? WriteBlocker(DbfHeader header, bool allowUnmaintainedIndexes, bool indexMaintained, string? path,
-        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false)
+        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false, string? structuralCdxRefusal = null)
     {
         if (header.HasIncompleteTransaction)
             return new DbfException(DbfErrorCode.IncompleteTransaction, "dBASE IV marked a transaction on this table as unfinished.",
@@ -1371,7 +1889,12 @@ public sealed partial class DbfTable : IDisposable
         if (header.HasProductionMdx && !indexMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table says it has a production .mdx index, but it isn't open (missing, or the table was opened from a stream without it), so writing would leave it out of date.",
-                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and call RebuildIndex() afterwards.", path);
+                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and rebuild it afterwards (exclusive: true, RebuildIndex).", path);
+        if (header.HasStructuralCdx && !structuralCdxMaintained && structuralCdxRefusal is not null)
+            return new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "The table's FoxPro .cdx index can't be kept up to date as it stands, so writing would leave it further out of date.",
+                "If it's out of step with the table (a write that reached the table but not the index), close the legacy app, open the table with exclusive: true and call MaintainIndex(path, rebuild: true), or REINDEX in FoxPro.",
+                path, diagnostic: structuralCdxRefusal);
         if (header.HasStructuralCdx && !structuralCdxMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table has a FoxPro .cdx index that isn't open for updating (missing, unreadable, or opened from a stream), so writing would leave it out of date.",

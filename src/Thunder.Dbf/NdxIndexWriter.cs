@@ -109,6 +109,8 @@ public sealed partial class NdxTag : IMaintainedTag
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
     void IMaintainedTag.Insert(byte[] key, int recordNumber) => Insert(key, recordNumber);
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
+    bool IMaintainedTag.Contains(byte[] key, int recordNumber) =>
+        Find(RootPage(), key, (uint)recordNumber, [], depth: 0, visited: []) == Search.Found;
     int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
     void IMaintainedTag.Clear() => Clear();
 

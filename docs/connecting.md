@@ -28,7 +28,9 @@ Data Source=\\server\share\data;Read Only=false;Code Page=1252
 | `Ignore Missing Memo` | `false` | Read memo fields as null when a `.dbt`/`.fpt` is missing |
 | `Allow Unmaintained Indexes` | `false` | Write even when an index can't be kept up to date (a missing `.mdx`, an unnamed `.ndx`/`.ntx`/`.idx`, a sort order or mode Thunder.Dbf doesn't write) |
 | `Maintain FoxPro Indexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes |
-| `Lock Scheme` | `Auto` | Whose lock offsets to use: `Dbase`, `Clipper` or `VisualFoxPro` (see [Locking](locking.md)) |
+| `Exclusive` | `false` | Open tables so no other program can open them, like `USE ... EXCLUSIVE`; needed for `PACK`, rebuilds and `INDEX ON`. Enforced on Windows; advisory on Linux and macOS |
+| `Journal` | `false` | Note each update's key changes in `TABLE.DBF.journal` first, so one that's cut off is finished by the next write (see [Durability](durability.md)) |
+| `Lock Scheme` | `Auto` | Whose lock offsets to use: `Dbase`, `Clipper`, `VisualFoxPro` or `Jet` (when Access or Jet reads the tables; Jet mustn't write while others do). See [Locking](locking.md) |
 
 `db.TableNames` lists the tables. `db["NAME"]` gives a table that the database keeps open and disposes with itself. `db.OpenTable("NAME")` gives one you own.
 
@@ -81,7 +83,8 @@ Every failure is a `DbfException`. `Message` and `Hint` are safe to show anyone;
 | `EncryptedTable` | 403 | dBASE IV PROTECT encrypted the table | Save an unencrypted copy from dBASE |
 | `ReadOnlyConnection` | 409 | Opened read-only | Open writable |
 | `ReadOnlyLocation` | 409 | The file, share or volume is read-only | Clear the attribute or get write access |
-| `FileInUse` | 409 | Another program holds the file exclusively | Close it, or open read-only |
+| `FileInUse` | 409 | Another program holds the file exclusively, or has it open while this one asks for exclusive use | Close it, or open read-only |
+| `ExclusiveUseRequired` | 409 | `PACK`, a rebuild or `INDEX ON` on a table not opened exclusively | Close the legacy app, open with `exclusive: true` |
 | `TableAlreadyExists` | 409 | Creating would overwrite or adopt existing files | Choose another name |
 | `IndexWouldGoStale` | 409 | Writing would leave an index out of date | Put the `.mdx` next to the table, name the index with `MaintainIndex`, or see the reason in `Diagnostic` |
 | `IncompleteTransaction` | 409 | dBASE IV left a transaction unfinished | Let the legacy app roll it back |

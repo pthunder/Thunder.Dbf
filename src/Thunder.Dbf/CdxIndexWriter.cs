@@ -29,6 +29,7 @@
 
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.RegularExpressions;
 
 namespace Thunder.Dbf;
@@ -74,6 +75,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     bool IMaintainedIndex.CanMaintain => MaintainRefusal is null;
     bool IMaintainedIndex.CanMaintainAfterRebuild => MaintainRefusal is null || _refusedOnlyForOrder;
     string? IMaintainedIndex.CannotMaintainReason => MaintainRefusal;
+    // Refused only for what a rebuild in byte order replaces anyway: keys out of order, or out of step
+    // with the table. MaintainIndex(path, rebuild: true) takes such an index over.
     private bool _refusedOnlyForOrder;
     private bool _rebuildExpected;
 
@@ -112,9 +115,151 @@ public sealed partial class CdxIndex : IMaintainedIndex
             MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
             return;
         }
-        CheckPageOwnership();
-        MaintainRefusal = FirstRefusal();
+        // The check can do without a lock it can't get quickly (the first write checks again), so it
+        // doesn't wait the table's full lock timeout for one.
+        var savedTimeout = _table?.Locks.Timeout;
+        if (_table is not null && _table.Locks.Timeout > CheckLockWait)
+            _table.Locks.Timeout = CheckLockWait;
+        try
+        {
+            Check();
+        }
+        finally
+        {
+            if (_table is not null && savedTimeout is { } timeout)
+                _table.Locks.Timeout = timeout;
+        }
     }
+
+    private static readonly TimeSpan CheckLockWait = TimeSpan.FromMilliseconds(250);
+
+    // The whole tree is first walked without holding Visual FoxPro's index lock, which would stop
+    // every VFP user for as long as a big index takes to read. Then, briefly under the table's
+    // header lock (VFP appends under it, record, count and keys together) and the index lock, the
+    // update counter and the record count must be what they were before the walk; otherwise
+    // another program changed something meanwhile. On a table that's never quiet that could go on
+    // for ever, so after two such tries the walk itself runs under both locks: other users wait
+    // for it, as they wait for any write. Keys out of step with the table get a moment to settle.
+    private void Check()
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            _outOfStep = false;
+            var underLock = attempt > OptimisticAttempts && OpenedForWriting;
+            string? refusal = null;
+            ExceptionDispatchInfo? damage = null;
+            bool settled, locked;
+
+            void Walk()
+            {
+                try
+                {
+                    CheckPageOwnership();
+                    refusal = FirstRefusal();
+                }
+                catch (InvalidDataException ex)
+                {
+                    damage = ExceptionDispatchInfo.Capture(ex);
+                }
+            }
+
+            if (underLock)
+            {
+                using var header = TryTakeTableHeaderLock(out var headerBusy);
+                using var held = headerBusy ? null : TryTakeIndexLock();
+                settled = !headerBusy && held is not null;
+                locked = settled;
+                if (settled)
+                {
+                    ReloadRecordCount();
+                    Walk();
+                }
+            }
+            else
+            {
+                var before = CurrentState();
+                var records = ReloadRecordCount();
+                Walk();
+                using var header = TryTakeTableHeaderLock(out var headerBusy);
+                using var held = headerBusy ? null : TryTakeIndexLock();
+                locked = held is not null && (header is not null || !OpenedForWriting);
+                settled = !headerBusy && CurrentState() == before && ReloadRecordCount() == records;
+            }
+
+            if (!settled)
+            {
+                _verifiedTags.Clear();
+                if (attempt < OutOfStepAttempts)
+                    continue;
+                // Never quiet, and the locks never free for long enough: other users keep them busy.
+                // A table opened for writing is taken on trust for now; its first write, which must
+                // hold the header and index locks anyway, checks every tag in full first (nothing is
+                // in _verifiedTags), and refuses then if anything's wrong.
+                MaintainRefusal = OpenedForWriting
+                    ? null
+                    : "the index kept changing while it was being checked (another program is busy writing to the table); check again when it's quieter.";
+                return;
+            }
+            damage?.Throw();
+            // Without the lock, a change in progress at both readings goes unseen, so a refusal may
+            // be that change rather than the index (Check's read-only probe, where a lock isn't allowed).
+            MaintainRefusal = refusal is not null && !locked
+                ? refusal + " (checked without Visual FoxPro's index lock, so another program's write in progress could also explain it)"
+                : refusal;
+            if (refusal is null || !_outOfStep || attempt == OutOfStepAttempts)
+                return;
+            Thread.Sleep(OutOfStepPause);
+        }
+    }
+
+    private const int OptimisticAttempts = 2;
+
+    private int ReloadRecordCount()
+    {
+        _table?.ReloadHeader();
+        return _table?.RecordCount ?? 0;
+    }
+
+    // The table's header lock, for the moment the check confirms its result. Busy (another program
+    // appending, or holding the whole table) means try again; a handle that can't lock at all (Check's
+    // read-only probe on some platforms) goes without.
+    private DbfLock? TryTakeTableHeaderLock(out bool busy)
+    {
+        busy = false;
+        if (_table is null || _table.FilePath is null)
+            return null;
+        try
+        {
+            return _table.Locks.Header();
+        }
+        catch (DbfException ex) when (ex.Code is DbfErrorCode.TableLocked)
+        {
+            busy = true;
+            return null;
+        }
+        catch (Exception ex) when (!OpenedForWriting && ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException or DbfException { Code: DbfErrorCode.LockingUnsupported })
+        {
+            return null;
+        }
+    }
+
+    // The index lock where this handle can take it; a read-only handle (Check's probe) may not be
+    // allowed a lock on every platform, and then relies on the counter alone.
+    private DbfLock? TryTakeIndexLock()
+    {
+        try
+        {
+            return TakeIndexLock();
+        }
+        catch (Exception ex) when (!OpenedForWriting && ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException or DbfException { Code: DbfErrorCode.LockingUnsupported })
+        {
+            return null;
+        }
+    }
+
+    private const int OutOfStepAttempts = 5;
+    private static readonly TimeSpan OutOfStepPause = TimeSpan.FromMilliseconds(200);
+    private bool _outOfStep; // the last refusal was keys out of step with the table, which a write in progress can explain
 
     // A .cdx or .idx that shares its name with a different .dbf belongs to that table, even when its
     // expressions happen to name fields this table also has. Updating it from this table's rows
@@ -137,14 +282,26 @@ public sealed partial class CdxIndex : IMaintainedIndex
             var identity = $"{tag.HeaderOffset}|{tag.KeyLength}|{tag.Expression}|{tag.ForExpression}";
             if (_verifiedTags.Contains(identity))
                 continue;
-            if (tag.CheckWholeOrder() is { } disorder)
+            if (tag.CheckWholeOrder(out var entries) is { } disorder)
             {
                 // Remember whether order is the only problem: MaintainIndex(path, rebuild: true) can fix that.
                 _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
                 return $"Tag {tag.Name} can't be kept up to date: {disorder}.";
             }
-            if (tag.CompareSampleWithTable(_table!) is { } mismatch)
+            // A tag with no FOR filter and no UNIQUE holds one key per record, deleted ones included.
+            // Any other count is a write that reached the table and not the index (a writer killed
+            // between the two), which a sample of the first and last keys can miss.
+            var mismatch = tag.ForExpression is null && !tag.IsUnique && entries != _table!.RecordCount
+                ? $"it holds {entries:N0} keys for {_table.RecordCount:N0} records, so it isn't in step with the table (a write reached the table but not the index)"
+                : tag.MissingLastKeys(_table!) ?? tag.CompareSampleWithTable(_table!);
+            if (mismatch is not null)
+            {
+                _outOfStep = true;
+                // Keys out of step with the table (another program wrote without updating the index, or
+                // an update failed) are what a rebuild replaces, so a takeover with a rebuild can fix it too.
+                _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
                 return $"Tag {tag.Name} can't be kept up to date: {mismatch}.";
+            }
             _verifiedTags.Add(identity);
         }
         return null;
@@ -298,6 +455,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
         _checkedState = CurrentState();
     }
 
+    /// <summary>
+    /// Makes every page written so far reach the disk before the next write: new pages before the
+    /// page that starts pointing at them, and a page's replacement before its old copy is freed.
+    /// </summary>
+    internal void Barrier() => DbfTable.FlushToDisk(_stream);
+
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
     {
         if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > _stream.Length)
@@ -341,7 +504,7 @@ public sealed partial class CdxTag : IMaintainedTag
     private const int MaxWritableKeyLength = 240; // FoxPro's limit, and what keeps the count fields in 8 bits
     private const int SampleSize = 32;
 
-    private enum KeyKind { Character, Double, Date, Logical, Integer }
+    private enum KeyKind { Character, Double, Date, Logical, Integer, Currency, DateTime }
 
     // What a character key is made of: bare character fields, UPPER() of one, DTOS() of a date field
     // and STR() of a whole-number field, joined with +. Each is built from the record's stored bytes,
@@ -367,6 +530,11 @@ public sealed partial class CdxTag : IMaintainedTag
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyBytes(record);
     void IMaintainedTag.Insert(byte[] key, int recordNumber) => _index.Update(this, () => { Insert(key, recordNumber); return true; });
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => _index.Update(this, () => Remove(key, recordNumber));
+    bool IMaintainedTag.Contains(byte[] key, int recordNumber) => _index.Update(this, () =>
+    {
+        var root = ReadNode(RootOffset(), inByteOrder: true);
+        return Find(root, key, recordNumber, [], depth: 0, visited: [root.Offset]) == Search.Found;
+    });
     int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
     void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
     void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => _index.Update(this, () => { ReplaceAll(keys); return true; });
@@ -411,12 +579,14 @@ public sealed partial class CdxTag : IMaintainedTag
                 var field = table.Fields.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));
                 if (field is null)
                     return $"its expression uses '{name}', which isn't a field of the table (a long name from a database container?)";
-                // Visual FoxPro adds a null marker byte to keys over nullable fields, and keys datetime and
-                // currency values in layouts no real file here shows; guessing would mislead FoxPro.
-                if (field.IsNullable)
-                    return $"its expression uses the nullable field {field.Name}, whose keys carry a null marker that isn't reproduced here";
-                if (field.Type is 'T' or 'Y')
-                    return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name}, whose key layout isn't reproduced here";
+                // Visual FoxPro's keys over a currency or datetime field, and the null marker byte in front of
+                // a key over a nullable field, are reproduced for a bare field (checked against tables VFP 9
+                // wrote); in anything more, guessing would mislead FoxPro.
+                var bare = BareField(table) is { } only && only.Name.Equals(field.Name, StringComparison.OrdinalIgnoreCase);
+                if (field.IsNullable && !(bare && field.Type == 'C'))
+                    return $"its expression uses the nullable field {field.Name} in a way whose key (with its null marker) isn't reproduced here; only a bare nullable character field is";
+                if (field.Type is 'T' or 'Y' && !bare)
+                    return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name} in more than a bare field, whose key isn't reproduced here";
             }
 
             // In a double-byte code page FoxPro's string functions count bytes, and .NET's count
@@ -432,8 +602,11 @@ public sealed partial class CdxTag : IMaintainedTag
             return $"its expression can't be evaluated here ({ex.Message})";
         }
 
+        var bareType = BareField(table)?.Type;
         KeyKind? kind = blank switch
         {
+            _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,
+            _ when bareType == 'T' && KeyLength == 8 => KeyKind.DateTime,
             string when KeyType == 'C' => KeyKind.Character,
             decimal or double when KeyLength == 8 => KeyKind.Double,
             decimal or double when KeyLength == 4 && BareField(table) is { Type: 'I' } => KeyKind.Integer,
@@ -447,7 +620,7 @@ public sealed partial class CdxTag : IMaintainedTag
         // FoxPro works numeric expressions out in binary floating point and this library in decimal,
         // so anything past reading one field (a sum, a VAL(), a ROUND()) can come out a different
         // double. A bare field is read from its text once, correctly rounded, by both.
-        if (kind is KeyKind.Double or KeyKind.Integer && BareField(table) is not { Type: 'N' or 'F' or 'B' or 'I' })
+        if (kind is KeyKind.Double or KeyKind.Integer && BareField(table) is not { Type: 'N' or 'F' or 'B' or 'I' or 'Y' })
             return $"its numeric key '{Expression}' is more than a bare numeric field, and FoxPro works such expressions out in binary floating point, which isn't reproduced exactly here";
 
         _parts = null;
@@ -509,10 +682,32 @@ public sealed partial class CdxTag : IMaintainedTag
                     + (_index.Encoding.IsSingleByte ? "" : $" (the table's code page {_index.Encoding.CodePage} is double-byte)"));
             parts.Add(part.Value);
         }
-        var total = parts.Sum(p => p.Length);
+        // A key over a nullable field starts with Visual FoxPro's null marker byte.
+        var total = parts.Sum(p => p.Length) + (parts is [{ Field.IsNullable: true }] ? 1 : 0);
         if (total != KeyLength)
             return (null, $"its {KeyLength}-byte keys don't match the {total} bytes its expression gives");
         return (parts, null);
+    }
+
+    /// <summary>
+    /// Appends only ever add records at the end, so an append cut off between the record and its keys
+    /// leaves the last records without them, which a count can't show in a FOR tag. UNIQUE tags are
+    /// left out: Visual FoxPro itself can drop a key from one between rebuilds.
+    /// </summary>
+    internal string? MissingLastKeys(DbfTable table)
+    {
+        if (IsUnique)
+            return null;
+        for (var index = Math.Max(0, table.RecordCount - 2); index < table.RecordCount; index++)
+        {
+            var row = table.Read(index);
+            if (!Includes(row))
+                continue;
+            var root = ReadNode(RootOffset(), inByteOrder: true);
+            if (Find(root, KeyBytes(row), index + 1, [], depth: 0, visited: [root.Offset]) != Search.Found)
+                return $"record {index + 1}, near the end of the table, has no key in it, so a write reached the table but not the index";
+        }
+        return null;
     }
 
     /// <summary>
@@ -544,8 +739,12 @@ public sealed partial class CdxTag : IMaintainedTag
     /// the first write. Disorder anywhere, the root included, is reported here as a sort order a
     /// rebuild fixes, not as damage.
     /// </summary>
-    internal string? CheckWholeOrder()
+    internal string? CheckWholeOrder() => CheckWholeOrder(out _);
+
+    /// <summary>The same walk, also counting the entries in the leaves.</summary>
+    internal string? CheckWholeOrder(out long entries)
     {
+        long counted = 0;
         const string Disorder = "its keys aren't in FoxPro's MACHINE byte order, so it was built with a collation this code doesn't reproduce (rebuild it with RebuildIndex, or REINDEX with SET COLLATE TO \"MACHINE\" in FoxPro)";
         byte[]? previous = null;
         var ordered = true;
@@ -559,6 +758,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 ordered = node.Keys[i - 1].AsSpan().SequenceCompareTo(node.Keys[i]) <= 0;
             if (node.IsLeaf)
             {
+                counted += node.Count;
                 if (node.Count > 0)
                 {
                     ordered &= previous is null || previous.AsSpan().SequenceCompareTo(node.Keys[0]) <= 0;
@@ -574,6 +774,7 @@ public sealed partial class CdxTag : IMaintainedTag
             }
         }
         Visit(RootOffset(), 0, []);
+        entries = counted;
         return ordered ? null : Disorder;
     }
 
@@ -680,6 +881,31 @@ public sealed partial class CdxTag : IMaintainedTag
                     null => 0d,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a date."),
                 });
+            case KeyKind.DateTime:
+                // Julian days with the time as a fraction of the day, worked out the way Visual FoxPro 9
+                // does it: whole seconds since day 0 (the stored milliseconds rounded), times 1/86400 as a
+                // double. (Adding seconds / 86400 to the day comes out one step off for about a quarter of
+                // real values.) An empty one keys as 0.
+                return IndexKeys.WriteOrderedDouble(value switch
+                {
+                    DateTime moment => (IndexKeys.JulianDay(DateOnly.FromDateTime(moment)) * 86_400d
+                        + Math.Round(moment.TimeOfDay.Ticks / (double)TimeSpan.TicksPerSecond, MidpointRounding.AwayFromZero)) * (1d / 86_400d),
+                    null => 0d,
+                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a datetime."),
+                });
+            case KeyKind.Currency:
+            {
+                // The stored ten-thousandths, big-endian, with the sign bit flipped so negatives sort first.
+                var scaled = value switch
+                {
+                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m)),
+                    null => 0L,
+                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
+                };
+                var key = new byte[8];
+                BinaryPrimitives.WriteUInt64BigEndian(key, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
+                return key;
+            }
             default:
                 return [(byte)(value is true ? 'T' : 'F')];
         }
@@ -691,6 +917,16 @@ public sealed partial class CdxTag : IMaintainedTag
     private byte[] CharacterKey(DbfRecord record)
     {
         var key = new byte[KeyLength];
+        if (_parts is [{ Field.IsNullable: true } only])
+        {
+            // Visual FoxPro: 0x80 then the value for a value; all zeros for .NULL. (VFP 9's own keys).
+            if (record.IsNull(only.FieldIndex))
+                return key;
+            key[0] = 0x80;
+            key.AsSpan(1).Fill((byte)' ');
+            StoredBytes(record, only).CopyTo(key.AsSpan(1, only.Length));
+            return key;
+        }
         key.AsSpan().Fill((byte)' ');
         var at = 0;
         foreach (var part in _parts!)
@@ -845,6 +1081,9 @@ public sealed partial class CdxTag : IMaintainedTag
         return ReadNode(offset, inByteOrder: true);
     }
 
+    /// <summary>Writes an empty root leaf over the tag's root page, for a tag just created.</summary>
+    internal void WriteEmptyRoot() => WriteNode(new Node { Offset = RootOffset(), Attributes = (ushort)(RootAttribute | LeafAttribute) });
+
     private void WriteNode(Node node)
     {
         var page = node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node);
@@ -907,9 +1146,12 @@ public sealed partial class CdxTag : IMaintainedTag
             var duplicates = 0;
             if (i > 0)
             {
-                // A shared prefix never overlaps the dropped trailing bytes (FoxPro and Harbour agree).
+                // A shared prefix never overlaps the dropped trailing bytes, this key's or the previous
+                // one's: it's counted against the bytes the previous key keeps (Visual FoxPro 9's own
+                // leaves; a key that adds a date after blanks repeats the blanks).
                 var previous = node.Keys[i - 1];
-                while (duplicates < KeyLength - trailing && key[duplicates] == previous[duplicates])
+                var previousKept = KeyLength - (KeyLength - previous.AsSpan().TrimEnd(trail).Length);
+                while (duplicates < Math.Min(KeyLength - trailing, previousKept) && key[duplicates] == previous[duplicates])
                     duplicates++;
             }
 
@@ -956,6 +1198,9 @@ public sealed partial class CdxTag : IMaintainedTag
         return pages;
     }
 
+    /// <summary>Where the tag's root page is, for the tests: it never moves (Visual FoxPro holds on to it).</summary>
+    internal long RootPage => RootOffset();
+
     /// <summary>Levels from the root down to the leaves, for the tests.</summary>
     internal int Height()
     {
@@ -992,13 +1237,6 @@ public sealed partial class CdxTag : IMaintainedTag
             throw new InvalidDataException($"Tag {Name} is deeper than {MaxDepth} levels; the index is probably corrupt.");
     }
 
-    private void SetRoot(long offset)
-    {
-        var header = _index.Read(HeaderOffset, CdxIndex.DefaultPageLength);
-        BinaryPrimitives.WriteUInt32LittleEndian(header, checked((uint)offset));
-        _index.Write(HeaderOffset, header);
-    }
-
     private static int CompareEntries(byte[] key, int record, byte[] otherKey, int otherRecord)
     {
         var order = key.AsSpan().SequenceCompareTo(otherKey);
@@ -1022,7 +1260,6 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         public readonly List<Node> Fresh = [];
         public readonly List<(int Level, Node Node)> Changed = [];
-        public long? NewRoot;
         public readonly List<(uint Offset, bool LeftLink, uint Target)> Links = [];
         public readonly List<long> Freed = [];
     }
@@ -1035,14 +1272,14 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         foreach (var node in plan.Fresh)
             WriteNode(node);
-        if (topDown && plan.NewRoot is { } grownRoot)
-            SetRoot(grownRoot);
+        if (plan.Fresh.Count > 0)
+            _index.Barrier(); // a split's new pages (a grown root's children among them) are on disk before anything points at them
         foreach (var (_, node) in topDown ? plan.Changed.OrderByDescending(c => c.Level) : plan.Changed.OrderBy(c => c.Level))
             WriteNode(node);
-        if (!topDown && plan.NewRoot is { } root)
-            SetRoot(root);
         foreach (var (offset, leftLink, target) in plan.Links)
             PatchSibling(offset, leftLink, target);
+        if (plan.Freed.Count > 0)
+            _index.Barrier();
         foreach (var page in plan.Freed)
             _index.FreePage(page);
     }
@@ -1102,27 +1339,35 @@ public sealed partial class CdxTag : IMaintainedTag
                 continue;
             }
 
+            // Visual FoxPro reads a tag's root address once, when it opens the table, and keeps using
+            // it, so the root never moves: a full root's keys go down into two new pages and the root
+            // page is rewritten in place above them, which is also the one write that switches over.
             var isRoot = path.Count == 0;
+            var rootOffset = node.Offset;
             if (isRoot)
+            {
                 node.Attributes &= unchecked((ushort)~RootAttribute);
+                node.Offset = _index.AllocatePage();
+            }
             var right = Split(node, appendedAtEnd);
             plan.Fresh.Add(right);
-            plan.Changed.Add((level, node));
+            if (isRoot)
+                plan.Fresh.Add(node);
+            else
+                plan.Changed.Add((level, node));
             if (right.Right != NoPage)
                 plan.Links.Add((right.Right, true, (uint)right.Offset));
 
             if (isRoot)
             {
-                var root = new Node
+                plan.Changed.Add((level + 1, new Node
                 {
-                    Offset = _index.AllocatePage(),
+                    Offset = rootOffset,
                     Attributes = RootAttribute,
                     Keys = [node.Keys[^1], right.Keys[^1]],
                     Records = [node.Records[^1], right.Records[^1]],
                     Children = [(uint)node.Offset, (uint)right.Offset],
-                };
-                plan.Fresh.Add(root);
-                plan.NewRoot = root.Offset;
+                }));
                 return;
             }
 
@@ -1216,7 +1461,9 @@ public sealed partial class CdxTag : IMaintainedTag
             Store(leaf, path, appendedAtEnd: false, plan);
         else
             DropEmpty(leaf, path, plan);
-        Apply(plan, topDown: false);
+        // A leaf another writer packed tighter (Harbour, X#) can need more room once re-packed the
+        // way Visual FoxPro packs, so even a removal can split it: then the split's order applies.
+        Apply(plan, topDown: plan.Fresh.Count > 0);
         CollapseRoot();
         return true;
     }
@@ -1294,8 +1541,9 @@ public sealed partial class CdxTag : IMaintainedTag
         }
     }
 
-    // A root with a single child hands the root role to that child, so the tree stays as shallow as
-    // its keys need. The header moves to the child before the old root is freed.
+    // A root with a single child takes that child's entries, so the tree stays as shallow as its keys
+    // need. The root keeps its page (Visual FoxPro holds on to its address): the child's contents are
+    // written over it in one page write, and only then is the child's page freed.
     private void CollapseRoot()
     {
         for (var depth = 0; ; depth++)
@@ -1305,11 +1553,13 @@ public sealed partial class CdxTag : IMaintainedTag
             if (root.IsLeaf || root.Count > 1)
                 return;
             var child = ReadNode(root.Children![0]);
+            var childPage = child.Offset;
+            child.Offset = root.Offset;
             child.Attributes |= RootAttribute;
             child.Left = child.Right = NoPage;
             WriteNode(child);
-            SetRoot(child.Offset);
-            _index.FreePage(root.Offset);
+            _index.Barrier(); // the root holds the child's entries on disk before the child's page is freed
+            _index.FreePage(childPage);
         }
     }
 
@@ -1322,9 +1572,10 @@ public sealed partial class CdxTag : IMaintainedTag
 
     /// <summary>
     /// Rebuilds the tag from <paramref name="keys"/>, like FoxPro's REINDEX: a UNIQUE tag keeps the
-    /// lowest record number per key. The new tree is built in new pages, the header is switched to
-    /// its root last, and only then do the old tree's pages go on the free list, so a crash leaves
-    /// either the old tree or the new one, never half of each.
+    /// lowest record number per key. The new tree is built in new pages and its root is written over
+    /// the old root last, in place (Visual FoxPro keeps the root's address), and only then do the old
+    /// tree's other pages go on the free list, so a crash leaves either the old tree or the new one,
+    /// never half of each.
     /// </summary>
     internal void ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
@@ -1378,13 +1629,15 @@ public sealed partial class CdxTag : IMaintainedTag
         }
         var root = level[0];
         root.Attributes |= RootAttribute;
-        Place(level);
-        built.Add(root);
+        root.Offset = RootOffset();
+        root.Left = root.Right = NoPage;
 
         foreach (var node in built)
             WriteNode(node);
-        SetRoot(root.Offset);
-        foreach (var page in oldPages)
+        _index.Barrier();
+        WriteNode(root);
+        _index.Barrier();
+        foreach (var page in oldPages.Where(p => p != root.Offset))
             _index.FreePage(page);
     }
 

@@ -158,7 +158,8 @@ Done:
 Next:
 
 - FoxPro `.cdx` writing out of preview: a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself) (the index lock, large record numbers, batch candidate keys and crash-safe page order are in)
-- Creating `.ndx`, `.ntx` and `.cdx` tags (today `INDEX ON` writes `.mdx` tags)
+- Creating `.ndx` and `.ntx` indexes (`INDEX ON` writes `.mdx` and `.cdx` tags)
+- A journal for `.cdx` page changes, so a crash mid-split always leaves an index Thunder.Dbf can rebuild itself
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).

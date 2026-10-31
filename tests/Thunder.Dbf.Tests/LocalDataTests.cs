@@ -41,7 +41,7 @@ public sealed class LocalDataTests
             foreach (var file in Directory.EnumerateFiles(Folder))
                 File.Copy(file, Path.Combine(copy.FullName, Path.GetFileName(file)));
 
-            using var db = DbfDatabase.Open(copy.FullName, new DbfDatabaseOptions { ReadOnly = false });
+            using var db = DbfDatabase.Open(copy.FullName, new DbfDatabaseOptions { ReadOnly = false, Exclusive = true });
             var random = new Random(2002);
             foreach (var name in db.TableNames)
             {

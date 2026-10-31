@@ -41,6 +41,7 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         foreach (var file in files)
             File.Copy(Path.Combine(Fixtures.Root, file), Path.Combine(_dir.FullName, Path.GetFileName(file)));
         var path = Path.Combine(_dir.FullName, table);
+        FreeFromMissingDatabase(Vfp, path);
 
         // 1. Thunder.Dbf writes: enough appends to split pages, plus updates, deletes and recalls.
         using (var dbf = OpenForWriting(path))
@@ -91,7 +92,7 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
     // rebuilding it in byte order first, as MaintainIndex(path, rebuild: true) does.
     private static DbfTable OpenForWriting(string path)
     {
-        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
         if (!table.MaintainsIndex)
             table.MaintainIndex(Path.ChangeExtension(path, Path.GetExtension(path).Any(char.IsUpper) ? ".CDX" : ".cdx"), rebuild: true);
         return table;
@@ -159,6 +160,7 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
             SET DELETED OFF
             SET EXCLUSIVE OFF
             SET TALK OFF
+            SET CPDIALOG OFF
             ON ERROR DO LogError WITH ERROR(), MESSAGE(), LINENO()
             USE "{table}" SHARED
             """);
@@ -174,7 +176,11 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
                         DO CASE
                         CASE laF[lnF, 2] = "C"
                             REPLACE (laF[lnF, 1]) WITH LEFT("V" + SYS(2015), laF[lnF, 3])
-                        CASE laF[lnF, 2] $ "NFIBY"
+                        CASE laF[lnF, 2] = "I" OR (laF[lnF, 2] = "N" AND laF[lnF, 4] = 0 AND laF[lnF, 3] >= 7)
+                            REPLACE (laF[lnF, 1]) WITH 800000 + lnI
+                        CASE laF[lnF, 2] $ "NF"
+                            REPLACE (laF[lnF, 1]) WITH INT(RAND() * 10 ^ MAX(MIN(laF[lnF, 3] - laF[lnF, 4] - 2, 3), 0))
+                        CASE laF[lnF, 2] $ "BY"
                             REPLACE (laF[lnF, 1]) WITH INT(RAND() * 1000)
                         CASE laF[lnF, 2] $ "DT"
                             REPLACE (laF[lnF, 1]) WITH DATE() - INT(RAND() * 3000)
@@ -201,15 +207,23 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         else
         {
             script.AppendLine($"""
-                LOCAL lnT, lcTag
+                * Opening and appending to the file once per record is slow enough on a busy PC to
+                * time out a 10,000-record table, so the lines are gathered and written in 1 MB pieces.
+                LOCAL lnT, lcTag, lcOut
+                lcOut = ""
                 FOR lnT = 1 TO TAGCOUNT()
                     lcTag = TAG(lnT)
                     SET ORDER TO TAG (lcTag)
-                    STRTOFILE("TAG " + UPPER(lcTag) + CHR(13) + CHR(10), "{output}", .T.)
+                    lcOut = lcOut + "TAG " + UPPER(lcTag) + CHR(13) + CHR(10)
                     SCAN
-                        STRTOFILE(TRANSFORM(RECNO()) + CHR(13) + CHR(10), "{output}", .T.)
+                        lcOut = lcOut + TRANSFORM(RECNO()) + CHR(13) + CHR(10)
+                        IF LEN(lcOut) > 1000000
+                            STRTOFILE(lcOut, "{output}", .T.)
+                            lcOut = ""
+                        ENDIF
                     ENDSCAN
                 ENDFOR
+                STRTOFILE(lcOut, "{output}", .T.)
                 """);
         }
         script.AppendLine($"""
@@ -222,6 +236,7 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
             ENDPROC
             """);
         File.WriteAllText(program, script.ToString(), Encoding.Latin1);
+        File.Delete(Path.ChangeExtension(program, ".fxp")); // VFP -T runs a stale compiled .fxp over a newer .prg
 
         using var process = Process.Start(new ProcessStartInfo(Vfp!, $"-T \"{program}\"") { UseShellExecute = false, WorkingDirectory = _dir.FullName })!;
         if (!process.WaitForExit(TimeSpan.FromMinutes(5)))
@@ -243,4 +258,31 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         }
         return orders;
     }
+
+    // calls.dbf belongs to a database container the fixtures don't carry, and VFP won't open it
+    // without one. FREE TABLE drops the link, as it does after a .dbc has been deleted.
+    internal static void FreeFromMissingDatabase(string vfp, string table)
+    {
+        if (BacklinkLength(table) == 0)
+            return;
+        var program = Path.Combine(Path.GetDirectoryName(table)!, "free.prg");
+        File.WriteAllText(program, $"_SCREEN.Visible = .F.\r\nSET SAFETY OFF\r\nON ERROR QUIT\r\nFREE TABLE \"{table}\"\r\nQUIT\r\n", Encoding.Latin1);
+        File.Delete(Path.ChangeExtension(program, ".fxp"));
+        using (var process = Process.Start(new ProcessStartInfo(vfp, $"-T \"{program}\"") { UseShellExecute = false })!)
+            Assert.True(process.WaitForExit(TimeSpan.FromMinutes(1)), "VFP didn't finish FREE TABLE within a minute.");
+        Assert.True(BacklinkLength(table) == 0, $"VFP's FREE TABLE left {Path.GetFileName(table)} linked to its database.");
+    }
+
+    // Visual FoxPro tables end their header with 263 bytes naming the database they belong to.
+    private static int BacklinkLength(string table)
+    {
+        var header = new byte[4096];
+        using (var stream = File.OpenRead(table))
+            stream.ReadExactly(header, 0, Math.Min(header.Length, (int)stream.Length));
+        var length = BitConverter.ToUInt16(header, 8);
+        if (header[0] is not (0x30 or 0x31 or 0x32) || length > header.Length)
+            return 0;
+        return header.AsSpan(length - 263, 263).IndexOf((byte)0) is var end and >= 0 ? end : 263;
+    }
+
 }

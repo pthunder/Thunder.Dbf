@@ -104,28 +104,40 @@ public sealed partial class CdxWriteTests
     }
 
     // A rebuild's candidate keys are checked among themselves: the old tree says nothing about them.
+    // Another program changed keys behind the index's back, so the index no longer matches the table
+    // and isn't attached when the table opens. Opened exclusively, a takeover with a rebuild repairs
+    // it, and that rebuild checks candidate keys among themselves.
     [Fact]
     public void A_rebuild_checks_candidate_keys_on_their_own()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        using var table = OpenWritable(dbf);
         int first, second;
-        // Another program swaps two records' keys without touching the index.
         using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
         {
             (first, second) = ((int)other.Read(0)["CALL_ID"]!, (int)other.Read(1)["CALL_ID"]!);
             other.UpdateFields(0, new Dictionary<string, object?> { ["CALL_ID"] = second });
             other.UpdateFields(1, new Dictionary<string, object?> { ["CALL_ID"] = first });
         }
-        table.RebuildIndex(); // each key is still unique: the rebuild goes through
+        using (var shared = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true))
+        {
+            Assert.False(shared.MaintainsIndex);
+            Assert.Equal(DbfErrorCode.ExclusiveUseRequired, Assert.Throws<DbfException>(() => shared.MaintainIndex(cdx, rebuild: true)).Code);
+        }
+        TakeOverAndRebuild(dbf, cdx); // each key is still unique: the rebuild goes through
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
 
         // Now two records really share one, and the rebuild stops before the index changes.
         using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
             other.UpdateFields(2, new Dictionary<string, object?> { ["CALL_ID"] = first });
         var before = SharedFile.ReadAllBytes(cdx);
-        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(table.RebuildIndex).Code);
+        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => TakeOverAndRebuild(dbf, cdx)).Code);
         Assert.Equal(before, SharedFile.ReadAllBytes(cdx));
+    }
+
+    private static void TakeOverAndRebuild(string dbf, string cdx)
+    {
+        using var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true);
+        table.MaintainIndex(cdx, rebuild: true);
     }
 
     // ---- crash ordering ---------------------------------------------------------------------------
@@ -469,13 +481,123 @@ public sealed partial class CdxWriteTests
     public void Asking_to_rebuild_an_index_already_kept_rebuilds_it()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        using var table = OpenWritable(dbf);
-        using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
-            other.Append(Call(other.Read(0).Values.ToArray(), id: 777, contact: 1, subject: "unindexed"));
-
-        table.MaintainIndex(cdx, rebuild: true);
-        table.Dispose();
+        var before = SharedFile.ReadAllBytes(cdx);
+        using (var table = OpenWritable(dbf))
+            table.MaintainIndex(cdx, rebuild: true);
+        Assert.NotEqual(before, SharedFile.ReadAllBytes(cdx)); // rebuilt, not just accepted
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // A writer that adds keys before it publishes the count (Harbour can) and is cut off leaves a
+    // record past the count that the .cdx already has keys for. An exclusive open takes the record
+    // off and rebuilds the .cdx, so no key is left to point at the next record appended there.
+    [Fact]
+    public void A_record_past_the_count_whose_keys_reached_the_cdx_is_repaired_with_its_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int count;
+        using (var table = OpenWritable(dbf))
+        {
+            table.Append(Call(table.Read(0).Values.ToArray(), id: 9001, contact: 1, subject: "cut off"));
+            count = table.RecordCount;
+        }
+        using (var file = SharedFile.OpenWrite(dbf))   // the count never got published
+        {
+            file.Position = 4;
+            file.Write(BitConverter.GetBytes(count - 1));
+        }
+
+        // Without FoxPro index upkeep the .cdx couldn't be rebuilt, so nothing is taken off.
+        var length = new FileInfo(dbf).Length;
+        using (DbfTable.Open(dbf, writable: true, exclusive: true)) { }
+        Assert.Equal(length, new FileInfo(dbf).Length);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Equal(count - 1, table.RecordCount);
+            Assert.True(table.MaintainsIndex);
+        }
+        Assert.True(new FileInfo(dbf).Length < length);
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+        using var reopened = DbfTable.Open(dbf);
+        using var index = CdxIndex.Open(cdx, table: reopened);
+        Assert.Empty(index["CALL_ID"].SeekExact(9001));
+    }
+
+    // Found in the Visual FoxPro office runs: with other users writing all the time, the open-time
+    // check never saw the index hold still and gave up. After two tries it walks under the locks, and
+    // if even those stay busy, the first write checks the index in full under its own locks.
+    [Fact]
+    public void A_table_another_writer_never_stops_changing_still_opens_for_writing()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using var stop = new CancellationTokenSource();
+        var busy = Task.Run(() =>
+        {
+            using var writer = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+            var template = writer.Read(0).Values.ToArray();
+            for (var i = 0; !stop.IsCancellationRequested; i++)
+                writer.Append(Call(template, id: 500_000 + i, contact: i % 7, subject: $"busy {i}"));
+        });
+        Thread.Sleep(300);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.True(table.MaintainsIndex);
+            stop.Cancel();
+            busy.Wait();
+            table.Append(Call(table.Read(0).Values.ToArray(), id: 900_001, contact: 1, subject: "after"));   // checks in full first
+        }
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
+    // A FOR tag holds fewer keys than records anyway, so its count says nothing; the last records'
+    // keys show an append that reached the table but not the index.
+    [Fact]
+    public void A_FOR_tag_missing_the_last_records_key_is_caught()
+    {
+        var (dbf, cdx) = People();
+        PatchTag(cdx, "SALARY", header =>
+        {
+            var keyLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(510));
+            var filter = "!DELETED()\0"u8;
+            filter.CopyTo(header.AsSpan(512 + keyLength));
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(504), keyLength);
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(506), (ushort)filter.Length);
+            header[14] |= CdxIndex.OptionForFilter;
+        });
+        using (TakeOver(dbf, cdx)) { }
+        using (var killed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+            killed.Append(killed.Read(0).Values.ToArray());
+
+        using var table = DbfTable.Open(dbf);
+        using var index = CdxIndex.Open(cdx, table: table);
+        Assert.Contains($"record {table.RecordCount}", index["SALARY"].MissingLastKeys(table));
+    }
+
+    // Found against Visual FoxPro 9: a writer killed between writing a record and its keys left a tag
+    // one key short, and the next open took the index as it was, so SEEK couldn't find that record.
+    // A short tag is now refused on open, and a takeover with a rebuild repairs it.
+    [Fact]
+    public void A_record_whose_keys_never_reached_the_index_is_caught_on_open()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var killed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+            killed.Append(Call(killed.Read(0).Values.ToArray(), id: 777, contact: 1, subject: "unindexed"));
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+            Assert.Contains("keys for", error.Diagnostic);
+        }
+
+        using (var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true))
+            table.MaintainIndex(cdx, rebuild: true);
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+        using var reopened = OpenWritable(dbf);
+        Assert.True(reopened.MaintainsIndex);
     }
 
     // A takeover whose rebuild fails lets the index go again: it keeps blocking writes, and isn't
@@ -487,7 +609,7 @@ public sealed partial class CdxWriteTests
         PatchTag(cdx, "STATE", header => header[14] |= CdxIndex.OptionCandidate); // and many records share a state
         var before = SharedFile.ReadAllBytes(cdx);
 
-        using var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+        using var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true)).Code);
         Assert.False(table.MaintainsIndex);
 
