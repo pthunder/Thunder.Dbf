@@ -568,7 +568,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// Makes every page written so far reach the disk before the next write: new pages before the
     /// page that starts pointing at them, and a page's replacement before its old copy is freed.
     /// </summary>
-    internal void Barrier() => DbfTable.FlushToDisk(_stream, _table?.FlushWritesToDisk ?? true);
+    internal void Barrier() => DbfTable.FlushToDisk(_stream, _table?.ForcesWrites ?? true);
 
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
     {

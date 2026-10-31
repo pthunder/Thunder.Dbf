@@ -29,6 +29,15 @@ public sealed partial class CdxWriteTests
         }
         AssertIndexMatchesTable(dbf, cdx);
 
+        // The journal's note is emptied once what it covers is on disk, so it keeps every write forced.
+        using (var journaled = OpenShared(dbf))
+        {
+            journaled.FlushWritesToDisk = false;
+            Assert.False(journaled.ForcesWrites);
+            journaled.UseJournal = true;
+            Assert.True(journaled.ForcesWrites);
+        }
+
         Assert.True(new DbfDatabaseOptions().FlushWritesToDisk);
         using var db = DbfDatabase.Open($"Data Source={_dir.FullName};Read Only=false;Maintain FoxPro Indexes=true;Flush Writes To Disk=false");
         Assert.False(db.Options.FlushWritesToDisk);

@@ -33,7 +33,7 @@ Forcing each step to the disk (FlushFileBuffers on Windows, fsync elsewhere) is 
 - **A killed process** (a crash, Task Manager, a lost network session on this side) loses nothing more than with forced flushes: every step it finished is in the operating system's hands, in order, and the crash-safe key order above still holds.
 - **A power cut or an operating-system crash** can lose the last writes, and the disk may have taken them in another order, so after one the table and its indexes can disagree: `Check()` and a rebuild (`RebuildIndex()`, or REINDEX in FoxPro) put that right. That's the same risk Visual FoxPro's own writes carry.
 
-The journal (`UseJournal`) and PACK force their writes whatever this says. It's on by default.
+PACK forces its writes whatever this says, and so does every write while the journal (`UseJournal`) is on: its note is emptied once what it covers is on disk, so without forced writes a power cut could keep the emptied note and lose the changes. It's on by default.
 
 `AppendRange` commits every 10,000 rows (configurable) and at the end. If it fails, the rows before the failure are committed, `RecordCount` says how many, and the original error is what you get back.
 
