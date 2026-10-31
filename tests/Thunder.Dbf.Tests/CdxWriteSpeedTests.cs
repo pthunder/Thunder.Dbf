@@ -91,6 +91,45 @@ public sealed partial class CdxWriteTests
         }
     }
 
+    // Visual FoxPro changes keys under its own index lock, not the table's, so it can change the .cdx
+    // after this process reloaded its tags and before it takes the index lock. The pages it cached
+    // from its last write are stale then: the moved counter has to keep them from being used.
+    [Fact]
+    public void Pages_another_program_changed_since_the_last_write_are_read_again()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.Append(Call(template, 5000, contact: 1, subject: "fills the cache"));
+            var contact = table.Fields.Single(f => f.Name == "CONTACT_ID");
+            var before = table.Read(2);
+            table.CrashPoint = point =>
+            {
+                if (point != "counted")
+                    return;
+                table.CrashPoint = null;
+
+                // VFP's REPLACE contact_id WITH 77 on record 3: the field, then the key moved, counter bumped.
+                using (var data = SharedFile.OpenWrite(dbf))
+                {
+                    data.Position = table.Header.HeaderLength + 2L * table.Header.RecordLength + contact.Offset;
+                    Assert.Equal('I', contact.Type);
+                    data.Write(BitConverter.GetBytes(77));
+                }
+                using var reader = DbfTable.Open(dbf);
+                using var other = CdxIndex.Open(new FileStream(cdx, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite), reader.Encoding, table: reader);
+                var tag = (IMaintainedTag)other.Tags.Single(t => t.Name == "CONTACT_ID");
+                Assert.True(tag.Remove(tag.KeyFor(before), 3));
+                tag.Insert(tag.KeyFor(reader.Read(2)), 3);
+                other.Commit();
+            };
+            table.Append(Call(template, 5001, contact: 2, subject: "after VFP's change"));
+            Assert.Equal(77m, Convert.ToDecimal(table.Read(2)["CONTACT_ID"]));
+        }
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
     // The folder isn't listed again while its last-write time is unchanged; a new file changes it.
     [Fact]
     public void An_index_made_after_the_first_write_still_stops_the_next_one()

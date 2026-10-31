@@ -163,11 +163,11 @@ public sealed class DbfException : IOException
     private const int LockViolation = unchecked((int)0x80070021);
 
     /// <summary>Opens a file, turning operating-system failures into explained <see cref="DbfException"/>s.</summary>
-    internal static FileStream OpenFile(string path, FileMode mode, FileAccess access, FileShare share)
+    internal static FileStream OpenFile(string path, FileMode mode, FileAccess access, FileShare share, int bufferSize = 4096)
     {
         try
         {
-            return new FileStream(path, mode, access, share);
+            return new FileStream(path, mode, access, share, bufferSize);
         }
         catch (Exception ex) when (Translate(ex, path, access) is { } translated)
         {
