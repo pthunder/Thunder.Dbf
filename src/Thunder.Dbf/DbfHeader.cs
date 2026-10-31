@@ -140,13 +140,23 @@ public sealed class DbfHeader
     public int RecordLength => BinaryPrimitives.ReadUInt16LittleEndian(_fixed.AsSpan(10, 2));
 
     /// <summary>dBASE IV: set when a production .mdx with the same base name accompanies the table.</summary>
-    public bool HasProductionMdx => !IsVisualFoxPro && _fixed[28] == 0x01;
+    public bool HasProductionMdx => !IsVisualFoxPro && !_indexFlagMeansCdx && Version is not (0xF5 or 0xFB) && _fixed[28] == 0x01;
 
     /// <summary>Records that a production .mdx now accompanies the table (byte 28). Written with the fixed header.</summary>
     internal void MarkProductionMdx() => _fixed[28] = 0x01;
 
     /// <summary>Visual FoxPro: set when a structural .cdx with the same base name accompanies the table.</summary>
-    public bool HasStructuralCdx => IsVisualFoxPro && (_fixed[28] & 0x01) != 0;
+    public bool HasStructuralCdx => (IsVisualFoxPro || Version is 0xF5 or 0xFB || _indexFlagMeansCdx) && (_fixed[28] & 0x01) != 0;
+
+    // FoxPro 2 writes version 0x03, dBASE's own, for tables without memos, and byte 28's flag then
+    // means "has a structural .cdx" rather than dBASE IV's "has a production .mdx". Only the files
+    // next to the table can tell them apart (see DbfTable.Open).
+    private bool _indexFlagMeansCdx;
+
+    /// <summary>True for a FoxPro 2 table that shares dBASE's version byte, as decided from its companion files.</summary>
+    internal bool IsFoxProByCompanion => _indexFlagMeansCdx;
+
+    internal void TreatIndexFlagAsCdx() => _indexFlagMeansCdx = true;
 
     /// <summary>dBASE IV: byte 15 says the table was encrypted with PROTECT. Its records are scrambled.</summary>
     public bool IsEncrypted => !IsVisualFoxPro && _fixed[15] == 0x01;

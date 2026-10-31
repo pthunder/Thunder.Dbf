@@ -48,6 +48,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
 
     IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
     bool IMaintainedIndex.CanMaintain => MaintainRefusal is null;
+    bool IMaintainedIndex.CanMaintainAfterRebuild => MaintainRefusal is null || _refusedOnlyForOrder;
+    private bool _refusedOnlyForOrder;
+    private bool _rebuildExpected;
+
+    void IMaintainedIndex.ExpectRebuild() => _rebuildExpected = true;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
     void IMaintainedIndex.Commit() => Commit();
 
@@ -72,10 +77,13 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // Opening for writing: an index that can't be kept exactly as FoxPro would keep it is refused as
     // a whole, so the table treats it like any other index it can't maintain (writes are blocked,
     // unless the caller allowed unmaintained indexes and will REINDEX in FoxPro).
-    private void PrepareForWriting() =>
+    private void PrepareForWriting()
+    {
+        _refusedOnlyForOrder = false;
         MaintainRefusal = OwnedByAnotherTable()
             ? "This index is named after another table next to it, so it isn't this table's to update."
             : FirstRefusal();
+    }
 
     // A .cdx or .idx that shares its name with a different .dbf belongs to that table, even when its
     // expressions happen to name fields this table also has. Updating it from this table's rows
@@ -98,6 +106,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
             var identity = $"{tag.HeaderOffset}|{tag.KeyLength}|{tag.Expression}|{tag.ForExpression}";
             if (_verifiedTags.Contains(identity))
                 continue;
+            if (tag.CheckWholeOrder() is { } disorder)
+            {
+                // Remember whether order is the only problem: MaintainIndex(path, rebuild: true) can fix that.
+                _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
+                return $"Tag {tag.Name} can't be kept up to date: {disorder}.";
+            }
             if (tag.CompareSampleWithTable(_table!) is { } mismatch)
                 return $"Tag {tag.Name} can't be kept up to date: {mismatch}.";
             _verifiedTags.Add(identity);
@@ -111,7 +125,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         Tags = LoadTags();
         if (!OpenedForWriting)
             return;
-        if (FirstRefusal() is { } reason)
+        if (FirstRefusal() is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
                 "Rebuild the tag in FoxPro with MACHINE collation, or open with allowUnmaintainedIndexes: true only if it will be rebuilt (REINDEX) before it's used.",
                 _table?.FilePath);
@@ -120,6 +134,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// <summary>Bumps the update counter (so other programs drop their cached pages) and pushes everything to disk.</summary>
     internal void Commit()
     {
+        _rebuildExpected = false; // a commit follows the rebuild; from here on order is checked again
         if (_changed)
         {
             // Harbour keeps this big-endian counter in the file's first header and compares it to
@@ -275,6 +290,35 @@ public sealed partial class CdxTag : IMaintainedTag
                 return $"the key it stores for record {record} isn't the one FoxPro's MACHINE order gives that record (a collation or key layout that isn't reproduced, or an index out of step with the table)";
         }
         return null;
+    }
+
+    /// <summary>
+    /// Walks every leaf left to right and checks that the keys are in FoxPro's MACHINE (byte) order,
+    /// within and across pages. A tag sorted by a collation (X# sorts some case-blind without saying
+    /// so) would be scrambled by byte-order changes, so it's refused before the first write rather
+    /// than failing halfway through one.
+    /// </summary>
+    internal string? CheckWholeOrder()
+    {
+        var node = EdgeLeaf(last: false);
+        var visited = new HashSet<long> { node.Offset };
+        byte[]? previous = null;
+        while (true)
+        {
+            for (var i = 0; i < node.Count; i++)
+            {
+                if (previous is not null && previous.AsSpan().SequenceCompareTo(node.Keys[i]) > 0)
+                    return "its keys aren't in FoxPro's MACHINE byte order, so it was built with a collation this code doesn't reproduce (rebuild it with RebuildIndex, or REINDEX with SET COLLATE TO \"MACHINE\" in FoxPro)";
+                previous = node.Keys[i];
+            }
+            if (node.Right == NoPage)
+                return null;
+            if (!visited.Add(node.Right))
+                throw new InvalidDataException($"Tag {Name}'s leaves link back to the page at offset {node.Right}; the index is corrupt.");
+            node = ReadNode(node.Right);
+            if (!node.IsLeaf)
+                throw new InvalidDataException($"Tag {Name}'s leaf chain leads to an interior page at offset {node.Offset}; the index is corrupt.");
+        }
     }
 
     private Node EdgeLeaf(bool last)

@@ -187,6 +187,26 @@ public sealed class IndexSafetyTests : IDisposable
     }
 
     [Fact]
+    public void A_FoxPro_2_table_with_dBASEs_version_byte_is_known_by_its_cdx()
+    {
+        // X# wrote TEST10K as FoxPro 2 does without memos: version 0x03 with byte 28 set, which a
+        // dBASE IV reader takes for "has a .mdx". The .cdx beside it, and no .mdx, says otherwise.
+        Copy("xsharp/rdd-tests/TEST10K.CDX");
+        var path = Copy("xsharp/rdd-tests/TEST10K.DBF");
+
+        using var table = DbfTable.Open(path, writable: true);
+        Assert.True(table.Header.HasStructuralCdx);
+        Assert.False(table.Header.HasProductionMdx);
+        Assert.Equal(DbfLockScheme.VisualFoxPro, table.LockScheme);
+
+        // Its case-blind tags keep writes blocked until the index is taken over and rebuilt.
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, Assert.Throws<DbfException>(() => table.Delete(0)).Code);
+        table.MaintainIndex(Path.ChangeExtension(path, ".CDX"), rebuild: true);
+        table.Delete(0);
+        Assert.True(table.Read(0).IsDeleted);
+    }
+
+    [Fact]
     public void After_a_failed_index_update_every_write_waits_for_a_rebuild()
     {
         foreach (var file in new[] { "CHANGELOG.DBF", "CHANGELOG.DBT", "CHANGELOG.MDX" })

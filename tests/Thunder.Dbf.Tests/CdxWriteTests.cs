@@ -187,9 +187,8 @@ public sealed class CdxWriteTests : IDisposable
     public void Rebuilding_gives_the_same_keys_as_maintaining()
     {
         var (dbf, cdx) = People();
-        using (var table = OpenWritable(dbf))
+        using (var table = TakeOver(dbf, cdx)) // X# sorted three tags case-blind; taking over rebuilds them in byte order
         {
-            table.RebuildIndex(); // X# sorted three tags by a case-blind collation; this puts them in byte order
             Mutate(table, new Random(11), steps: 500);
         }
         AssertIndexMatchesTable(dbf, cdx);
@@ -219,9 +218,8 @@ public sealed class CdxWriteTests : IDisposable
             header[14] |= CdxIndex.OptionForFilter;
         });
 
-        using (var table = OpenWritable(dbf))
+        using (var table = TakeOver(dbf, cdx))
         {
-            table.RebuildIndex();
             for (var i = 0; i < 150; i++)
                 table.Delete(i * 7);
             table.Recall(14);
@@ -466,6 +464,17 @@ public sealed class CdxWriteTests : IDisposable
     {
         var index = CdxIndex.Open(new MemoryStream(File.ReadAllBytes(cdx)));
         return index[name];
+    }
+
+    // X#'s TEST10K sorts CITY, FIRST and LAST case-blind, which byte-order writes would scramble, so
+    // the index is refused until it's taken over and rebuilt in byte order.
+    private static DbfTable TakeOver(string dbf, string cdx)
+    {
+        var table = DbfTable.Open(dbf, writable: true);
+        Assert.Throws<DbfException>(() => table.MaintainIndex(cdx));
+        table.MaintainIndex(cdx, rebuild: true);
+        Assert.True(table.MaintainsIndex);
+        return table;
     }
 
     private DbfTable OpenWritable(string dbf)

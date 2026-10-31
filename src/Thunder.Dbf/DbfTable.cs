@@ -121,11 +121,13 @@ public sealed partial class DbfTable : IDisposable
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
+            if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is not null)
+                table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
             {
-                if (header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
+                if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
                     table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
-                table.AttachOtherIndexes(path, header);
+                table.AttachOtherIndexes(path, table.Header);
             }
             return table;
         }
@@ -194,8 +196,14 @@ public sealed partial class DbfTable : IDisposable
     /// table, so Thunder.Dbf won't guess). Use it for every index the legacy app opens with this table,
     /// such as <c>USE CUSTOMER INDEX CUSTNAME, CUSTZIP</c>.
     /// </summary>
+    /// <param name="path">The index file.</param>
+    /// <param name="rebuild">
+    /// Also take over an index whose keys are in a sort order Thunder.Dbf doesn't reproduce (X#, for
+    /// one, sorts some tags case-blind), and rebuild every index in byte order straight away, like
+    /// FoxPro's REINDEX with SET COLLATE TO "MACHINE". Any other reason to refuse still applies.
+    /// </param>
     /// <exception cref="DbfException">The index can't be read, or its format can't be kept up to date.</exception>
-    public void MaintainIndex(string path)
+    public void MaintainIndex(string path, bool rebuild = false)
     {
         EnsureWritable();
         var full = Path.GetFullPath(path);
@@ -204,13 +212,17 @@ public sealed partial class DbfTable : IDisposable
             return;
         if (!File.Exists(full))
             throw new DbfException(DbfErrorCode.TableNotFound, "There's no index file at that path.", "Check the name and folder.", diagnostic: full);
-        if (!TryAttachIndex(full))
+        if (!TryAttachIndex(full, acceptAfterRebuild: rebuild))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"The index {name} can't be kept up to date (unreadable, or a format or sort order Thunder.Dbf doesn't write).",
-                "Rebuild it in the legacy app, or open with allowUnmaintainedIndexes: true if it will be rebuilt before use.", _path);
+                rebuild
+                    ? "Rebuild it in the legacy app, or open with allowUnmaintainedIndexes: true if it will be rebuilt before use."
+                    : "If it's only the sort order, MaintainIndex(path, rebuild: true) takes it over and rebuilds it in byte order. Otherwise rebuild it in the legacy app.", _path);
         _unmaintainedIndexes = _unmaintainedIndexes.Where(n => !n.Equals(name, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (rebuild)
+            RebuildIndex();
     }
 
-    private bool TryAttachIndex(string file)
+    private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
     {
         {
             Stream? stream = null;
@@ -218,8 +230,10 @@ public sealed partial class DbfTable : IDisposable
             {
                 stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
                 IDbfIndex index = OpenAnyIndex(file, stream, Encoding, this);
-                if (index is IMaintainedIndex { CanMaintain: true } maintained)
+                if (index is IMaintainedIndex maintained && (maintained.CanMaintain || (acceptAfterRebuild && maintained.CanMaintainAfterRebuild)))
                 {
+                    if (!maintained.CanMaintain)
+                        maintained.ExpectRebuild();
                     _otherIndexes.Add(maintained);
                     _attachedIndexPaths.Add(Path.GetFullPath(file));
                     if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)

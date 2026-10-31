@@ -101,6 +101,17 @@ internal interface IMaintainedIndex : IDisposable
     /// </summary>
     bool CanMaintain => true;
 
+    /// <summary>
+    /// True when the only thing stopping maintenance is the order the keys are in now (a collation
+    /// this code doesn't reproduce), which a rebuild in byte order fixes.
+    /// </summary>
+    bool CanMaintainAfterRebuild => CanMaintain;
+
+    /// <summary>Told before a rebuild that will put the keys in byte order, so reloading meanwhile doesn't refuse.</summary>
+    void ExpectRebuild()
+    {
+    }
+
     /// <summary>Re-reads the tag list, in case another program changed the file.</summary>
     void ReloadTags();
 

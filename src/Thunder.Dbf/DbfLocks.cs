@@ -79,7 +79,7 @@ internal sealed class DbfLocks
 
     /// <summary>The scheme <see cref="DbfLockScheme.Auto"/> stands for on this table.</summary>
     internal static DbfLockScheme Resolve(DbfLockScheme scheme, DbfHeader header) =>
-        scheme == DbfLockScheme.Auto ? (header.IsFoxPro ? DbfLockScheme.VisualFoxPro : DbfLockScheme.Dbase) : scheme;
+        scheme == DbfLockScheme.Auto ? (header.IsFoxPro || header.IsFoxProByCompanion ? DbfLockScheme.VisualFoxPro : DbfLockScheme.Dbase) : scheme;
 
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(3);
 
