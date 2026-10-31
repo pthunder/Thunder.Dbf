@@ -30,9 +30,15 @@ public sealed record DbfMigrationOptions
 /// <summary>What a migration did, table by table.</summary>
 public sealed record DbfMigrationResult(IReadOnlyList<DbfTableMigration> Tables, TimeSpan Elapsed)
 {
+    /// <summary>Rows copied across every table.</summary>
     public int Rows => Tables.Sum(t => t.Rows);
 }
 
+/// <summary>What a migration did to one table.</summary>
+/// <param name="Table">The DBF table's name.</param>
+/// <param name="SqlTable">The SQL table it was copied to.</param>
+/// <param name="Rows">Rows copied.</param>
+/// <param name="SkippedDeleted">Records marked deleted in the DBF, and so not copied.</param>
 public sealed record DbfTableMigration(string Table, string SqlTable, int Rows, int SkippedDeleted);
 
 /// <summary>Copies DBF tables into a SQL database through any ADO.NET provider.</summary>

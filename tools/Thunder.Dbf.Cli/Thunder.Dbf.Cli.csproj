@@ -11,7 +11,10 @@
 
   <PropertyGroup>
     <IsPackable>true</IsPackable>
+    <!-- Lower case, like the command, so `dotnet tool install -g thunder-dbf` reads naturally. -->
+    <PackageId>thunder-dbf</PackageId>
     <Description>thunder-dbf: check, inspect, import, export and migrate dBASE and FoxPro data from the command line.</Description>
+    <PackageTags>$(PackageTags);cli;dotnet-tool;sqlite</PackageTags>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

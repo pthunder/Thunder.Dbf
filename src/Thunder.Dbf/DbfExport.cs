@@ -55,6 +55,7 @@ public static class DbfExport
         }
     }
 
+    /// <summary>Writes the table to <paramref name="writer"/> as CSV and returns how many records were written.</summary>
     public static int ToCsv(DbfTable table, TextWriter writer, DbfExportOptions? options = null)
     {
         options ??= new DbfExportOptions();

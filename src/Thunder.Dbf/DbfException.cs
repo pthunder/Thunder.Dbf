@@ -13,7 +13,9 @@ public enum DbfErrorCode
 {
     /// <summary>The folder or connection string doesn't point anywhere usable.</summary>
     FolderNotFound,
+    /// <summary>The connection string can't be understood.</summary>
     InvalidConnectionString,
+    /// <summary>There is no table with that name in the folder.</summary>
     TableNotFound,
 
     /// <summary>Creating a table would overwrite or adopt files that already exist.</summary>
@@ -21,6 +23,7 @@ public enum DbfErrorCode
 
     /// <summary>The file exists but isn't a DBF table Thunder.Dbf can read.</summary>
     NotADbfFile,
+    /// <summary>The file is a DBF table, but of a kind or version Thunder.Dbf doesn't support.</summary>
     UnsupportedFormat,
 
     /// <summary>The operating system refused access to the file.</summary>
@@ -41,8 +44,11 @@ public enum DbfErrorCode
     /// <summary>dBASE IV marked a transaction as unfinished; writing on top could corrupt it further.</summary>
     IncompleteTransaction,
 
+    /// <summary>The table has memo fields but its .dbt or .fpt file is missing.</summary>
     MemoFileMissing,
+    /// <summary>The memo file can't be read: a pointer or length in it is out of range.</summary>
     MemoFileDamaged,
+    /// <summary>The index file can't be read: its structure is damaged or isn't what its header says.</summary>
     IndexDamaged,
 
     /// <summary>Writing would leave a production .mdx/.cdx index out of date.</summary>
@@ -87,6 +93,13 @@ public enum DbfErrorCode
 /// </remarks>
 public sealed class DbfException : IOException
 {
+    /// <summary>A failure with a safe message and a hint.</summary>
+    /// <param name="code">What kind of failure it is.</param>
+    /// <param name="message">What happened, safe to show to anyone: no paths, names or table lists.</param>
+    /// <param name="hint">What to do about it, equally safe to show.</param>
+    /// <param name="filePath">The file involved, for logs only.</param>
+    /// <param name="inner">The underlying exception, if any.</param>
+    /// <param name="diagnostic">Extra detail for logs and administrators only.</param>
     public DbfException(DbfErrorCode code, string message, string hint, string? filePath = null, Exception? inner = null, string? diagnostic = null)
         : base($"{message} {hint}", inner)
     {
@@ -96,7 +109,9 @@ public sealed class DbfException : IOException
         DiagnosticDetail = diagnostic;
     }
 
+    /// <summary>What kind of failure this is.</summary>
     public DbfErrorCode Code { get; }
+    /// <summary>What to do about it. Safe to show to anyone.</summary>
     public string Hint { get; }
 
     /// <summary>The file involved. Diagnostic only: don't send it to untrusted clients.</summary>

@@ -49,6 +49,24 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 - **Untrusted input can't escape the folder.** Table names and links are checked, and hostile files can't crash or hang the process.
 - **Tested on real files,** not only on files it wrote itself (see below).
 
+## Install
+
+Coming with 0.1.0, the first release on nuget.org (not published yet):
+
+```bash
+dotnet add package Thunder.Dbf
+```
+
+```bash
+dotnet add package Thunder.Dbf.Sql
+```
+
+```bash
+dotnet tool install -g thunder-dbf
+```
+
+The web service will be a self-contained download for Windows, Linux and macOS on each [GitHub release](https://github.com/pthunder/Thunder.Dbf/releases). Until then, build from a clone:
+
 ## Quick start
 
 ```bash
@@ -137,7 +155,7 @@ Next:
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
 - Creating index tags (`INDEX ON`) and packing tables (`PACK`)
 - OpenID Connect sign-in for the web service, and an OpenAPI schema per table
-- NuGet packages
+- NuGet packages, coming with 0.1.0: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool on nuget.org, and self-contained web service downloads for Windows, Linux and macOS on each GitHub release. The packaging and release workflow are ready.
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).
 

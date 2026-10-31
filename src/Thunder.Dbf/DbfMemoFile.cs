@@ -32,8 +32,11 @@ namespace Thunder.Dbf;
 /// <summary>The kinds of memo file Thunder.Dbf reads and writes.</summary>
 public enum DbfMemoFormat
 {
+    /// <summary>dBASE III .dbt: fixed 512-byte blocks, text ended by 0x1A.</summary>
     DbaseIII,
+    /// <summary>dBASE IV .dbt: blocks with a length header, and a free-block chain.</summary>
     DbaseIV,
+    /// <summary>FoxPro .fpt: block headers that record each memo's type and length.</summary>
     FoxPro,
 }
 

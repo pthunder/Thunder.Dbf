@@ -12,6 +12,7 @@ namespace Thunder.Dbf;
 public static class DbfEncoding
 {
     // Most legacy files predate Unicode and were written by Windows apps, so 1252 is the safest guess.
+    /// <summary>Windows-1252, used when a table doesn't say which code page it was written in.</summary>
     public const int DefaultCodePage = 1252;
 
     private static readonly Dictionary<byte, int> CodePages = new()
@@ -43,6 +44,7 @@ public static class DbfEncoding
     /// <summary>The encoding for a language driver byte, falling back to <see cref="DefaultCodePage"/>.</summary>
     public static Encoding For(byte languageDriver) => GetEncoding(CodePageFor(languageDriver) ?? DefaultCodePage);
 
+    /// <summary>The encoding for a code page number, including Mazovia (620), which .NET doesn't know.</summary>
     public static Encoding GetEncoding(int codePage) =>
         codePage == MazoviaEncoding.MazoviaCodePage ? MazoviaEncoding.Instance : Encoding.GetEncoding(codePage);
 
@@ -54,6 +56,7 @@ public static class DbfEncoding
         return strict;
     }
 
+    /// <summary>The encoding for a name such as <c>windows-1250</c>, <c>ibm850</c> or <c>mazovia</c>.</summary>
     public static Encoding GetEncodingByName(string name) =>
         name.Equals("mazovia", StringComparison.OrdinalIgnoreCase) ? MazoviaEncoding.Instance : Encoding.GetEncoding(name);
 

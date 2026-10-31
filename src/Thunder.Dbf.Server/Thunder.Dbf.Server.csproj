@@ -9,6 +9,10 @@
     <AssemblyName>thunder-dbf-server</AssemblyName>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- An app, not a library: releases ship it as self-contained zips per OS, not on NuGet. -->
+    <IsPackable>false</IsPackable>
+    <!-- The Web SDK warns when a solution-wide `dotnet pack` reaches it; skipping it is the intent. -->
+    <WarnOnPackingNonPackableProject>false</WarnOnPackingNonPackableProject>
   </PropertyGroup>
 
   <ItemGroup>

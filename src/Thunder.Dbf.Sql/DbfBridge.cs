@@ -20,12 +20,14 @@ public enum DbfConflictPolicy
 {
     /// <summary>The legacy DBF is the system of record (the default).</summary>
     DbfWins,
+    /// <summary>The SQL side is the system of record: its change is kept and copied to the DBF.</summary>
     SqlWins,
 }
 
 /// <summary>What one sync did.</summary>
 public sealed record DbfSyncResult(int ToSql, int ToDbf, int AddedToDbf, int DeletedInDbf, IReadOnlyList<DbfSyncConflict> Conflicts)
 {
+    /// <summary>Every change the sync made, on both sides.</summary>
     public int Changes => ToSql + ToDbf + AddedToDbf + DeletedInDbf;
 }
 
@@ -55,6 +57,7 @@ public sealed class DbfBridge
         _sql = new SqlTable(connection, dialect, sqlTableName, table.Fields);
     }
 
+    /// <summary>Which side wins when a row changed on both sides since the last sync. The DBF wins by default.</summary>
     public DbfConflictPolicy ConflictPolicy { get; init; } = DbfConflictPolicy.DbfWins;
 
     /// <summary>

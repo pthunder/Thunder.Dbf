@@ -30,16 +30,19 @@ public sealed class DbfCommand : DbCommand
     private readonly DbfParameterCollection _parameters = new();
     private DbfQuery? _running;
 
+    /// <summary>A command with no text or connection yet.</summary>
     public DbfCommand()
     {
     }
 
+    /// <summary>A command with its SQL text and, optionally, its connection.</summary>
     public DbfCommand(string commandText, DbfConnection? connection = null)
     {
         _commandText = commandText ?? "";
         _connection = connection;
     }
 
+    /// <inheritdoc />
     [AllowNull]
     public override string CommandText
     {
@@ -70,17 +73,21 @@ public sealed class DbfCommand : DbCommand
         }
     }
 
+    /// <inheritdoc />
     [DefaultValue(true), DesignOnly(true), Browsable(false), EditorBrowsable(EditorBrowsableState.Never)]
     public override bool DesignTimeVisible { get; set; } = true;
 
+    /// <inheritdoc />
     public override UpdateRowSource UpdatedRowSource { get; set; } = UpdateRowSource.None;
 
+    /// <summary>The connection the command runs on.</summary>
     public new DbfConnection? Connection
     {
         get => _connection;
         set => _connection = value;
     }
 
+    /// <inheritdoc />
     protected override DbConnection? DbConnection
     {
         get => _connection;
@@ -92,8 +99,10 @@ public sealed class DbfCommand : DbCommand
         };
     }
 
+    /// <summary>The command's parameters, such as <c>@id</c>.</summary>
     public new DbfParameterCollection Parameters => _parameters;
 
+    /// <inheritdoc />
     protected override DbParameterCollection DbParameterCollection => _parameters;
 
     /// <summary>Always null: DBF tables have no transactions.</summary>
@@ -107,8 +116,10 @@ public sealed class DbfCommand : DbCommand
         }
     }
 
+    /// <summary>A new parameter, not yet added to <see cref="Parameters"/>.</summary>
     public new DbfParameter CreateParameter() => new();
 
+    /// <inheritdoc />
     protected override DbParameter CreateDbParameter() => CreateParameter();
 
     /// <summary>
@@ -163,10 +174,13 @@ public sealed class DbfCommand : DbCommand
         return reader.Read() && reader.FieldCount > 0 ? reader.GetValue(0) : null;
     }
 
+    /// <summary>Runs the query and returns a reader over its rows.</summary>
     public new DbfDataReader ExecuteReader() => ExecuteReader(CommandBehavior.Default);
 
+    /// <summary>Runs the query and returns a reader over its rows.</summary>
     public new DbfDataReader ExecuteReader(CommandBehavior behavior) => (DbfDataReader)ExecuteDbDataReader(behavior);
 
+    /// <inheritdoc />
     protected override DbDataReader ExecuteDbDataReader(CommandBehavior behavior)
     {
         // SchemaOnly asks for column information, so it must not change anything.
