@@ -26,7 +26,7 @@ namespace Thunder.Dbf;
 /// (or <see cref="byte"/>[] for binary, picture and OLE memos). Writes take legacy-compatible locks
 /// (see <see cref="LockScheme"/>). An instance isn't thread-safe: give each thread its own.
 /// </summary>
-public sealed class DbfTable : IDisposable
+public sealed partial class DbfTable : IDisposable
 {
     private const byte LiveFlag = (byte)' ';
     private const byte DeletedFlag = (byte)'*';

@@ -129,6 +129,9 @@ public sealed class DbfHeader
     /// <summary>dBASE IV: set when a production .mdx with the same base name accompanies the table.</summary>
     public bool HasProductionMdx => !IsVisualFoxPro && _fixed[28] == 0x01;
 
+    /// <summary>Records that a production .mdx now accompanies the table (byte 28). Written with the fixed header.</summary>
+    internal void MarkProductionMdx() => _fixed[28] = 0x01;
+
     /// <summary>Visual FoxPro: set when a structural .cdx with the same base name accompanies the table.</summary>
     public bool HasStructuralCdx => IsVisualFoxPro && (_fixed[28] & 0x01) != 0;
 
