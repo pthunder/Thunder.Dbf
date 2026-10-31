@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- `Check()`'s summary says "No problems; N note(s) below." when tables only have notes (such as a missing code page), instead of "All good." above a warning.
+
 ### Engine (Thunder.Dbf)
 
 FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` preview) is safer:

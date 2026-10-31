@@ -45,6 +45,19 @@ public sealed class DbfDatabaseTests : IDisposable
     }
 
     [Fact]
+    public void The_summary_says_no_problems_with_notes_rather_than_all_good()
+    {
+        // CHANGELOG doesn't record its code page, which is a note, not a problem.
+        using var db = DbfDatabase.Open(_folder.FullName);
+        var report = db.Check();
+        Assert.True(report.Ok);
+        Assert.Contains(report.Tables, t => t.Warnings.Count > 0);
+        var summary = report.ToString().Split('\n')[0];
+        Assert.Contains("No problems;", summary);
+        Assert.DoesNotContain("All good", summary);
+    }
+
+    [Fact]
     public void Connection_strings_set_the_options()
     {
         using var db = DbfDatabase.Open($"Data Source={_folder.FullName};Read Only=false;Code Page=850;Allow Unmaintained Indexes=yes");
