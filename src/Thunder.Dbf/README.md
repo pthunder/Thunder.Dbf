@@ -34,7 +34,8 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 
 - **Tables:** dBASE III and IV, FoxPro 2 and Visual FoxPro, including nulls, autoincrement and over 60 code pages.
 - **Memos:** `.dbt` and `.fpt`.
-- **Indexes:** dBASE IV `.mdx` read and kept exact on every write; `.ndx`, `.ntx` and `.cdx`/`.idx` read and seek.
+- **Indexes:** dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` read and kept exact on every write; FoxPro `.cdx`/`.idx` read and seek, and kept up to date as an opt-in preview. `INDEX ON` for `.mdx`, and `PACK`.
+- **Typed records and LINQ:** `ReadAll<T>()`, `AsQueryable<T>()` with seeks through `.mdx` tags.
 - **Locking:** record and table locks at dBASE, Clipper or Visual FoxPro offsets, so writes coexist with the legacy app.
 - **ADO.NET provider:** `DbfConnection`, `DbfCommand` and `DbfDataReader` with parameterized SQL.
 - **CSV:** import with the table's shape worked out from the data, and spreadsheet-safe export.

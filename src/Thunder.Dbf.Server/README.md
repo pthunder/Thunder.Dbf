@@ -240,5 +240,5 @@ sc.exe start Thunder.Dbf
 
 ## Not done yet
 
-- Writes to FoxPro tables with a `.cdx` index. dBASE IV `.mdx` indexes are kept up to date on every write; `.cdx` is read-only for now, so those writes are refused unless `AllowUnmaintainedIndexes` is set.
+- Writes to FoxPro tables with a `.cdx` index by default: `.cdx` maintenance is a preview, switched on with `Data:MaintainFoxProIndexes`. `.mdx`, `.ndx` and `.ntx` indexes are kept up to date on every write.
 - Recall (undelete), packing, and creating tables over HTTP.

@@ -49,9 +49,9 @@ Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read Fo
 
 ## Facts worth getting right
 
-- Writes keep dBASE IV `.mdx` indexes exact. `.ndx`, `.ntx` and `.cdx` are read-only for now; tables with a structural `.cdx` refuse writes unless `allowUnmaintainedIndexes` is set.
+- Writes keep dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` indexes exact (`.ntx` under Clipper's own index lock). FoxPro `.cdx`/`.idx` maintenance is a preview, enabled with `maintainFoxProIndexes` / `Maintain FoxPro Indexes=true`; without it tables with a `.cdx` refuse writes.
 - Byte-range locks are enforced on Windows and Linux, not on macOS (a .NET and macOS limitation). dBASE, Clipper and Visual FoxPro lock offsets are supported (`LockScheme`); Clipper must be chosen explicitly.
-- Writes are refused while a stray `.ndx`, `.ntx` or `.idx` sits next to the table, since it can't be kept up to date.
+- An `.ndx`/`.ntx`/`.idx` named after the table is kept up to date automatically; one named otherwise that looks like it belongs blocks writes until `table.MaintainIndex(path)` names it (these formats don't record their table). Indexes in a national sort order, Clipper custom/changes-only indexes and very wide numeric keys are refused rather than guessed at.
 - LINQ: `table.AsQueryable<T>()` is an IQueryable provider. Equalities on fields with their own complete .mdx tag become seeks; everything else scans and runs as LINQ to Objects. There's no Entity Framework provider.
 - dBASE II and dBASE 7 tables are refused with `UnsupportedFormat`.
 - Verified against files from dBASE III Plus, dBASE IV, FoxPro 2, Visual FoxPro, Clipper, X#, Siemens STEP 7 and US Census TIGER, plus private GoldMine CRM data.

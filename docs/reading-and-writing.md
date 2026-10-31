@@ -143,5 +143,5 @@ New tables are dBASE IV (`0x03`, or `0x8B` with memos), within dBASE IV's limits
 | `0x83` | dBASE III + `.dbt` | ✅ | ✅ |
 | `0x8B` | dBASE IV + `.dbt` | ✅ | ✅ |
 | `0xF5` | FoxPro 2 + `.fpt` | ✅ | ✅ |
-| `0x30`-`0x32` | Visual FoxPro | ✅ | ✅ (refused while a `.cdx` can't be maintained) |
+| `0x30`-`0x32` | Visual FoxPro | ✅ | ✅ (a table with a `.cdx` needs the `MaintainFoxProIndexes` preview) |
 | `0x02`, `0x04`, `0x8C` | dBASE II, dBASE 7 | refused with `UnsupportedFormat` | |
