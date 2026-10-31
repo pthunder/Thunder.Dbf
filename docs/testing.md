@@ -63,3 +63,5 @@ Each run takes a FoxPro table with a `.cdx`, then:
 4. Thunder.Dbf checks that every tag now holds exactly what a fresh rebuild would.
 
 Without `THUNDER_VFP` the tests do nothing. VFP isn't redistributable, so it never goes in the repo.
+
+The full checklist for a Windows machine (installing VFP, reading results, what to report) is in [Running the Visual FoxPro round-trip test](maintainers/visual-foxpro-test.md).
