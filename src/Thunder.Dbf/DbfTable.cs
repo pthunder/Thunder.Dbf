@@ -17,6 +17,7 @@
 //
 // After the last record comes 0x1A, the old DOS end-of-file marker.
 
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace Thunder.Dbf;
@@ -1806,7 +1807,7 @@ public sealed partial class DbfTable : IDisposable
                 {
                     holds[i].Dispose();
                 }
-                catch (Exception ex) when (ex is IOException or InvalidDataException)
+                catch (Exception ex)
                 {
                     unpublished ??= ex;
                 }
@@ -1814,6 +1815,8 @@ public sealed partial class DbfTable : IDisposable
             if (unpublished is not null)
             {
                 _indexesNeedRebuild = true;
+                if (completed && unpublished is not (IOException or InvalidDataException))
+                    ExceptionDispatchInfo.Throw(unpublished);
                 if (completed)
                     throw new DbfException(DbfErrorCode.IndexDamaged,
                         $"Record {recordNumber}'s index changes couldn't be published to other programs.",
@@ -2106,7 +2109,7 @@ public sealed partial class DbfTable : IDisposable
 
     // The journal's note is emptied once what it covers is on disk, so with the journal on every step
     // is forced: otherwise a power cut could keep the emptied note and lose the changes it covered.
-    internal bool ForcesWrites => FlushWritesToDisk || _useJournal || _forcedOperations > 0;
+    internal bool ForcesWrites => FlushWritesToDisk || _useJournal || _appendNoted || _forcedOperations > 0;
 
     // PACK, rebuilds, INDEX ON and finishing a journal note force every write whatever FlushWritesToDisk
     // says: each ends by deleting or emptying what a power cut would need to recover from (PACK's

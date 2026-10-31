@@ -530,6 +530,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// </summary>
     internal void CheckPageOwnership()
     {
+        FileLength(fresh: true); // another program may have grown the file and freed pages past where it ended
         var owners = new Dictionary<long, string>();
         void Own(long page, string owner)
         {
@@ -574,6 +575,13 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > FileLength() && offset + bytes.Length > FileLength(fresh: true))
             throw new InvalidOperationException($"Can't write the .cdx page at offset {offset}.");
+        if (!_changed)
+        {
+            // The counter moves before the first page does, and again when the change is published:
+            // a writer killed in between still leaves other programs a counter that says "reload".
+            BumpCounter();
+            _stream.Flush();
+        }
         _stream.Position = offset;
         _stream.Write(bytes);
         _changed = true;
@@ -599,11 +607,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
     internal void FreePage(long offset)
     {
         // Like Harbour: a free page holds only the link to the next one, in its first four bytes.
-        var header = Read(0, DefaultPageLength);
         var page = new byte[PageLength];
-        header.AsSpan(FreeListOffset, 4).CopyTo(page);
+        Read(0, DefaultPageLength).AsSpan(FreeListOffset, 4).CopyTo(page);
         Write(offset, page);
 
+        var header = Read(0, DefaultPageLength); // read after that write, which may have moved the counter
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(FreeListOffset), checked((uint)offset));
         Write(0, header);
     }
