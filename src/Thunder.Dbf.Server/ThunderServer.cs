@@ -54,6 +54,7 @@ public static class ThunderServer
 
         app.MapOpenApi().AllowAnonymous();
         app.MapThunderApi();
+        app.MapTableOpenApi();
         return app;
     }
 
