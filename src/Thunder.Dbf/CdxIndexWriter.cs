@@ -81,6 +81,12 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // each when it ends. Reads see them. A process killed during a batch leaves the index without the
     // batch's changes, which the open-time count check reports.
     private Dictionary<long, byte[]>? _deferred;
+
+    // Inside a batch the cache shares its nodes instead of copying them in and out (the copies were
+    // most of a batch's time). Every change that edits a node in place writes it, and a write puts
+    // that node back in the cache; a change that fails partway can leave a cached node edited but
+    // unwritten, which is why that keeps the batch's journal note and stops writes until a rebuild.
+    internal bool Deferring => _deferred is not null;
     private long _deferredFrom; // the file's length when the batch began: pages past it are new
     private readonly HashSet<long> _deferredFreed = []; // pages the batch put on the free list
 
@@ -1345,7 +1351,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 CheckByteOrder(cached);
                 cached.InByteOrder = true;
             }
-            return cached.Copy();
+            return _index.Deferring ? cached : cached.Copy();
         }
 
         var node = DecodeNode(offset);
@@ -1354,7 +1360,7 @@ public sealed partial class CdxTag : IMaintainedTag
             CheckByteOrder(node);
             node.InByteOrder = true;
         }
-        _index.CacheNode(offset, this, node.Copy());
+        _index.CacheNode(offset, this, _index.Deferring ? node : node.Copy());
         return node;
     }
 
@@ -1437,7 +1443,7 @@ public sealed partial class CdxTag : IMaintainedTag
         _index.Write(node.Offset, page ?? throw new InvalidOperationException($"Tag {Name}'s page at offset {node.Offset} doesn't fit."));
         // What was just written, as a reader would decode it. Byte order is only vouched for when it
         // was checked (or the change began from checked nodes): a rebuild's reads skip the check.
-        var written = node.Copy();
+        var written = _index.Deferring ? node : node.Copy();
         written.InByteOrder = IsInByteOrder(written);
         _index.CacheNode(node.Offset, this, written);
     }

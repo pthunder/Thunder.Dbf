@@ -1593,9 +1593,11 @@ public sealed partial class DbfTable : IDisposable
         if (after is null || !MaintainedIndexes.Any())
             return null;
 
-        var changes = new List<TagChange>();
+        var changes = new List<TagChange>(_tagsLastPlanned); // sized for one change per tag, as last time
+        var tags = 0;
         foreach (var tag in MaintainedIndexes.SelectMany(i => i.MaintainedTags))
         {
+            tags++;
             var wasIn = before is not null && tag.Includes(before);
             var isIn = tag.Includes(after);
             var oldKey = wasIn ? tag.KeyFor(before!) : null;
@@ -1607,8 +1609,11 @@ public sealed partial class DbfTable : IDisposable
             if (oldKey is not null || newKey is not null)
                 changes.Add(new TagChange(tag, oldKey, newKey));
         }
+        _tagsLastPlanned = tags;
         return changes;
     }
+
+    private int _tagsLastPlanned;
 
     // A candidate key is checked against what the tag will hold once this batch's planned changes
     // are applied, not only what's in it now: AppendRange applies its rows' keys at the commit, so
