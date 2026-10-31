@@ -8,6 +8,21 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Engine (Thunder.Dbf)
+
+FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` preview) is safer:
+
+- **Visual FoxPro's index lock:** every change, and every reload of the tag list, runs under the lock Visual FoxPro takes on the index file itself (one byte at 0x7FFFFFFE), following `LockTimeout` and `RequireLocks`; pages are re-read under it and the update counter is bumped before it's released.
+- **Crash-safe page order:** splits write the new page before the page that links it in, emptied pages go on the free list only once nothing points at them, and a rebuild builds a whole new tree and switches to it in one header write. A crash can leave keys listed twice or unused pages, never a key missing.
+- **Visual FoxPro's UNIQUE tags** change the way Visual FoxPro changes them between rebuilds: the first record with a key keeps it, and nothing is promoted when it leaves. A rebuild still picks the lowest record.
+- **Candidate keys** are checked against every key an `AppendRange` batch has planned, so two equal keys in one batch are refused; a rebuild checks its keys among themselves.
+- **Keys built byte for byte:** character keys come from the stored field bytes (a field holding `A\0` keys as FoxPro keys it), and leaves pack record numbers past 67,108,863 the way Harbour and FoxPro do, for both reading and writing.
+- **Refused rather than guessed:** `.cdx` files whose pages have two owners or one-way sibling links (as damaged); numeric keys over more than a bare field; character keys built with functions other than `UPPER`, `DTOS` and `STR` of fields; `UPPER` and text FOR filters in double-byte code pages.
+- **Takeovers:** `MaintainIndex(path, rebuild: true)` takes over a tag out of byte order anywhere (the root included), rebuilds an index that's already kept, and lets the index go again if the rebuild fails.
+- **FoxPro 2 detection:** a version-0x03 table with the index flag, no `.mdx` and a same-named `.cdx` is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields; otherwise it stays dBASE IV and the missing `.mdx` keeps blocking writes.
+
 ## [0.1.0] - Unreleased
 
 The first public release.
@@ -20,14 +35,12 @@ The first public release.
 - **Other indexes:**
   - Read and seek dBASE III `.ndx`, Clipper `.ntx` and FoxPro `.cdx`/`.idx`, all through `IDbfIndexTag`.
   - Keep `.ndx` and `.ntx` up to date on every write, `.ntx` under Clipper's own index lock.
-  - FoxPro `.cdx`/`.idx` maintenance is an opt-in preview (`MaintainFoxProIndexes`). It runs under Visual FoxPro's own index lock (one byte at 0x7FFFFFFE of the index file), writes splits, removals and rebuilds in an order a crash can't turn into lost keys, keeps UNIQUE tags the way Visual FoxPro does between rebuilds, checks candidate keys against a whole `AppendRange` batch, builds character keys from the stored bytes, and handles record numbers past 67,108,863.
-  - It refuses `.cdx` files whose pages have two owners (two tags, or a tag and the free list) or one-way sibling links, numeric keys over more than a bare field (FoxPro computes those in binary floating point), and character keys built with functions other than `UPPER`, `DTOS` and `STR` of fields (or `UPPER` in a double-byte code page).
-  - `MaintainIndex(path, rebuild: true)` rebuilds an index that's already kept, takes over one whose root or interior pages are out of byte order, and lets the index go again if the rebuild fails.
+  - FoxPro `.cdx`/`.idx` maintenance is an opt-in preview (`MaintainFoxProIndexes`).
 - **Which indexes are kept:**
   - An index is kept only when it is surely the table's: the header names it, or it's named after the table, or `MaintainIndex(path)` names it.
   - National sort orders, Clipper custom/changes-only indexes and over-wide numeric keys are refused rather than guessed at.
   - After a failed index update, writes stop until `RebuildIndex()`.
-- **FoxPro 2 tables** that share dBASE's version byte are recognized by their `.cdx`, when it opens and its tags name only the table's fields; otherwise the table stays dBASE IV, with its missing `.mdx` still blocking writes.
+- **FoxPro 2 tables** that share dBASE's version byte are recognized by their `.cdx`.
 - **Expressions:** a dBASE evaluator for key and `FOR` expressions (`UPPER`, `SUBSTR`, `DTOS`, `STR`, `VAL`, `IIF`, `DELETED()` and more), with three-valued `.NULL.` logic.
 - **Locking:** record, header, append and table locks at dBASE, Clipper or Visual FoxPro offsets (`LockScheme`), shared across every table opened in one process; `LockRecord`/`LockTable`; `Refresh()` to see other programs' changes.
 - **`UpdateFields`:** changes only the named fields, re-reading the record under its lock, so concurrent edits to other fields survive.
