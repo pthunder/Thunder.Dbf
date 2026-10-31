@@ -6,10 +6,15 @@
 
   <PropertyGroup>
     <IsPackable>true</IsPackable>
+    <PackageId>Thunder.Dbf.Sql</PackageId>
     <Description>Migrate dBASE and FoxPro tables to SQLite, SQL Server or PostgreSQL, and keep them in sync both ways.</Description>
+    <PackageTags>$(PackageTags);sql;sqlite;sqlserver;postgresql;sync</PackageTags>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- IntelliSense for package users; a public member without docs fails the build. -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <WarningsAsErrors>$(WarningsAsErrors);CS1591;CS1573</WarningsAsErrors>
   </PropertyGroup>
 
 </Project>
