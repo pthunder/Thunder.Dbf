@@ -141,21 +141,37 @@ public sealed partial class CdxWriteTests
         using var table = DbfTable.Open(dbf);
         var bytes = SharedFile.ReadAllBytes(cdx);
 
-        // Fill the root leaf until the next key splits it.
-        var next = 1000;
+        // Fill the root leaf from the front until the next key splits it in the middle and grows a
+        // new root above it.
+        var next = 5000;
         while (true)
         {
             var (grown, _) = Crash(bytes, table, int.MaxValue, tag => tag.Insert(IntegerKey(next), next));
             if (grown.Length > bytes.Length)
                 break;
             bytes = grown;
-            next++;
+            next -= 2;
         }
         AssertEveryCrashKeeps(bytes, table, tag => tag.Insert(IntegerKey(next), next), adds: (IntegerKey(next), next));
-
-        // Two leaves now: empty the right one, key by key; its last removal drops it from the tree.
         bytes = Crash(bytes, table, int.MaxValue, tag => tag.Insert(IntegerKey(next), next)).Bytes;
         Assert.Equal(2, Leaves(bytes, table).Count);
+
+        // Keep filling the left leaf from the front until it splits in the middle too: keys move to
+        // a new page, and the root gains an entry for it.
+        var gap = next - 1;
+        while (true)
+        {
+            var (grown, _) = Crash(bytes, table, int.MaxValue, tag => tag.Insert(IntegerKey(gap), gap));
+            if (grown.Length > bytes.Length)
+                break;
+            bytes = grown;
+            gap--;
+        }
+        AssertEveryCrashKeeps(bytes, table, tag => tag.Insert(IntegerKey(gap), gap), adds: (IntegerKey(gap), gap));
+        bytes = Crash(bytes, table, int.MaxValue, tag => tag.Insert(IntegerKey(gap), gap)).Bytes;
+        Assert.Equal(3, Leaves(bytes, table).Count);
+
+        // Empty the last leaf, key by key; its last removal drops it from the tree.
         while (LastLeafCount(bytes, table) > 1)
         {
             var last = Entries(bytes, table)[^1];
