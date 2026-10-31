@@ -49,6 +49,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
     bool IMaintainedIndex.CanMaintain => MaintainRefusal is null;
     bool IMaintainedIndex.CanMaintainAfterRebuild => MaintainRefusal is null || _refusedOnlyForOrder;
+    string? IMaintainedIndex.CannotMaintainReason => MaintainRefusal;
     private bool _refusedOnlyForOrder;
     private bool _rebuildExpected;
 
@@ -125,7 +126,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
         Tags = LoadTags();
         if (!OpenedForWriting)
             return;
-        if (FirstRefusal() is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
+        // Recomputed on every reload, so an index rebuilt into byte order is writable again, and one
+        // FoxPro rebuilt with a collation stops writes.
+        _refusedOnlyForOrder = false;
+        MaintainRefusal = FirstRefusal();
+        if (MaintainRefusal is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
                 "Rebuild the tag in FoxPro with MACHINE collation, or open with allowUnmaintainedIndexes: true only if it will be rebuilt (REINDEX) before it's used.",
                 _table?.FilePath);

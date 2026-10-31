@@ -284,6 +284,7 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyCustomers();
         SetHeaderByte("Custnum.ntx", 280, 1);
+        EmptyTree("Custnum.ntx"); // its ascending keys would be out of order for a descending index
         using (var table = IndexedTables.OpenWithIndexes(path))
         {
             table.RebuildIndex();
@@ -370,6 +371,187 @@ public sealed class NtxWriteTests : IDisposable
         Assert.IsType<InvalidDataException>(error.InnerException);
     }
 
+    // ---- the index lock and what can't be maintained --------------------------------------
+
+    // Clipper's index lock is one byte at 1,000,000,000 of the .ntx itself (Harbour's
+    // IDX_LOCKPOS_CLIPPER); while another program holds it, no key may change.
+    [Fact]
+    public void A_held_index_lock_holds_the_write_back()
+    {
+        var path = CopyCustomers();
+        var ntx = Path.Combine(_dir.FullName, "Custnum.ntx");
+        using var table = OpenWritable(path);
+        table.LockTimeout = TimeSpan.FromMilliseconds(200);
+
+        using (var other = new FileStream(ntx, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            var locks = new DbfLocks(other, ntx);
+            using (locks.Range((1_000_000_000, 1), DbfErrorCode.TableLocked, "test"))
+            {
+                var error = Assert.Throws<DbfException>(() => table.Append(Customer(table, 4242, "Lock", "Held")));
+                Assert.Equal(DbfErrorCode.IndexDamaged, error.Code); // the record went in first: the index needs a rebuild
+                Assert.Equal(DbfErrorCode.TableLocked, Assert.IsType<DbfException>(error.InnerException).Code);
+            }
+            DbfLocks.CloseWhenSafe(other);
+        }
+
+        table.RebuildIndex();
+        table.Append(Customer(table, 4343, "Lock", "Free"));
+        table.Dispose();
+        AssertIndexesMatchTable(path);
+    }
+
+    [Fact]
+    public void The_lock_is_Clippers_byte_or_Harbours_large_file_range()
+    {
+        var path = CopyCustomers();
+        using var table = DbfTable.Open(path);
+        using (var index = NtxIndex.Open(Path.Combine(_dir.FullName, "Custnum.ntx"), table: table))
+            Assert.Equal((1_000_000_000L, 1L), index.Tag.LockRange);
+
+        EditHeader("Custnum.ntx", header => header[1] |= 0x02); // 0x0200: Harbour's large-file flag
+        using (var index = NtxIndex.Open(Path.Combine(_dir.FullName, "Custnum.ntx"), table: table))
+            Assert.Equal((0x7FFF_FFFF_0000_0001L, 0x1_0001L), index.Tag.LockRange);
+    }
+
+    // A national sort order leaves keys out of byte order; the file doesn't say so, but the keys do.
+    [Fact]
+    public void Keys_out_of_byte_order_refuse_maintenance()
+    {
+        var path = CopyCustomers();
+        var ntx = Path.Combine(_dir.FullName, "Custname.ntx");
+        var bytes = File.ReadAllBytes(ntx);
+        var root = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
+        // Swap the first two items' slots: same keys, now the second sorts before the first.
+        var slot0 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 2));
+        var slot1 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 4));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root + 2), slot1);
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root + 4), slot0);
+        File.WriteAllBytes(ntx, bytes);
+
+        AssertRefused(path, "Custname.ntx", "byte order");
+    }
+
+    [Fact]
+    public void An_ascending_tree_marked_descending_is_refused()
+    {
+        var path = CopyCustomers();
+        SetHeaderByte("Custnum.ntx", 280, 1);
+        AssertRefused(path, "Custnum.ntx", "byte order");
+    }
+
+    // STR() of a double keeps about 15 significant digits; an N(18,2) key holds 17.
+    [Theory]
+    [InlineData(18, 2, true)]  // 17 digits
+    [InlineData(16, 0, true)]  // 16 digits
+    [InlineData(16, 2, false)] // 15 digits
+    [InlineData(15, 0, false)]
+    public void Numeric_keys_wider_than_a_double_refuse_maintenance(int keyLength, int decimals, bool refused)
+    {
+        var path = CopyCustomers();
+        EditHeader("Custnum.ntx", header =>
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(12), (ushort)(keyLength + 8)); // item length
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(14), (ushort)keyLength);
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(16), (ushort)decimals);
+            BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(18), 30); // max keys
+        });
+        EmptyTree("Custnum.ntx");
+
+        using var table = DbfTable.Open(path);
+        using var index = NtxIndex.Open(Path.Combine(_dir.FullName, "Custnum.ntx"), table: table);
+        Assert.Equal('N', index.Tag.KeyType);
+        var reason = ((IMaintainedIndex)index).CannotMaintainReason;
+        if (refused)
+            Assert.Contains("digits", reason);
+        else
+            Assert.Null(reason);
+    }
+
+    // Custom (0x20) and changes-only (0x40) indexes get their keys from the program, not the table.
+    [Theory]
+    [InlineData(0x20)]
+    [InlineData(0x40)]
+    public void Custom_and_changes_only_indexes_are_refused(int flag)
+    {
+        var path = CopyCustomers();
+        SetHeaderByte("Custname.ntx", 0, (byte)(0x06 | flag));
+        AssertRefused(path, "Custname.ntx", flag == 0x20 ? "custom" : "changes-only");
+    }
+
+    // Another program can turn an index custom after the table opened it: writes stop, and a
+    // rebuild leaves that index alone while it rebuilds the rest.
+    [Fact]
+    public void An_index_made_custom_after_opening_stops_writes_and_is_left_out_of_rebuilds()
+    {
+        var path = CopyCustomers();
+        var ntx = Path.Combine(_dir.FullName, "Custname.ntx");
+        using var table = OpenWritable(path);
+        table.Append(Customer(table, 777, "Before", "Custom"));
+
+        using (var other = new FileStream(ntx, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            other.Position = 0;
+            other.WriteByte(0x26);
+        }
+        var custom = File.ReadAllBytes(ntx);
+
+        var error = Assert.Throws<DbfException>(() => table.Append(Customer(table, 778, "After", "Custom")));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        Assert.Contains("custom", error.Diagnostic);
+
+        table.RebuildIndex();
+        Assert.Equal(custom, File.ReadAllBytes(ntx));
+        Assert.Throws<DbfException>(() => table.Append(Customer(table, 779, "Still", "Custom")));
+    }
+
+    // Two children of one page pointing at the same leaf is damage: changing that leaf would change
+    // both branches, and a merge would free a live page. The write stops before touching anything.
+    [Fact]
+    public void Two_children_sharing_a_leaf_fail_the_write_as_damage()
+    {
+        var path = CopyTenThousand();
+        var ntx = Path.Combine(_dir.FullName, "10kName.ntx");
+        var bytes = File.ReadAllBytes(ntx);
+
+        // Down the leftmost branch to the page whose children are leaves.
+        int ChildAt(int page, int slot) =>
+            (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(page + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(page + 2 + slot * 2))));
+        var parent = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
+        while (ChildAt(ChildAt(parent, 0), 0) != 0)
+            parent = ChildAt(parent, 0);
+        var leaf = ChildAt(parent, 0);
+        var record = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(leaf + BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(leaf + 2)) + 4));
+        var slot1 = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(parent + 4));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(parent + slot1), (uint)leaf);
+        File.WriteAllBytes(ntx, bytes);
+
+        using var table = OpenWritable(path);
+        var values = table.Read(record - 1).Values.ToArray();
+        values[Field(table, "LAST")] = "Zzz";
+        var error = Assert.Throws<DbfException>(() => table.Update(record - 1, values));
+        Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
+        Assert.Contains("twice", Assert.IsType<InvalidDataException>(error.InnerException).Message);
+        var after = File.ReadAllBytes(ntx);
+        Assert.Equal(bytes.AsSpan(8, 4).ToArray(), after.AsSpan(8, 4).ToArray()); // nothing freed
+        Assert.Equal(bytes.AsSpan(leaf, PageSize).ToArray(), after.AsSpan(leaf, PageSize).ToArray());
+    }
+
+    private static void AssertRefused(string path, string ntxName, string reason)
+    {
+        var ntx = Path.Combine(Path.GetDirectoryName(path)!, ntxName);
+        using (var table = DbfTable.Open(path))
+        using (var index = NtxIndex.Open(ntx, table: table))
+        {
+            Assert.False(((IMaintainedIndex)index).CanMaintain);
+            Assert.Contains(reason, ((IMaintainedIndex)index).CannotMaintainReason);
+        }
+
+        using var writable = DbfTable.Open(path, writable: true);
+        var error = Assert.Throws<DbfException>(() => writable.MaintainIndex(ntx));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+    }
+
     // ---- checks ---------------------------------------------------------------------------
 
     /// <summary>
@@ -418,6 +600,18 @@ public sealed class NtxWriteTests : IDisposable
     }
 
     private void SetHeaderByte(string name, int offset, byte value) => EditHeader(name, header => header[offset] = value);
+
+    // Makes the root an empty leaf, so the tree holds no keys (the pages below it are left unused).
+    private void EmptyTree(string name)
+    {
+        var file = Path.Combine(_dir.FullName, name);
+        var bytes = File.ReadAllBytes(file);
+        var root = (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4));
+        BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(root), 0);
+        var first = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(root + 2));
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(root + first), 0);
+        File.WriteAllBytes(file, bytes);
+    }
 
     private void EditHeader(string name, Action<byte[]> edit)
     {

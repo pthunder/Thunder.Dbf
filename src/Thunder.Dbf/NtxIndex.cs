@@ -89,7 +89,12 @@ public sealed partial class NtxIndex : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (!_leaveOpen)
+        if (_leaveOpen)
+            return;
+        // On Linux closing any handle drops this process's locks on the file, another table's too.
+        if (_stream is FileStream file)
+            DbfLocks.CloseWhenSafe(file);
+        else
             _stream.Dispose();
     }
 
@@ -167,6 +172,9 @@ public sealed partial class NtxTag
 
     internal int MaxKeys { get; private init; }
 
+    /// <summary>The header's signature flags (bytes 0-1), maintenance modes included.</summary>
+    internal ushort Signature { get; private init; }
+
     /// <summary>Bytes per item: child pointer (4), record number (4), key, and any padding the writer added.</summary>
     internal int ItemLength { get; private init; }
 
@@ -204,6 +212,7 @@ public sealed partial class NtxTag
         return new NtxTag(index, largeFile ? root * (long)NtxIndex.PageSize : root, largeFile, tagName)
         {
             KeyType = table is null ? 'C' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
+            Signature = flags,
             KeyLength = keyLength,
             KeyDecimals = keyDecimals,
             MaxKeys = maxKeys,

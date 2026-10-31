@@ -75,6 +75,19 @@ internal sealed class DbfLocks
             _registry = FileRegistry.For(file.Name);
     }
 
+    /// <summary>
+    /// Locks for a file that isn't a table (an index), where the caller names every range itself
+    /// through <see cref="Range"/>. Same registry, timeout and RequireLocks rules as a table's.
+    /// </summary>
+    public DbfLocks(FileStream? file, string? path)
+    {
+        _file = file;
+        _path = path;
+        Scheme = DbfLockScheme.Clipper;
+        if (file is not null)
+            _registry = FileRegistry.For(file.Name);
+    }
+
     public DbfLockScheme Scheme { get; }
 
     /// <summary>The scheme <see cref="DbfLockScheme.Auto"/> stands for on this table.</summary>
@@ -157,6 +170,9 @@ internal sealed class DbfLocks
             throw;
         }
     }
+
+    /// <summary>An exclusive lock on any range of the file, for formats with their own lock positions.</summary>
+    public DbfLock Range((long Offset, long Length) range, DbfErrorCode code, string message) => Take(range, code, message);
 
     // ---- taking and releasing -----------------------------------------------------------
 

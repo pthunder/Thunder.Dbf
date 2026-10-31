@@ -298,6 +298,18 @@ public sealed partial class DbfTable : IDisposable
                 "Call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
     }
 
+    // An attached index another program has since rebuilt into something Thunder.Dbf can't keep (a
+    // custom .ntx, say) stops writes, like one that was that way at open. Its tags are left alone.
+    private void ThrowIfIndexCantBeMaintained()
+    {
+        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain) is not { } index)
+            return;
+        throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+            "One of this table's indexes was changed by another program into a kind Thunder.Dbf can't keep up to date.",
+            "Rebuild it in the legacy app, or open with allowUnmaintainedIndexes: true if it will be rebuilt before use.", _path,
+            diagnostic: index.CannotMaintainReason);
+    }
+
     private static IDbfIndex OpenAnyIndexReadOnly(string path)
     {
         var stream = DbfException.OpenFile(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -432,6 +444,7 @@ public sealed partial class DbfTable : IDisposable
         ThrowIfPackUnfinished();
         ThrowIfIndexesNeedRebuild();
         ThrowIfIndexAppeared();
+        ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
                 structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
             throw blocker;

@@ -112,6 +112,9 @@ internal interface IMaintainedIndex : IDisposable
     {
     }
 
+    /// <summary>Why <see cref="CanMaintain"/> is false, for logs (it may name the tag); null when it isn't.</summary>
+    string? CannotMaintainReason => null;
+
     /// <summary>Re-reads the tag list, in case another program changed the file.</summary>
     void ReloadTags();
 
