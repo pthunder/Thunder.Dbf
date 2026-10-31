@@ -135,7 +135,13 @@ public sealed class UnfinishedAppendTests : IDisposable
         Assert.Equal(cutOff, new FileInfo(path).Length);
 
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
             Assert.Equal(2, table.RecordCount);
+            // Reported, and kept: the removed record's bytes are beside the table.
+            Assert.Equal(1, table.CutOffRecordsRemoved);
+            Assert.NotNull(table.CutOffBackupPath);
+            Assert.Equal([(byte)' ', .. "Cut off   "u8, 0x1A], File.ReadAllBytes(table.CutOffBackupPath!));
+        }
         Assert.Equal(committed + 1, new FileInfo(path).Length);
         Assert.Equal(0x1A, SharedFile.ReadAllBytes(path)[^1]);
         using var reopened = DbfTable.Open(path);
@@ -145,7 +151,7 @@ public sealed class UnfinishedAppendTests : IDisposable
     [Fact]
     public void Many_records_past_the_count_are_all_found()
     {
-        var (path, length, committed) = TwoRecords();
+        var (path, _, committed) = TwoRecords();
         using (var file = SharedFile.OpenWrite(path))
         {
             file.SetLength(committed);
@@ -162,7 +168,7 @@ public sealed class UnfinishedAppendTests : IDisposable
     [Fact]
     public void A_repair_rebuilds_the_index_a_cut_off_writer_had_already_reached()
     {
-        var (path, length, committed) = TwoRecords();
+        var (path, _, committed) = TwoRecords();
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
             table.CreateIndexTag("NAME", "NAME");
         using (var file = SharedFile.OpenWrite(path))

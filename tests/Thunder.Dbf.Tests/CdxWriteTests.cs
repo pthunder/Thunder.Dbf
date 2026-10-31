@@ -378,7 +378,7 @@ public sealed partial class CdxWriteTests : IDisposable
         var (dbf, cdx) = People();
         using var table = DbfTable.Open(dbf);
         var bytes = SharedFile.ReadAllBytes(cdx);
-        var (rootOffset, tagOffset) = (0, 0);
+        int rootOffset, tagOffset;
         using (var index = CdxIndex.Open(cdx, table: table))
         {
             tagOffset = (int)index["STATE"].HeaderOffset;

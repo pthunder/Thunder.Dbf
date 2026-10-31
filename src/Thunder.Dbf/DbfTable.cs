@@ -237,7 +237,7 @@ public sealed partial class DbfTable : IDisposable
             return index.Tags.Count > 0 && index.Tags.All(tag =>
             {
                 var names = DbfExpression.FieldNamesIn(tag.Expression);
-                var filter = tag.ForExpression is null ? (IReadOnlyCollection<string>)[] : DbfExpression.FieldNamesIn(tag.ForExpression);
+                IReadOnlyCollection<string> filter = tag.ForExpression is null ? [] : DbfExpression.FieldNamesIn(tag.ForExpression);
                 return names.Count > 0 && names.Concat(filter).All(fields.Contains);
             });
         }
@@ -324,10 +324,11 @@ public sealed partial class DbfTable : IDisposable
             return false;
         {
             Stream? stream = null;
+            IDbfIndex? index = null;
             try
             {
                 stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-                IDbfIndex index = OpenAnyIndex(file, stream, Encoding, this);
+                index = OpenAnyIndex(file, stream, Encoding, this);
                 if (index is IMaintainedIndex maintained
                     && (maintained.CanMaintain || ((acceptAfterRebuild || forJournal) && maintained.CanMaintainAfterRebuild)))
                 {
@@ -344,7 +345,8 @@ public sealed partial class DbfTable : IDisposable
                         HasMaintainedStructuralCdx = true;
                         _structuralCdxRefusal = null;
                     }
-                    stream = null; // the index owns it now
+                    stream = null; // the table owns the index, and the index its stream, now
+                    index = null;
                     return true;
                 }
                 if (index is IMaintainedIndex refused && IsStructuralCdx(file))
@@ -352,8 +354,6 @@ public sealed partial class DbfTable : IDisposable
                     _structuralCdxRefusal = refused.CannotMaintainReason;
                     _structuralCdxRebuildable = refused.CanMaintainAfterRebuild;
                 }
-                index.Dispose();
-                stream = null;
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException or UnauthorizedAccessException or FormatException)
             {
@@ -361,6 +361,7 @@ public sealed partial class DbfTable : IDisposable
             }
             finally
             {
+                index?.Dispose();
                 stream?.Dispose();
             }
             return false;
@@ -656,16 +657,39 @@ public sealed partial class DbfTable : IDisposable
             || (takeOverCdx && !(_maintainFoxProIndexes && _structuralCdxRebuildable && FindCompanion(_path!, ".cdx") is not null)))
             return;
 
+        // The removed bytes are kept beside the table first (TABLE.DBF.cutoff-<time>), so nothing is lost
+        // for good, and the count is reported (CutOffRecordsRemoved, and Check() beforehand).
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+        var removed = RecordsPastCount();
+        var cutOff = new byte[_stream.Length - dataEnd];
+        _stream.Position = dataEnd;
+        _stream.ReadExactly(cutOff);
+        var backup = $"{_path}.cutoff-{DateTime.UtcNow:yyyyMMdd'T'HHmmss'Z'}";
+        using (var copy = DbfException.OpenFile(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            copy.Write(cutOff);
+            FlushToDisk(copy);
+        }
         _stream.SetLength(dataEnd);
         _stream.Position = dataEnd;
         _stream.WriteByte(EndOfFile);
         FlushToDisk(_stream);
+        CutOffRecordsRemoved = removed;
+        CutOffBackupPath = backup;
         if (takeOverCdx)
             MaintainIndex(FindCompanion(_path!, ".cdx")!, rebuild: true); // rebuilds every index the table keeps
         else if (MaintainsIndex)
             RebuildIndex();
     }
+
+    /// <summary>
+    /// How many records an append cut off before its count had left past the end, which this writable
+    /// exclusive open took off (0 when none). Their bytes are kept in <see cref="CutOffBackupPath"/>.
+    /// </summary>
+    public long CutOffRecordsRemoved { get; private set; }
+
+    /// <summary>Where the bytes of records taken off on opening were kept (TABLE.DBF.cutoff-&lt;UTC time&gt;), or null.</summary>
+    public string? CutOffBackupPath { get; private set; }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>
     internal string? FilePath => _path;
@@ -1474,7 +1498,7 @@ public sealed partial class DbfTable : IDisposable
         }
         catch (InvalidDataException ex)
         {
-            throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's journal holds a note in a format this version doesn't read.",
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's journal holds a note this version can't read (another format, or damaged).",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears it.", _path, ex);
         }
         if (entry is null)
@@ -1501,8 +1525,9 @@ public sealed partial class DbfTable : IDisposable
             var noted = (change.OldKey ?? change.NewKey)?.Length;
             if (candidates.Count != 1 || (record is not null && noted is { } length && candidates[0].Tag.KeyFor(record).Length != length))
                 throw new DbfException(DbfErrorCode.IndexWouldGoStale,
-                    $"A Thunder.Dbf write to record {entry.RecordNumber} was cut off while changing keys in {change.IndexFile} (tag {change.Tag}), which this table doesn't keep, so it can't be finished here.",
-                    "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
+                    $"A Thunder.Dbf write to record {entry.RecordNumber} was cut off while changing keys in an index this table doesn't keep, so it can't be finished here.",
+                    "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path,
+                    diagnostic: $"journal names index file '{change.IndexFile}', tag '{change.Tag}'");
             matched.Add((change, candidates[0].Tag));
         }
 
@@ -1538,25 +1563,15 @@ public sealed partial class DbfTable : IDisposable
         var files = TagsWithFiles().Select(t => t.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (entry.Changes.FirstOrDefault(c => !files.Contains(c.IndexFile)) is { } missing)
             throw new DbfException(DbfErrorCode.IndexWouldGoStale,
-                $"A Thunder.Dbf append from record {entry.RecordNumber} was cut off while keeping {missing.IndexFile}, which this table doesn't keep, so it can't be finished here.",
-                "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
+                $"A Thunder.Dbf append from record {entry.RecordNumber} was cut off while keeping an index this table doesn't keep, so it can't be finished here.",
+                "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path,
+                diagnostic: $"journal names index file '{missing.IndexFile}'");
 
         if (RecordCount < entry.RecordNumber)
         {
             if (RecordsPastCount() == 0)
                 return;
-            var timeout = Locks.Timeout;
-            Locks.Timeout = TimeSpan.Zero;
-            DbfLock append;
-            try
-            {
-                append = Locks.Append();
-            }
-            finally
-            {
-                Locks.Timeout = timeout;
-            }
-            using (append)
+            using (Locks.Append(TimeSpan.Zero))
             {
                 var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
                 _stream.SetLength(dataEnd);
@@ -1593,19 +1608,8 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
-    private DbfLock TryLockRecordNow(int recordNumber)
-    {
-        var timeout = Locks.Timeout;
-        Locks.Timeout = TimeSpan.Zero;
-        try
-        {
-            return Locks.Record(recordNumber, "finished after a cut-off write");
-        }
-        finally
-        {
-            Locks.Timeout = timeout;
-        }
-    }
+    private DbfLock TryLockRecordNow(int recordNumber) =>
+        Locks.Record(recordNumber, "finished after a cut-off write", TimeSpan.Zero);
 
     // An index attached on probation (out of step with the table when it opened, while a note was
     // waiting) is checked again once the note is finished: if it still doesn't match, writes stop

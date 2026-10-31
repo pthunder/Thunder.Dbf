@@ -172,6 +172,8 @@ public sealed partial class DbfTable
             }
             catch (Exception ex) when (ex is FormatException or NotSupportedException or InvalidOperationException or ArgumentException)
             {
+                // The expression parser's and evaluator's own messages name fields, functions and limits,
+                // never a path (guideline 1.2), and they're what tells the user what to change.
                 throw new DbfException(DbfErrorCode.InvalidValue, $"The key expression can't be evaluated: {ex.Message}",
                     "Use the table's fields, with UPPER(), DTOS() or STR(), joined with +.", _path, ex);
             }
@@ -184,6 +186,9 @@ public sealed partial class DbfTable
                 dry.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
             }
 
+            // The dry run above checked everything a refusal could come from. Only an I/O failure can
+            // still stop AddTag, and then a new .cdx stays behind, empty but valid: FoxPro opens it, and
+            // a later CreateIndexTag adds to it.
             var index = existing ?? CreateStructuralCdx();
             index.AddTag(this, tagName, expression, forExpression, keyLength, unique, candidate, descending, nullableKey);
         }

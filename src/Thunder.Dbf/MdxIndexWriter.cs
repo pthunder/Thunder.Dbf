@@ -142,7 +142,7 @@ public sealed partial class MdxTag
                 if (value is not (DateOnly or DateTime or null))
                     throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a date.");
                 var key = new byte[8];
-                var date = value switch { DateOnly d => d, DateTime t => DateOnly.FromDateTime(t), _ => (DateOnly?)null };
+                DateOnly? date = value switch { DateOnly d => d, DateTime t => DateOnly.FromDateTime(t), _ => null };
                 BinaryPrimitives.WriteDoubleLittleEndian(key, date is { } day ? MdxKeys.JulianDay(day) : 0d);
                 return key;
             }
@@ -273,10 +273,11 @@ public sealed partial class MdxTag
 
     private enum Search { Found, KeepLooking, Stop }
 
-    /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
+    /// <summary>True when the tag holds exactly this key for this record.</summary>
     internal bool Contains(byte[] key, int recordNumber) =>
         Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found;
 
+    /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
     internal bool Remove(byte[] key, int recordNumber)
     {
         var path = new List<(int Page, int Slot)>();
