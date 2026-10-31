@@ -151,7 +151,7 @@ internal sealed class ProblemExceptionHandler(IProblemDetailsService problems, S
             case DbfException dbf:
                 // The library explains itself to whoever runs the server; the log gets that version.
                 var level = dbf.HttpStatus >= 500 ? LogLevel.Error : LogLevel.Warning;
-                logger.Log(level, dbf, "{Code} on {Method} {Path}", dbf.Code, context.Request.Method, context.Request.Path);
+                logger.Log(level, dbf, "{Code} on {Method} {Path}", dbf.Code, ForLog(context.Request.Method), ForLog(context.Request.Path.Value));
                 problem = Problems.Create(dbf.HttpStatus, Problems.TitleFor(dbf.Code), scrubber.Scrub(MessageOf(dbf)),
                     dbf.Code.ToString(), scrubber.Scrub(dbf.Hint));
                 break;
@@ -161,7 +161,7 @@ internal sealed class ProblemExceptionHandler(IProblemDetailsService problems, S
                 break;
 
             default:
-                logger.LogError(exception, "Unhandled error on {Method} {Path}", context.Request.Method, context.Request.Path);
+                logger.LogError(exception, "Unhandled error on {Method} {Path}", ForLog(context.Request.Method), ForLog(context.Request.Path.Value));
                 problem = Problems.Create(StatusCodes.Status500InternalServerError, "Something went wrong on the server.",
                     "The details are in the server log under this traceId.", "ServerError");
                 break;
@@ -169,6 +169,21 @@ internal sealed class ProblemExceptionHandler(IProblemDetailsService problems, S
 
         context.Response.StatusCode = problem.Status ?? StatusCodes.Status500InternalServerError;
         return await problems.TryWriteAsync(new ProblemDetailsContext { HttpContext = context, ProblemDetails = problem });
+    }
+
+    // The method and path come from the caller, and a path can carry an encoded line break, which
+    // would let a request write a fake line into a plain-text log. Control characters become '?',
+    // and very long paths are cut short.
+    internal static string ForLog(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "";
+        var text = value.Length > 300 ? value[..300] + "..." : value;
+        return string.Create(text.Length, text, (span, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+                span[i] = char.IsControl(source[i]) ? '?' : source[i];
+        });
     }
 
     // DbfException.Message is "message (path) hint"; peel off the hint and the path to get the message alone.

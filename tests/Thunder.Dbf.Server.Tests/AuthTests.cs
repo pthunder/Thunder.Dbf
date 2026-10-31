@@ -161,4 +161,15 @@ public sealed class AuthTests : IDisposable
         Assert.Equal(0, HashKeyCommand.Run(["-"], new StringReader(key + "\n"), piped, TextWriter.Null));
         Assert.Equal(hash, piped.ToString().Trim());
     }
+
+    [Theory]
+    [InlineData("/tables/x\n2026-10-30 ERROR forged line", "/tables/x?2026-10-30 ERROR forged line")]
+    [InlineData("/tables/\r\u001b[31mred", "/tables/??[31mred")]
+    [InlineData(null, "")]
+    public void Request_details_cant_forge_log_lines(string? path, string logged) =>
+        Assert.Equal(logged, ProblemExceptionHandler.ForLog(path));
+
+    [Fact]
+    public void Very_long_paths_are_cut_short_in_the_log() =>
+        Assert.Equal(303, ProblemExceptionHandler.ForLog(new string('a', 5000)).Length);
 }
