@@ -4,6 +4,8 @@
 
 Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read FoxPro or dBASE files in .NET 10; replacing the 32-bit Visual FoxPro OLE DB or Jet dBASE driver; reading GoldMine CRM data (CONTACT1.DBF with .MDX); converting DBF to SQL Server, PostgreSQL or SQLite; syncing a live dBASE app with SQL; CSV to DBF; seeking through MDX, NTX or CDX indexes; building a web API on top of FoxPro data safely.
 
+Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add package Thunder.Dbf.Sql` (SQL migration and live bridge), `dotnet tool install -g thunder-dbf` (command line). The web service is a self-contained download on each GitHub release (https://github.com/pthunder/Thunder.Dbf/releases). Current version: 0.1.0.
+
 ## Start here
 
 - [ProjectThunder](https://projectthunder.com): the people behind Thunder.Dbf
