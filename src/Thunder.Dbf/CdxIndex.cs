@@ -14,8 +14,9 @@ using System.Text;
 namespace Thunder.Dbf;
 
 /// <summary>
-/// A FoxPro / Visual FoxPro compound index (.cdx) or compact single index (.idx). Read-only.
-/// Also reads the .cdx files Clipper's SIx driver, Harbour and X# write.
+/// A FoxPro / Visual FoxPro compound index (.cdx) or compact single index (.idx). Also reads the
+/// .cdx files Clipper's SIx driver, Harbour and X# write. A table opened for writing keeps its
+/// .cdx and .idx files up to date (see docs/formats/cdx.md, "Writing").
 /// </summary>
 public sealed partial class CdxIndex : IDisposable
 {
@@ -25,6 +26,7 @@ public sealed partial class CdxIndex : IDisposable
 
     // Index option flags (tag header byte 14).
     internal const byte OptionUnique = 0x01;
+    internal const byte OptionCandidate = 0x04; // Visual FoxPro: CANDIDATE and PRIMARY KEY tags
     internal const byte OptionForFilter = 0x08;
     internal const byte OptionCompact = 0x20;
     internal const byte OptionCompound = 0x40;
@@ -66,7 +68,10 @@ public sealed partial class CdxIndex : IDisposable
     /// <param name="table">The table the index belongs to. A .cdx doesn't record its key types:
     /// FoxPro evaluates each key expression to find out. With the table, each expression is evaluated
     /// on a blank record the same way, and numeric, date and logical keys decode to numbers,
-    /// <see cref="DateOnly"/> and bool. Without it, every key reads as a string.</param>
+    /// <see cref="DateOnly"/> and bool. Without it, every key reads as a string. With a table opened
+    /// from a file and a writable <see cref="FileStream"/> (how a writable table opens its indexes),
+    /// the index is opened to be kept up to date: every tag must be one Thunder.Dbf can maintain
+    /// exactly, or opening throws <see cref="NotSupportedException"/> saying why.</param>
     public static CdxIndex Open(string path, Encoding? encoding = null, DbfTable? table = null)
     {
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -110,28 +115,34 @@ public sealed partial class CdxIndex : IDisposable
         var index = new CdxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage), pageLength)
         {
             IsCompound = (options & OptionCompound) != 0,
+            _table = table,
         };
+        index.Tags = index.LoadTags();
+        if (index.OpenedForWriting)
+            index.PrepareForWriting();
+        return index;
+    }
 
-        if (!index.IsCompound)
+    private IReadOnlyList<CdxTag> LoadTags()
+    {
+        if (!IsCompound)
         {
-            var name = stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
-            index.Tags = [CdxTag.Load(index, name, headerOffset: 0, table)];
-            return index;
+            var name = _stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
+            return [CdxTag.Load(this, name, headerOffset: 0, _table)];
         }
 
         // The header at offset 0 is itself a tag: its keys are tag names and its "record numbers"
         // are the offsets of their headers. FoxPro lists tags in creation order, which is header order.
-        var directory = CdxTag.LoadDirectory(index);
+        var directory = CdxTag.LoadDirectory(this);
         var tags = new List<CdxTag>();
         var seen = new HashSet<long>();
         foreach (var entry in directory.Entries())
         {
             if (!seen.Add(entry.RecordNumber))
                 throw new InvalidDataException($"Two .cdx tags share the header at offset {entry.RecordNumber}; the index is corrupt.");
-            tags.Add(CdxTag.Load(index, ((string)entry.Key!).Trim(' ', '\0'), entry.RecordNumber, table));
+            tags.Add(CdxTag.Load(this, ((string)entry.Key!).Trim(' ', '\0'), entry.RecordNumber, _table));
         }
-        index.Tags = tags.OrderBy(t => t.HeaderOffset).ToList().AsReadOnly();
-        return index;
+        return tags.OrderBy(t => t.HeaderOffset).ToList().AsReadOnly();
     }
 
     /// <summary>Finds the structural .cdx next to a table (same name), which FoxPro opens with the table.</summary>
@@ -200,12 +211,18 @@ public sealed partial class CdxTag
     public int KeyLength { get; private init; }
     public bool IsDescending { get; private init; }
     public bool IsUnique { get; private init; }
+
+    /// <summary>True for a Visual FoxPro CANDIDATE (or PRIMARY KEY) tag: every record is indexed and no two may share a key.</summary>
+    public bool IsCandidate { get; private init; }
     public string Expression { get; private init; } = "";
     public string? ForExpression { get; private init; }
 
     /// <summary>True when keys were upper-cased as they were stored (a CLIP / Harbour extension).</summary>
     internal bool IgnoreCase { get; private init; }
     internal long HeaderOffset { get; }
+
+    /// <summary>A collation name or code page some writer stored in the tag header, or null when there's none.</summary>
+    internal string? CollationMarker { get; private init; }
 
     private int PageLength => _index.PageLength;
     private byte TrailByte => KeyType == 'C' ? (byte)' ' : (byte)0;
@@ -242,6 +259,8 @@ public sealed partial class CdxTag
             KeyLength = keyLength,
             IsDescending = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(DescendingOffset)) != 0,
             IsUnique = (options & CdxIndex.OptionUnique) != 0,
+            IsCandidate = (options & CdxIndex.OptionCandidate) != 0,
+            CollationMarker = directory ? null : ReadCollationMarker(header),
             Expression = expression,
             ForExpression = forExpression.Length > 0 ? forExpression : null,
             IgnoreCase = header[15] is 0x01 or 0x21 && header[IgnoreCaseOffset] == 1,
@@ -261,7 +280,19 @@ public sealed partial class CdxTag
         return IndexKeys.ReadText(header.AsSpan(PoolOffset + position, length > 0 ? length : PoolLength - position), encoding);
     }
 
-    /// <summary>Every key in index order.</summary>
+    // Harbour's reserved areas where Advantage-style writers name a collation (the "lang" field at
+    // 92, 26 bytes) and Visual FoxPro a code page (494, 5 bytes). FoxPro's MACHINE order leaves both empty.
+    private static string? ReadCollationMarker(byte[] header)
+    {
+        var lang = header.AsSpan(92, 26);
+        var codePage = header.AsSpan(494, 5);
+        if (lang.IndexOfAnyExcept((byte)0) < 0 && codePage.IndexOfAnyExcept((byte)0) < 0)
+            return null;
+        var text = Encoding.ASCII.GetString(lang).Trim('\0', ' ');
+        return text.Length > 0 ? text : $"code page bytes {Convert.ToHexString(codePage)}";
+    }
+
+    /// <summary>Every key in index order (highest first for descending tags).</summary>
     public IEnumerable<IndexEntry> Entries() => Walk(probe: null).Select(h => h.Entry);
 
     /// <summary>
@@ -285,14 +316,21 @@ public sealed partial class CdxTag
 
     private readonly record struct Hit(IndexEntry Entry, bool Matches);
 
-    // The root is re-read for every walk: a split in the legacy app moves it.
-    private IEnumerable<Hit> Walk(byte[]? probe) =>
-        Walk(BinaryPrimitives.ReadUInt32LittleEndian(_index.Read(HeaderOffset, 4)), probe, position: probe is not null, depth: 0, visited: []);
+    // FoxPro (like Harbour) stores every tree in ascending order; DESCENDING only flips which way
+    // it's read, so FoxPro's own SET ORDER TO ... DESCENDING can flip it back without a rebuild.
+    private IEnumerable<Hit> Walk(byte[]? probe) => Walk(probe, backwards: IsDescending);
 
-    // Like the .mdx walk: interior key i is the highest key under child i, only the leftmost path
+    // The root is re-read for every walk: a split in the legacy app moves it.
+    private IEnumerable<Hit> Walk(byte[]? probe, bool backwards) =>
+        Walk(RootOffset(), probe, position: probe is not null, backwards, depth: 0, visited: []);
+
+    private long RootOffset() => BinaryPrimitives.ReadUInt32LittleEndian(_index.Read(HeaderOffset, 4));
+
+    // Like the .mdx walk: interior key i is the highest key under child i, only the outermost path
     // positions, and every page may be visited once. Leaves also link to their neighbours, but
-    // following the tree keeps one code path and the cycle check simple.
-    private IEnumerable<Hit> Walk(long offset, byte[]? probe, bool position, int depth, HashSet<long> visited)
+    // following the tree keeps one code path and the cycle check simple. Forwards, the walk starts
+    // at the first key at or after the probe; backwards, at the last key at or before it.
+    private IEnumerable<Hit> Walk(long offset, byte[]? probe, bool position, bool backwards, int depth, HashSet<long> visited)
     {
         if (depth > MaxDepth)
             throw new InvalidDataException($"Tag {Name} is deeper than {MaxDepth} levels; the index is probably corrupt.");
@@ -310,9 +348,16 @@ public sealed partial class CdxTag
         if ((attributes & LeafAttribute) != 0)
         {
             var (keys, records) = DecodeLeaf(page, count, offset);
+            if (backwards)
+            {
+                var last = position && probe is not null ? FirstAfter(keys, probe) - 1 : count - 1;
+                for (var i = last; i >= 0; i--)
+                    yield return LeafHit(keys[i], records[i], probe);
+                yield break;
+            }
             var start = position && probe is not null ? FirstAtOrAfter(keys, probe) : 0;
             for (var i = start; i < count; i++)
-                yield return new Hit(new IndexEntry(DecodeKey(keys[i]), records[i]), probe is not null && IndexKeys.CompareCharacter(keys[i], probe) == 0);
+                yield return LeafHit(keys[i], records[i], probe);
             yield break;
         }
 
@@ -324,17 +369,23 @@ public sealed partial class CdxTag
         for (var i = 0; i < count; i++)
             interiorKeys[i] = page.AsSpan(InteriorHeaderLength + i * itemLength, KeyLength).ToArray();
 
-        // Interior items: key, then record number and child offset, both big-endian.
-        var first = position && probe is not null ? FirstAtOrAfter(interiorKeys, probe) : 0;
-        for (var i = first; i < count; i++)
+        // Interior items: key, then record number and child offset, both big-endian. Backwards, no
+        // child after the first one whose highest key is past the probe can hold a match.
+        var first = !(position && probe is not null) ? (backwards ? count - 1 : 0)
+            : backwards ? Math.Min(FirstAfter(interiorKeys, probe), count - 1)
+            : FirstAtOrAfter(interiorKeys, probe);
+        for (var i = first; backwards ? i >= 0 : i < count; i += backwards ? -1 : 1)
         {
             var child = BinaryPrimitives.ReadUInt32BigEndian(page.AsSpan(InteriorHeaderLength + i * itemLength + KeyLength + 4));
             if (child is 0 or NoPage)
                 throw new InvalidDataException($"The index page at offset {offset} has no child for key {i}; tag {Name} is corrupt.");
-            foreach (var hit in Walk(child, probe, position && i == first, depth + 1, visited))
+            foreach (var hit in Walk(child, probe, position && i == first, backwards, depth + 1, visited))
                 yield return hit;
         }
     }
+
+    private Hit LeafHit(byte[] key, int record, byte[]? probe) =>
+        new(new IndexEntry(DecodeKey(key), record), probe is not null && IndexKeys.CompareCharacter(key, probe) == 0);
 
     /// <summary>
     /// Unpacks a leaf. After the 24-byte header come fixed-size entries packing a record number, a
@@ -385,21 +436,25 @@ public sealed partial class CdxTag
         return (keys, records);
     }
 
-    private int FirstAtOrAfter(byte[][] keys, byte[] probe)
+    private static int FirstAtOrAfter(byte[][] keys, byte[] probe) => Partition(keys, probe, inclusive: false);
+
+    private static int FirstAfter(byte[][] keys, byte[] probe) => Partition(keys, probe, inclusive: true);
+
+    // The first key that sorts after the probe (or matches it, unless inclusive), prefix-wise.
+    private static int Partition(byte[][] keys, byte[] probe, bool inclusive)
     {
         int lo = 0, hi = keys.Length;
         while (lo < hi)
         {
             var mid = (lo + hi) / 2;
-            if (Order(IndexKeys.CompareCharacter(keys[mid], probe)) < 0)
+            var order = IndexKeys.CompareCharacter(keys[mid], probe);
+            if (order < 0 || (inclusive && order == 0))
                 lo = mid + 1;
             else
                 hi = mid;
         }
         return lo;
     }
-
-    private int Order(int ascending) => IsDescending ? -ascending : ascending;
 
     // ---- keys -----------------------------------------------------------------------------
 
