@@ -24,7 +24,7 @@ Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add p
   - maintenance: `Pack()` (PACK: removes deleted records, renumbers, rebuilds indexes). `Pack`, `RebuildIndex`, `CreateIndexTag` and `MaintainIndex(path, rebuild: true)` need `DbfTable.Open(path, writable: true, exclusive: true)` (or `Exclusive=true`), like dBASE/FoxPro's USE ... EXCLUSIVE; otherwise `ExclusiveUseRequired`.
   - typed: `ReadAll<T>()`, `Read<T>(i)`, `AppendRecord(item)`, `UpdateRecord(i, item)`, `AsQueryable<T>()` (LINQ; seeks through .mdx tags), `query.Explain()`
   - locks: `LockRecord(i)`, `LockTable()`
-  - crash safety: updates write new keys, then the record, then remove old keys (a crash leaves an extra key, never a missing one); UNIQUE tags change after the record; `UseJournal = true` (or `Journal=true`) notes each update's key changes in `TABLE.DBF.journal` so the next write finishes a cut-off one exactly
+  - crash safety: updates write new keys, then the record, then remove old keys (a crash leaves an extra key, never a missing one); UNIQUE tags change after the record; `UseJournal = true` (or `Journal=true`) notes each update's key changes in `TABLE.DBF.journal` so the next write finishes a cut-off one exactly; `FlushWritesToDisk = false` (`Flush Writes To Disk=false`) skips forced disk flushes for speed, keeping write order, so only a power cut or OS crash can lose recent writes
 - `DbfRecord`: `record["FIELD"]`, `RecordNumber` (1-based), `IsDeleted`, `IsNull(i)`.
 - `DbfException`: `Code` (`DbfErrorCode`), safe `Message` and `Hint`, `HttpStatus`, `Diagnostic` (for logs only).
 - `DbfImport.Plan/FromCsv` (CSV to DBF with the shape worked out from the data) and `DbfExport.ToCsv` (spreadsheet-safe).

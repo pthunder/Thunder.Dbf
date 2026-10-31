@@ -26,6 +26,15 @@ So after a crash or a power cut:
 
 If an index update itself fails (a damaged `.mdx`, say), the changes already made to that index are undone and the write fails with `IndexDamaged`, naming the tag.
 
+### Turning forced flushes off
+
+Forcing each step to the disk (FlushFileBuffers on Windows, fsync elsewhere) is most of what an append or update costs: several forced writes per record, against none in Visual FoxPro or its OLE DB driver. `table.FlushWritesToDisk = false` (`DbfDatabaseOptions.FlushWritesToDisk`, `Flush Writes To Disk=false`) leaves those writes to the operating system, which then writes them out in its own time. They still leave Thunder.Dbf in the same order, so:
+
+- **A killed process** (a crash, Task Manager, a lost network session on this side) loses nothing more than with forced flushes: every step it finished is in the operating system's hands, in order, and the crash-safe key order above still holds.
+- **A power cut or an operating-system crash** can lose the last writes, and the disk may have taken them in another order, so after one the table and its indexes can disagree: `Check()` and a rebuild (`RebuildIndex()`, or REINDEX in FoxPro) put that right. That's the same risk Visual FoxPro's own writes carry.
+
+The journal (`UseJournal`) and PACK force their writes whatever this says. It's on by default.
+
 `AppendRange` commits every 10,000 rows (configurable) and at the end. If it fails, the rows before the failure are committed, `RecordCount` says how many, and the original error is what you get back.
 
 Imports (`DbfImport.FromCsv`) build the new table under temporary names and move it into place only when everything succeeded, so a failed import leaves nothing behind. Exports write a temporary file and rename it.

@@ -29,6 +29,7 @@ Data Source=\\server\share\data;Read Only=false;Code Page=1252
 | `Allow Unmaintained Indexes` | `false` | Write even when an index can't be kept up to date (a missing `.mdx`, an unnamed `.ndx`/`.ntx`/`.idx`, a sort order or mode Thunder.Dbf doesn't write) |
 | `Maintain FoxPro Indexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes |
 | `Exclusive` | `false` | Open tables so no other program can open them, like `USE ... EXCLUSIVE`; needed for `PACK`, rebuilds and `INDEX ON`. Enforced on Windows; advisory on Linux and macOS |
+| `Flush Writes To Disk` | `true` | Force each write to the disk before the next step; `false` is several times faster and gives up only power-cut protection (see [Durability](durability.md#turning-forced-flushes-off)) |
 | `Journal` | `false` | Note each update's key changes in `TABLE.DBF.journal` first, so one that's cut off is finished by the next write (see [Durability](durability.md)) |
 | `Lock Scheme` | `Auto` | Whose lock offsets to use: `Dbase`, `Clipper`, `VisualFoxPro` or `Jet` (when Access or Jet reads the tables; Jet mustn't write while others do). See [Locking](locking.md) |
 
