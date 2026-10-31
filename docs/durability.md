@@ -33,6 +33,7 @@ Imports (`DbfImport.FromCsv`) build the new table under temporary names and move
 ## What it doesn't guarantee
 
 - **No transactions.** A crash between writing the record and updating the index can leave the index missing that change. dBASE has the same window. `table.RebuildIndex()` repairs it, and a [`LocalDataTests`](testing.md)-style check confirms it.
+- **FoxPro `.cdx` pages mid-change.** A `.cdx` change that touches several pages (a split, an emptied page, a rebuild) isn't atomic either, but its pages are written in an order that loses no key: new pages before the page that links them in, and a page goes on the free list only once nothing points at it. A crash in the middle can leave a few keys listed twice, a parent's last key out of step with its child's, or unused pages; a rebuild switches to its new tree in one header write, so a crash leaves the old tree or the new one. `RebuildIndex()` (or REINDEX in FoxPro) tidies any of it. Details: [cdx format notes](formats/cdx.md#what-a-crash-can-leave).
 - **No protection from other programs.** Locks coordinate well-behaved programs (see [Locking](locking.md)); they can't stop a program that ignores them.
 - **Network shares.** "Flushed to disk" means the file server acknowledged the write. Opportunistic locking and client caching can still delay it; turn oplocks off for data files (see [Locking](locking.md)).
 

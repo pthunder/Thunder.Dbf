@@ -20,12 +20,14 @@ The first public release.
 - **Other indexes:**
   - Read and seek dBASE III `.ndx`, Clipper `.ntx` and FoxPro `.cdx`/`.idx`, all through `IDbfIndexTag`.
   - Keep `.ndx` and `.ntx` up to date on every write, `.ntx` under Clipper's own index lock.
-  - FoxPro `.cdx`/`.idx` maintenance is an opt-in preview (`MaintainFoxProIndexes`).
+  - FoxPro `.cdx`/`.idx` maintenance is an opt-in preview (`MaintainFoxProIndexes`). It runs under Visual FoxPro's own index lock (one byte at 0x7FFFFFFE of the index file), writes splits, removals and rebuilds in an order a crash can't turn into lost keys, keeps UNIQUE tags the way Visual FoxPro does between rebuilds, checks candidate keys against a whole `AppendRange` batch, builds character keys from the stored bytes, and handles record numbers past 67,108,863.
+  - It refuses `.cdx` files whose pages have two owners (two tags, or a tag and the free list) or one-way sibling links, numeric keys over more than a bare field (FoxPro computes those in binary floating point), and character keys built with functions other than `UPPER`, `DTOS` and `STR` of fields (or `UPPER` in a double-byte code page).
+  - `MaintainIndex(path, rebuild: true)` rebuilds an index that's already kept, takes over one whose root or interior pages are out of byte order, and lets the index go again if the rebuild fails.
 - **Which indexes are kept:**
   - An index is kept only when it is surely the table's: the header names it, or it's named after the table, or `MaintainIndex(path)` names it.
   - National sort orders, Clipper custom/changes-only indexes and over-wide numeric keys are refused rather than guessed at.
   - After a failed index update, writes stop until `RebuildIndex()`.
-- **FoxPro 2 tables** that share dBASE's version byte are recognized by their `.cdx`.
+- **FoxPro 2 tables** that share dBASE's version byte are recognized by their `.cdx`, when it opens and its tags name only the table's fields; otherwise the table stays dBASE IV, with its missing `.mdx` still blocking writes.
 - **Expressions:** a dBASE evaluator for key and `FOR` expressions (`UPPER`, `SUBSTR`, `DTOS`, `STR`, `VAL`, `IIF`, `DELETED()` and more), with three-valued `.NULL.` logic.
 - **Locking:** record, header, append and table locks at dBASE, Clipper or Visual FoxPro offsets (`LockScheme`), shared across every table opened in one process; `LockRecord`/`LockTable`; `Refresh()` to see other programs' changes.
 - **`UpdateFields`:** changes only the named fields, re-reading the record under its lock, so concurrent edits to other fields survive.
