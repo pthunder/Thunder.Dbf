@@ -17,9 +17,19 @@
 //   Splits, merges and the free list follow Harbour's src/rdd/dbfcdx (read, not copied): the tree
 //   is always in ascending key order (DESCENDING is a reading direction), interior key i is the
 //   highest key under child i, and siblings on every level link left and right.
+//
+//   Every change runs under Visual FoxPro's index lock, one byte at 0x7FFFFFFE of the index file:
+//
+//   lock -> re-check the tag's header, re-read every page -> change -> bump the counter -> flush -> unlock
+//
+//   and writes its pages so a crash in the middle loses no key:
+//
+//   new pages  -->  the page (or header) that makes them reachable  -->  pages they replace or shrink
+//                                                                        --> free what nothing uses
 
 using System.Buffers.Binary;
 using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace Thunder.Dbf;
 
@@ -27,12 +37,26 @@ public sealed partial class CdxIndex : IMaintainedIndex
 {
     private const int FreeListOffset = 4;
     private const int CounterOffset = 8;
+    private const uint NoPage = 0xFFFFFFFF;
 
     /// <summary>The largest index file FoxPro handles: 2 GB.</summary>
     private const long MaxIndexBytes = int.MaxValue;
 
+    /// <summary>
+    /// Visual FoxPro's index lock: one byte at 0x7FFFFFFE of the .cdx or .idx itself, taken exclusive
+    /// for reading and writing alike. From Harbour (read, not copied): IDX_LOCKPOS_VFP is 0x7ffffffe
+    /// and IDX_LOCKPOOL_VFP 0 in include/hbrdddbf.h, so hb_dbfLockIdxFile in src/rdd/dbf1.c locks
+    /// that one byte; doc/locks.txt lists the [V]FP CDX read and write locks at @0x7ffffffe : 1.
+    /// </summary>
+    internal static readonly (long Offset, long Length) FoxProLock = (0x7FFF_FFFE, 1);
+
     private DbfTable? _table;
     private bool _changed;
+    private DbfLocks? _fileLocks;
+
+    // The file's size and update counter when its pages were last checked to belong to one tree each
+    // (or after a change made here). Anything else means another program changed it: check again.
+    private (long Length, uint Counter)? _checkedState;
 
     // Tags whose stored keys were already compared with the table, so reloading before every
     // write doesn't read the same records again. Keyed by everything that decides a tag's keys.
@@ -54,6 +78,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     private bool _rebuildExpected;
 
     void IMaintainedIndex.ExpectRebuild() => _rebuildExpected = true;
+    void IMaintainedIndex.RebuildAbandoned() => _rebuildExpected = false;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
     void IMaintainedIndex.Commit() => Commit();
 
@@ -77,13 +102,18 @@ public sealed partial class CdxIndex : IMaintainedIndex
 
     // Opening for writing: an index that can't be kept exactly as FoxPro would keep it is refused as
     // a whole, so the table treats it like any other index it can't maintain (writes are blocked,
-    // unless the caller allowed unmaintained indexes and will REINDEX in FoxPro).
+    // unless the caller allowed unmaintained indexes and will REINDEX in FoxPro). Pages shared by two
+    // trees, or free yet still in a tree, make it damaged: InvalidDataException, so it isn't attached.
     private void PrepareForWriting()
     {
         _refusedOnlyForOrder = false;
-        MaintainRefusal = OwnedByAnotherTable()
-            ? "This index is named after another table next to it, so it isn't this table's to update."
-            : FirstRefusal();
+        if (OwnedByAnotherTable())
+        {
+            MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
+            return;
+        }
+        CheckPageOwnership();
+        MaintainRefusal = FirstRefusal();
     }
 
     // A .cdx or .idx that shares its name with a different .dbf belongs to that table, even when its
@@ -123,36 +153,149 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// <summary>Re-reads the tag directory and headers, in case FoxPro changed them (a REINDEX, a new tag).</summary>
     internal void ReloadTags()
     {
-        Tags = LoadTags();
         if (!OpenedForWriting)
+        {
+            Tags = LoadTags();
             return;
-        // Recomputed on every reload, so an index rebuilt into byte order is writable again, and one
-        // FoxPro rebuilt with a collation stops writes.
-        _refusedOnlyForOrder = false;
-        MaintainRefusal = FirstRefusal();
+        }
+
+        using (TakeIndexLock())
+        {
+            try
+            {
+                Tags = LoadTags();
+                CheckPageOwnershipIfChanged();
+            }
+            catch (InvalidDataException ex)
+            {
+                throw new DbfException(DbfErrorCode.IndexDamaged, $"The FoxPro index is damaged: {ex.Message}",
+                    "REINDEX it in FoxPro (or restore it from a backup) before writing to this table again.", _table?.FilePath, ex);
+            }
+
+            // Recomputed on every reload, so an index rebuilt into byte order is writable again, and one
+            // FoxPro rebuilt with a collation stops writes.
+            _refusedOnlyForOrder = false;
+            MaintainRefusal = FirstRefusal();
+        }
         if (MaintainRefusal is { } reason && !(_rebuildExpected && _refusedOnlyForOrder))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
                 "Rebuild the tag in FoxPro with MACHINE collation, or open with allowUnmaintainedIndexes: true only if it will be rebuilt (REINDEX) before it's used.",
                 _table?.FilePath);
     }
 
-    /// <summary>Bumps the update counter (so other programs drop their cached pages) and pushes everything to disk.</summary>
+    private DbfLock TakeIndexLock()
+    {
+        var locks = _fileLocks ??= new DbfLocks(_stream as FileStream, (_stream as FileStream)?.Name);
+        if (_table is not null)
+        {
+            locks.Timeout = _table.Locks.Timeout;
+            locks.RequireLocks = _table.Locks.RequireLocks;
+        }
+        return locks.Range(FoxProLock, DbfErrorCode.TableLocked, "Another program is updating this table's FoxPro index.");
+    }
+
+    /// <summary>
+    /// Runs one tree operation under Visual FoxPro's index lock: the tag's header is re-checked and
+    /// every page re-read inside it (nothing read before the lock is trusted after it), and the update
+    /// counter is bumped and the change flushed before it's released, so another program sees either
+    /// none of it or all of it.
+    /// </summary>
+    internal T Update<T>(CdxTag tag, Func<T> change)
+    {
+        using var held = TakeIndexLock();
+        var succeeded = false;
+        try
+        {
+            CheckPageOwnershipIfChanged();
+            tag.CheckLayoutUnchanged();
+            var result = change();
+            succeeded = true;
+            return result;
+        }
+        finally
+        {
+            // Half a change (a damaged page met midway) is still published: other programs must not
+            // keep using pages they cached from before it.
+            if (_changed)
+                BumpCounter();
+            _stream.Flush();
+            if (succeeded)
+                _checkedState = CurrentState(); // this change left every page with one owner
+        }
+    }
+
+    /// <summary>Bumps the update counter if anything changed (so other programs drop their cached pages) and pushes everything to disk.</summary>
     internal void Commit()
     {
         _rebuildExpected = false; // a commit follows the rebuild; from here on order is checked again
         if (_changed)
-        {
-            // Harbour keeps this big-endian counter in the file's first header and compares it to
-            // spot changes made by other processes; FoxPro's documentation calls it reserved.
-            Span<byte> counter = stackalloc byte[4];
-            _stream.Position = CounterOffset;
-            _stream.ReadExactly(counter);
-            BinaryPrimitives.WriteUInt32BigEndian(counter, unchecked(BinaryPrimitives.ReadUInt32BigEndian(counter) + 1));
-            _stream.Position = CounterOffset;
-            _stream.Write(counter);
-            _changed = false;
-        }
+            BumpCounter();
         DbfTable.FlushToDisk(_stream);
+    }
+
+    // Harbour keeps this big-endian counter in the file's first header and compares it to spot
+    // changes made by other processes; FoxPro's documentation calls it reserved.
+    private void BumpCounter()
+    {
+        Span<byte> counter = stackalloc byte[4];
+        DbfTable.DiscardReadBuffer(_stream);
+        _stream.Position = CounterOffset;
+        _stream.ReadExactly(counter);
+        BinaryPrimitives.WriteUInt32BigEndian(counter, unchecked(BinaryPrimitives.ReadUInt32BigEndian(counter) + 1));
+        _stream.Position = CounterOffset;
+        _stream.Write(counter);
+        _changed = false;
+    }
+
+    private (long Length, uint Counter) CurrentState() =>
+        (_stream.Length, BinaryPrimitives.ReadUInt32BigEndian(Read(0, DefaultPageLength).AsSpan(CounterOffset)));
+
+    private void CheckPageOwnershipIfChanged()
+    {
+        if (_checkedState != CurrentState())
+            CheckPageOwnership();
+    }
+
+    /// <summary>
+    /// Checks that every page has one owner: the file's headers, the tag directory, one tag's tree,
+    /// or the free list. A page two trees share, a sibling link that doesn't point back, or a free
+    /// page a tree still uses would make the next change overwrite somebody else's keys, so any of
+    /// them makes the index damaged rather than maintainable.
+    /// </summary>
+    internal void CheckPageOwnership()
+    {
+        var owners = new Dictionary<long, string>();
+        void Own(long page, string owner)
+        {
+            if (!owners.TryAdd(page, owner))
+                throw new InvalidDataException($"The page at offset {page} belongs to both {owners[page]} and {owner}; the index is damaged.");
+        }
+
+        Own(0, "the file header");
+        Own(DefaultPageLength, "the file header");
+        if (IsCompound)
+        {
+            CdxTag.LoadDirectory(this).ClaimPages(Own, "the tag directory");
+            foreach (var tag in Tags)
+            {
+                Own(tag.HeaderOffset, $"tag {tag.Name}'s header");
+                Own(tag.HeaderOffset + DefaultPageLength, $"tag {tag.Name}'s header");
+            }
+        }
+        foreach (var tag in Tags)
+            tag.ClaimPages(Own, $"tag {tag.Name}");
+
+        var free = BinaryPrimitives.ReadUInt32LittleEndian(Read(0, DefaultPageLength).AsSpan(FreeListOffset));
+        var listed = new HashSet<long>();
+        while (free is not 0 and not NoPage)
+        {
+            if (free % DefaultPageLength != 0 || free + PageLength > _stream.Length || !listed.Add(free))
+                throw new InvalidDataException($"The free page list leads to offset {free}, which isn't a page of the file it can hold; the index is damaged.");
+            if (owners.TryGetValue(free, out var owner))
+                throw new InvalidDataException($"The free page list holds the page at offset {free}, which {owner} still uses; the index is damaged.");
+            free = BinaryPrimitives.ReadUInt32LittleEndian(Read(free, 4));
+        }
+        _checkedState = CurrentState();
     }
 
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
@@ -200,18 +343,46 @@ public sealed partial class CdxTag : IMaintainedTag
 
     private enum KeyKind { Character, Double, Date, Logical, Integer }
 
+    // What a character key is made of: bare character fields, UPPER() of one, DTOS() of a date field
+    // and STR() of a whole-number field, joined with +. Each is built from the record's stored bytes,
+    // exactly as FoxPro does; anything else isn't reproduced byte for byte, so it's refused.
+    private enum PartKind { Field, Upper, Dtos, Str }
+
+    private readonly record struct KeyPart(PartKind Kind, DbfField Field, int FieldIndex, int Length);
+
+    private static readonly Regex PartPattern = new(
+        @"^\s*(?:(?<function>UPPER|DTOS|STR)\s*\(\s*(?<field>[A-Z_][A-Z0-9_]*)\s*(?:,\s*(?<length>\d+)\s*(?:,\s*(?<decimals>\d+)\s*)?)?\)|(?<field>[A-Z_][A-Z0-9_]*))\s*$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private DbfExpression? _keyExpression;
     private DbfExpression? _forExpression;
     private KeyKind _kind;
+    private List<KeyPart>? _parts;
     private bool _prepared;
 
     bool IMaintainedTag.IsUnique => IsUnique;
+    bool IMaintainedTag.RefusesDuplicates => IsCandidate;
+    bool IMaintainedTag.UniqueKeepsFirstIndexed => true; // Visual FoxPro: only REINDEX picks the lowest record
     bool IMaintainedTag.Includes(DbfRecord record) => Includes(record);
-    byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
-    void IMaintainedTag.Insert(byte[] key, int recordNumber) => Insert(key, recordNumber);
-    bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
-    int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
-    void IMaintainedTag.Clear() => Clear();
+    byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyBytes(record);
+    void IMaintainedTag.Insert(byte[] key, int recordNumber) => _index.Update(this, () => { Insert(key, recordNumber); return true; });
+    bool IMaintainedTag.Remove(byte[] key, int recordNumber) => _index.Update(this, () => Remove(key, recordNumber));
+    int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
+    void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
+    void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => _index.Update(this, () => { ReplaceAll(keys); return true; });
+
+    /// <summary>The header bytes that decide how the tag's keys are built and sorted, to spot a REINDEX by another program.</summary>
+    internal byte[] Layout { get; private init; } = [];
+
+    internal static byte[] LayoutOf(byte[] header) =>
+        [.. header.AsSpan(12, 4), .. header.AsSpan(92, 26), .. header.AsSpan(494, 6), .. header.AsSpan(502, 10), .. header.AsSpan(512, 512)];
+
+    // Under the index lock, before a change: the tag must still be the one its keys were planned for.
+    internal void CheckLayoutUnchanged()
+    {
+        if (!LayoutOf(_index.Read(HeaderOffset, CdxIndex.HeaderLength)).AsSpan().SequenceEqual(Layout))
+            throw new InvalidDataException($"Tag {Name} was rebuilt by another program while this write was under way.");
+    }
 
     // ---- can this tag be kept exactly? ------------------------------------------------------
 
@@ -247,6 +418,12 @@ public sealed partial class CdxTag : IMaintainedTag
                 if (field.Type is 'T' or 'Y')
                     return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name}, whose key layout isn't reproduced here";
             }
+
+            // In a double-byte code page FoxPro's string functions count bytes, and .NET's count
+            // characters, so a filter over text could let different records in.
+            if (!_index.Encoding.IsSingleByte && ForExpression is not null
+                && DbfExpression.FieldNamesIn(ForExpression).Any(n => table.Fields.First(f => f.Name.Equals(n, StringComparison.OrdinalIgnoreCase)).Type is 'C' or 'V' or 'M'))
+                return $"its FOR filter works on text in the double-byte code page {_index.Encoding.CodePage}, where FoxPro's byte-counting string functions aren't reproduced";
             blank = _keyExpression.Evaluate(IndexKeys.BlankRecord(table));
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
@@ -259,21 +436,84 @@ public sealed partial class CdxTag : IMaintainedTag
         {
             string when KeyType == 'C' => KeyKind.Character,
             decimal or double when KeyLength == 8 => KeyKind.Double,
-            decimal or double when KeyLength == 4 && IsBareIntegerField(table) => KeyKind.Integer,
+            decimal or double when KeyLength == 4 && BareField(table) is { Type: 'I' } => KeyKind.Integer,
             DateOnly or null when KeyLength == 8 => KeyKind.Date,
             bool when KeyLength == 1 => KeyKind.Logical,
             _ => null,
         };
         if (kind is null)
             return $"its {KeyLength}-byte keys don't match what its expression returns ({blank?.GetType().Name ?? "a date"})";
+
+        // FoxPro works numeric expressions out in binary floating point and this library in decimal,
+        // so anything past reading one field (a sum, a VAL(), a ROUND()) can come out a different
+        // double. A bare field is read from its text once, correctly rounded, by both.
+        if (kind is KeyKind.Double or KeyKind.Integer && BareField(table) is not { Type: 'N' or 'F' or 'B' or 'I' })
+            return $"its numeric key '{Expression}' is more than a bare numeric field, and FoxPro works such expressions out in binary floating point, which isn't reproduced exactly here";
+
+        _parts = null;
+        if (kind == KeyKind.Character)
+        {
+            var (parts, reason) = CharacterParts(table);
+            if (reason is not null)
+                return reason;
+            _parts = parts;
+        }
         _kind = kind.Value;
         _prepared = true;
         return null;
     }
 
-    // Visual FoxPro keys a bare integer (I) field as 4 bytes; any other numeric expression is a double.
-    private bool IsBareIntegerField(DbfTable table) =>
-        table.Fields.FirstOrDefault(f => string.Equals(f.Name, Expression.Trim(), StringComparison.OrdinalIgnoreCase)) is { Type: 'I' };
+    private DbfField? BareField(DbfTable table) =>
+        table.Fields.FirstOrDefault(f => string.Equals(f.Name, Expression.Trim(), StringComparison.OrdinalIgnoreCase));
+
+    // Splits a character key expression into parts built from stored bytes, or says why it can't be.
+    private (List<KeyPart>? Parts, string? Reason) CharacterParts(DbfTable table)
+    {
+        const string Unsupported = "its key expression '{0}' does more than join character fields, UPPER(), DTOS() and STR() of fields with +, and FoxPro's byte-level results for the rest aren't reproduced exactly";
+        var parts = new List<KeyPart>();
+        foreach (var piece in Expression.Split('+'))
+        {
+            var match = PartPattern.Match(piece);
+            if (!match.Success)
+                return (null, string.Format(CultureInfo.InvariantCulture, Unsupported, Expression));
+            var fieldIndex = -1;
+            for (var i = 0; i < table.Fields.Count && fieldIndex < 0; i++)
+            {
+                if (table.Fields[i].Name.Equals(match.Groups["field"].Value, StringComparison.OrdinalIgnoreCase))
+                    fieldIndex = i;
+            }
+            if (fieldIndex < 0)
+                return (null, $"its expression uses '{match.Groups["field"].Value}', which isn't a field of the table");
+            var field = table.Fields[fieldIndex];
+            var function = match.Groups["function"].Success ? match.Groups["function"].Value.ToUpperInvariant() : null;
+            var hasLength = match.Groups["length"].Success;
+
+            KeyPart? part = function switch
+            {
+                null when field.Type == 'C' => new(PartKind.Field, field, fieldIndex, field.Length),
+                // FoxPro upper-cases by its own tables for each code page; only ASCII letters are
+                // certain, and in a double-byte code page a trailing byte can look like one.
+                "UPPER" when field.Type == 'C' && !hasLength && _index.Encoding.IsSingleByte => new(PartKind.Upper, field, fieldIndex, field.Length),
+                "DTOS" when field.Type == 'D' && !hasLength => new(PartKind.Dtos, field, fieldIndex, 8),
+                // A whole number can't round: STR() of one is its digits, right-aligned, as long as
+                // the width holds every value the field can.
+                "STR" when (field.Type == 'I' || (field.Type is 'N' or 'F' && field.DecimalCount == 0))
+                           && (!match.Groups["decimals"].Success || match.Groups["decimals"].Value.TrimStart('0').Length == 0)
+                           && (hasLength ? int.Parse(match.Groups["length"].Value, CultureInfo.InvariantCulture) : 10) is var width
+                           && width >= (field.Type == 'I' ? 11 : field.Length) && width <= MaxWritableKeyLength
+                    => new(PartKind.Str, field, fieldIndex, width),
+                _ => null,
+            };
+            if (part is null)
+                return (null, string.Format(CultureInfo.InvariantCulture, Unsupported, Expression)
+                    + (_index.Encoding.IsSingleByte ? "" : $" (the table's code page {_index.Encoding.CodePage} is double-byte)"));
+            parts.Add(part.Value);
+        }
+        var total = parts.Sum(p => p.Length);
+        if (total != KeyLength)
+            return (null, $"its {KeyLength}-byte keys don't match the {total} bytes its expression gives");
+        return (parts, null);
+    }
 
     /// <summary>
     /// Recomputes the keys stored in the first and last leaves from their records. Any difference
@@ -298,42 +538,98 @@ public sealed partial class CdxTag : IMaintainedTag
     }
 
     /// <summary>
-    /// Walks every leaf left to right and checks that the keys are in FoxPro's MACHINE (byte) order,
-    /// within and across pages. A tag sorted by a collation (X# sorts some case-blind without saying
-    /// so) would be scrambled by byte-order changes, so it's refused before the first write rather
-    /// than failing halfway through one.
+    /// Walks the whole tree, root to leaves, and checks every page's keys are in FoxPro's MACHINE
+    /// (byte) order, and the leaves' keys across pages too. A tag sorted by a collation (X# sorts some
+    /// case-blind without saying so) would be scrambled by byte-order changes, so it's refused before
+    /// the first write. Disorder anywhere, the root included, is reported here as a sort order a
+    /// rebuild fixes, not as damage.
     /// </summary>
     internal string? CheckWholeOrder()
     {
-        var node = EdgeLeaf(last: false);
-        var visited = new HashSet<long> { node.Offset };
+        const string Disorder = "its keys aren't in FoxPro's MACHINE byte order, so it was built with a collation this code doesn't reproduce (rebuild it with RebuildIndex, or REINDEX with SET COLLATE TO \"MACHINE\" in FoxPro)";
         byte[]? previous = null;
-        while (true)
+        var ordered = true;
+        void Visit(long offset, int depth, HashSet<long> visited)
         {
-            for (var i = 0; i < node.Count; i++)
+            GuardDepth(depth);
+            if (!visited.Add(offset))
+                throw new InvalidDataException($"Tag {Name} reaches the index page at offset {offset} twice; the index is corrupt.");
+            var node = ReadNode(offset);
+            for (var i = 1; i < node.Count && ordered; i++)
+                ordered = node.Keys[i - 1].AsSpan().SequenceCompareTo(node.Keys[i]) <= 0;
+            if (node.IsLeaf)
             {
-                if (previous is not null && previous.AsSpan().SequenceCompareTo(node.Keys[i]) > 0)
-                    return "its keys aren't in FoxPro's MACHINE byte order, so it was built with a collation this code doesn't reproduce (rebuild it with RebuildIndex, or REINDEX with SET COLLATE TO \"MACHINE\" in FoxPro)";
-                previous = node.Keys[i];
+                if (node.Count > 0)
+                {
+                    ordered &= previous is null || previous.AsSpan().SequenceCompareTo(node.Keys[0]) <= 0;
+                    previous = node.Keys[^1];
+                }
+                return;
             }
-            if (node.Right == NoPage)
-                return null;
-            if (!visited.Add(node.Right))
-                throw new InvalidDataException($"Tag {Name}'s leaves link back to the page at offset {node.Right}; the index is corrupt.");
-            node = ReadNode(node.Right);
+            foreach (var child in node.Children!)
+            {
+                if (!ordered)
+                    return;
+                Visit(child, depth + 1, visited);
+            }
+        }
+        Visit(RootOffset(), 0, []);
+        return ordered ? null : Disorder;
+    }
+
+    /// <summary>
+    /// Hands every page of the tree to <paramref name="own"/> (which refuses a page someone else owns)
+    /// and checks each level's pages link to their neighbours both ways, the first with no left
+    /// neighbour and the last with no right one.
+    /// </summary>
+    internal void ClaimPages(Action<long, string> own, string owner)
+    {
+        var previous = new List<(long Offset, uint Right)>(); // the last page met on each level
+        void Visit(long offset, int depth)
+        {
+            GuardDepth(depth);
+            own(offset, owner);
+            var node = ReadNode(offset);
+            if (depth == previous.Count)
+            {
+                if (node.Left != NoPage)
+                    throw new InvalidDataException($"{Label}'s first page on level {depth} (offset {offset}) links left to {node.Left}; the index is damaged.");
+                previous.Add((offset, node.Right));
+            }
+            else
+            {
+                var (left, right) = previous[depth];
+                if (right != offset || node.Left != left)
+                    throw new InvalidDataException($"{Label}'s pages at offsets {left} and {offset} sit side by side but don't link to each other both ways; the index is damaged.");
+                previous[depth] = (offset, node.Right);
+            }
             if (!node.IsLeaf)
-                throw new InvalidDataException($"Tag {Name}'s leaf chain leads to an interior page at offset {node.Offset}; the index is corrupt.");
+            {
+                foreach (var child in node.Children!)
+                    Visit(child, depth + 1);
+            }
+        }
+        Visit(RootOffset(), 0);
+        for (var depth = 0; depth < previous.Count; depth++)
+        {
+            if (previous[depth].Right != NoPage)
+                throw new InvalidDataException($"{Label}'s last page on level {depth} (offset {previous[depth].Offset}) links right to {previous[depth].Right}; the index is damaged.");
         }
     }
 
+    private string Label => Name.Length == 0 ? "The tag directory" : $"Tag {Name}";
+
     private Node EdgeLeaf(bool last)
     {
-        var node = ReadNode(RootOffset(), inByteOrder: true);
+        var node = ReadNode(RootOffset());
         var visited = new HashSet<long> { node.Offset };
         for (var depth = 0; !node.IsLeaf; depth++)
         {
             GuardDepth(depth);
-            node = ReadChild(node.Children![last ? ^1 : 0], visited);
+            var child = node.Children![last ? ^1 : 0];
+            if (!visited.Add(child))
+                throw new InvalidDataException($"Tag {Name} reaches the index page at offset {child} twice; the index is corrupt.");
+            node = ReadNode(child);
         }
         return node;
     }
@@ -346,56 +642,35 @@ public sealed partial class CdxTag : IMaintainedTag
         return _forExpression is null || _forExpression.Evaluate(record) is true;
     }
 
-    /// <summary>
-    /// The key FoxPro stores for <paramref name="record"/>. For a candidate tag, a key another
-    /// record already holds is refused here, before the table is touched, as FoxPro refuses it.
-    /// </summary>
-    internal byte[] KeyFor(DbfRecord record)
-    {
-        var key = KeyBytes(record);
-        if (IsCandidate)
-        {
-            foreach (var hit in Walk(key, backwards: false))
-            {
-                if (!hit.Matches)
-                    break;
-                if (hit.Entry.RecordNumber != record.RecordNumber)
-                    throw new DbfException(DbfErrorCode.InvalidValue,
-                        $"Uniqueness of index {Name} would be violated: record {hit.Entry.RecordNumber} already has this key.",
-                        $"Give the record a {Name} value no other record has; FoxPro refuses duplicates in a candidate or primary key the same way.");
-            }
-        }
-        return key;
-    }
-
+    /// <summary>The key FoxPro stores for <paramref name="record"/>.</summary>
     internal byte[] KeyBytes(DbfRecord record)
     {
         EnsurePrepared();
+        if (_kind == KeyKind.Character)
+            return CharacterKey(record);
+
         var value = _keyExpression!.Evaluate(record);
         switch (_kind)
         {
-            case KeyKind.Character:
-            {
-                var text = value as string ?? throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce text.");
-                var key = new byte[KeyLength];
-                key.AsSpan().Fill((byte)' ');
-                var encoded = _index.Encoding.GetBytes(text);
-                encoded.AsSpan(0, Math.Min(encoded.Length, KeyLength)).CopyTo(key);
-                return key;
-            }
             case KeyKind.Double:
                 // Through text, so the double is the correctly rounded one FoxPro reads from the field.
                 return IndexKeys.WriteOrderedDouble(value switch
                 {
                     decimal d => double.Parse(d.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture),
                     double d => d,
+                    int i => i,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
                 });
             case KeyKind.Integer:
             {
-                var number = value as decimal? ?? throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number.");
+                var number = value switch
+                {
+                    decimal d => decimal.ToInt32(d),
+                    int i => i,
+                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
+                };
                 var key = new byte[4];
-                BinaryPrimitives.WriteUInt32BigEndian(key, unchecked((uint)decimal.ToInt32(number) + 0x80000000));
+                BinaryPrimitives.WriteUInt32BigEndian(key, unchecked((uint)number + 0x80000000));
                 return key;
             }
             case KeyKind.Date:
@@ -408,6 +683,71 @@ public sealed partial class CdxTag : IMaintainedTag
             default:
                 return [(byte)(value is true ? 'T' : 'F')];
         }
+    }
+
+    // Built from the record's stored bytes: decoding drops NULs and trailing bytes that FoxPro keeps
+    // (a field holding "A\0" keys as 41 00 20 20, not 41 20 20 20), and re-encoding the decoded text
+    // needn't give back the bytes that were there.
+    private byte[] CharacterKey(DbfRecord record)
+    {
+        var key = new byte[KeyLength];
+        key.AsSpan().Fill((byte)' ');
+        var at = 0;
+        foreach (var part in _parts!)
+        {
+            var target = key.AsSpan(at, part.Length);
+            at += part.Length;
+            switch (part.Kind)
+            {
+                case PartKind.Field:
+                    StoredBytes(record, part).CopyTo(target);
+                    break;
+                case PartKind.Upper:
+                    StoredBytes(record, part).CopyTo(target);
+                    foreach (ref var b in target)
+                    {
+                        if (b >= 0x80)
+                            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                                $"Tag {Name}'s key UPPER({part.Field.Name}) can't be built exactly for record {record.RecordNumber}: the value has characters outside ASCII, which FoxPro upper-cases by its own code page tables.",
+                                "Keep that field to ASCII, or open with allowUnmaintainedIndexes: true and REINDEX in FoxPro afterwards.", _index.Table?.FilePath);
+                        if (b is >= (byte)'a' and <= (byte)'z')
+                            b -= 0x20;
+                    }
+                    break;
+                case PartKind.Dtos:
+                    // DTOS() of a blank date is eight spaces, which the key already holds.
+                    if (record[part.FieldIndex] is DateOnly date)
+                        System.Text.Encoding.ASCII.GetBytes(date.ToString("yyyyMMdd", CultureInfo.InvariantCulture), target);
+                    break;
+                default:
+                {
+                    var digits = record[part.FieldIndex] switch
+                    {
+                        int i => i.ToString(CultureInfo.InvariantCulture),
+                        decimal d => decimal.Truncate(d).ToString(CultureInfo.InvariantCulture),
+                        _ => "0",
+                    };
+                    if (digits.Length > target.Length)
+                        target.Fill((byte)'*'); // FoxPro's overflow; the width check makes it unreachable for stored values
+                    else
+                        System.Text.Encoding.ASCII.GetBytes(digits, target[(target.Length - digits.Length)..]);
+                    break;
+                }
+            }
+        }
+        return key;
+    }
+
+    private ReadOnlySpan<byte> StoredBytes(DbfRecord record, KeyPart part)
+    {
+        if (record.Raw is { } raw && raw.Length >= part.Field.Offset + part.Field.Length)
+            return raw.AsSpan(part.Field.Offset, part.Field.Length);
+        // A record that didn't come from the table (a blank one, say): its text, space padded.
+        var bytes = new byte[part.Field.Length];
+        bytes.AsSpan().Fill((byte)' ');
+        var text = _index.Encoding.GetBytes(record[part.FieldIndex] as string ?? "");
+        text.AsSpan(0, Math.Min(text.Length, bytes.Length)).CopyTo(bytes);
+        return bytes;
     }
 
     private void EnsurePrepared()
@@ -547,8 +887,10 @@ public sealed partial class CdxTag : IMaintainedTag
         var entryLength = 1;
         while (entryLength * 8 - 2 * countBits < recordBitsNeeded)
             entryLength++;
-        // Past 32 bits the mask field can't describe it; the spare bits then sit unused.
-        var recordBits = Math.Min(entryLength * 8 - 2 * countBits, 32);
+        // As in Harbour's dbfcdx1.c: the record field is everything below the two counts, which sit
+        // in the entry's top bits, even past 32 bits (record 67,108,864 with 4-byte keys needs 5-byte
+        // entries and 34 record bits). The mask field is only 4 bytes, so it stops at 32 bits.
+        var recordBits = entryLength * 8 - 2 * countBits;
 
         var entriesEnd = LeafHeaderLength + node.Count * entryLength;
         if (entriesEnd > PageLength)
@@ -583,7 +925,7 @@ public sealed partial class CdxTag : IMaintainedTag
         }
 
         BinaryPrimitives.WriteUInt16LittleEndian(page.AsSpan(12), (ushort)(dataStart - entriesEnd));
-        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(14), recordBits == 32 ? uint.MaxValue : (1u << recordBits) - 1);
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(14), recordBits >= 32 ? uint.MaxValue : (1u << recordBits) - 1);
         page[18] = page[19] = (byte)((1 << countBits) - 1);
         (page[20], page[21], page[22], page[23]) = ((byte)recordBits, (byte)countBits, (byte)countBits, (byte)entryLength);
         return page;
@@ -606,7 +948,7 @@ public sealed partial class CdxTag : IMaintainedTag
     internal List<(byte[] Key, int Record)> RawEntries() =>
         LeafOffsets().Select(offset => ReadNode(offset)).SelectMany(leaf => leaf.Keys.Zip(leaf.Records)).ToList();
 
-    /// <summary>Every page the tag's tree uses, for the tests.</summary>
+    /// <summary>Every page the tag's tree uses.</summary>
     internal List<long> Pages()
     {
         var pages = new List<long>();
@@ -669,6 +1011,42 @@ public sealed partial class CdxTag : IMaintainedTag
             throw new ArgumentException($"Tag {Name} has {KeyLength}-byte keys, not {key.Length}.", nameof(key));
     }
 
+    // ---- writing a change in a crash-safe order -----------------------------------------------
+
+    /// <summary>
+    /// Every page one tree operation writes, held back so they go to disk in an order a crash can't
+    /// turn into lost keys: new pages first (nothing points at them yet), then the pages that already
+    /// exist, then sibling links, then pages for the free list, which nothing references by then.
+    /// </summary>
+    private sealed class Plan
+    {
+        public readonly List<Node> Fresh = [];
+        public readonly List<(int Level, Node Node)> Changed = [];
+        public long? NewRoot;
+        public readonly List<(uint Offset, bool LeftLink, uint Target)> Links = [];
+        public readonly List<long> Freed = [];
+    }
+
+    // Growing (an insert, a split) writes the existing pages from the top down: a parent learns of a
+    // new page, or of a higher last key, before the page below changes, so until the last write a
+    // crash leaves keys listed twice or a parent's key too high, never a key a search can't reach.
+    // Shrinking (a removal) goes from the bottom up, for the same reason the other way round.
+    private void Apply(Plan plan, bool topDown)
+    {
+        foreach (var node in plan.Fresh)
+            WriteNode(node);
+        if (topDown && plan.NewRoot is { } grownRoot)
+            SetRoot(grownRoot);
+        foreach (var (_, node) in topDown ? plan.Changed.OrderByDescending(c => c.Level) : plan.Changed.OrderBy(c => c.Level))
+            WriteNode(node);
+        if (!topDown && plan.NewRoot is { } root)
+            SetRoot(root);
+        foreach (var (offset, leftLink, target) in plan.Links)
+            PatchSibling(offset, leftLink, target);
+        foreach (var page in plan.Freed)
+            _index.FreePage(page);
+    }
+
     // ---- insert -----------------------------------------------------------------------------
 
     /// <summary>Adds (key, record number) in (key, record) order, splitting pages as needed.</summary>
@@ -694,22 +1072,23 @@ public sealed partial class CdxTag : IMaintainedTag
             at--;
         node.Keys.Insert(at, key);
         node.Records.Insert(at, recordNumber);
-        Store(node, path, appendedAtEnd: at == node.Count - 1 && node.Right == NoPage);
+        var plan = new Plan();
+        Store(node, path, appendedAtEnd: at == node.Count - 1 && node.Right == NoPage, plan);
+        Apply(plan, topDown: true);
     }
 
     /// <summary>
-    /// Writes a changed node, splitting it when it no longer fits, and carries the change up: each
-    /// parent's entry for a child is that child's last key, and a split adds an entry.
+    /// Plans the writes for a changed node, splitting it when it no longer fits, and carries the
+    /// change up: each parent's entry for a child is that child's last key, and a split adds an entry.
     /// </summary>
-    private void Store(Node node, List<(Node Node, int Slot)> path, bool appendedAtEnd)
+    private void Store(Node node, List<(Node Node, int Slot)> path, bool appendedAtEnd, Plan plan)
     {
         for (var level = 0; ; level++)
         {
             GuardDepth(level);
-            var page = node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node);
-            if (page is not null)
+            if ((node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node)) is not null)
             {
-                _index.Write(node.Offset, page);
+                plan.Changed.Add((level, node));
                 if (path.Count == 0 || node.Count == 0)
                     return;
                 var (parent, slot) = path[^1];
@@ -727,10 +1106,10 @@ public sealed partial class CdxTag : IMaintainedTag
             if (isRoot)
                 node.Attributes &= unchecked((ushort)~RootAttribute);
             var right = Split(node, appendedAtEnd);
-            WriteNode(node);
-            WriteNode(right);
+            plan.Fresh.Add(right);
+            plan.Changed.Add((level, node));
             if (right.Right != NoPage)
-                PatchSibling(right.Right, leftLink: true, (uint)right.Offset);
+                plan.Links.Add((right.Right, true, (uint)right.Offset));
 
             if (isRoot)
             {
@@ -742,8 +1121,8 @@ public sealed partial class CdxTag : IMaintainedTag
                     Records = [node.Records[^1], right.Records[^1]],
                     Children = [(uint)node.Offset, (uint)right.Offset],
                 };
-                WriteNode(root);
-                SetRoot(root.Offset);
+                plan.Fresh.Add(root);
+                plan.NewRoot = root.Offset;
                 return;
             }
 
@@ -764,15 +1143,6 @@ public sealed partial class CdxTag : IMaintainedTag
     // filled in key order (autoincrement IDs) get full pages rather than half-empty ones.
     private Node Split(Node node, bool appendedAtEnd)
     {
-        var right = new Node
-        {
-            Offset = _index.AllocatePage(),
-            Attributes = node.Attributes,
-            Left = (uint)node.Offset,
-            Right = node.Right,
-            Children = node.IsLeaf ? null : [],
-        };
-
         var n = node.Count;
         var cuts = appendedAtEnd
             ? new[] { n - 1 }.Concat(Enumerable.Range(1, n - 1).OrderBy(c => Math.Abs(c - n / 2)))
@@ -785,9 +1155,16 @@ public sealed partial class CdxTag : IMaintainedTag
                 || (node.IsLeaf ? EncodeLeaf(rest) : EncodeInterior(rest)) is null)
                 continue;
 
-            right.Keys = rest.Keys;
-            right.Records = rest.Records;
-            right.Children = rest.Children;
+            var right = new Node
+            {
+                Offset = _index.AllocatePage(),
+                Attributes = node.Attributes,
+                Left = (uint)node.Offset,
+                Right = node.Right,
+                Keys = rest.Keys,
+                Records = rest.Records,
+                Children = rest.Children,
+            };
             node.Keys = left.Keys;
             node.Records = left.Records;
             node.Children = left.Children;
@@ -834,10 +1211,12 @@ public sealed partial class CdxTag : IMaintainedTag
         path.RemoveAt(path.Count - 1);
         leaf.Keys.RemoveAt(slot);
         leaf.Records.RemoveAt(slot);
+        var plan = new Plan();
         if (leaf.Count > 0 || path.Count == 0)
-            Store(leaf, path, appendedAtEnd: false);
+            Store(leaf, path, appendedAtEnd: false, plan);
         else
-            DropEmpty(leaf, path);
+            DropEmpty(leaf, path, plan);
+        Apply(plan, topDown: false);
         CollapseRoot();
         return true;
     }
@@ -879,20 +1258,21 @@ public sealed partial class CdxTag : IMaintainedTag
         return Search.KeepLooking;
     }
 
-    // An emptied page leaves the tree: its neighbours link past it, it goes on the free list, and its
-    // parent loses the entry for it (and leaves too, if that empties it). An emptied root becomes an
-    // empty leaf, which is how FoxPro stores a tag with no keys.
-    private void DropEmpty(Node node, List<(Node Node, int Slot)> path)
+    // An emptied page leaves the tree: its parent loses the entry for it first (and leaves too, if
+    // that empties it), then its neighbours link past it, and only then, with nothing pointing at
+    // it, does it go on the free list. An emptied root becomes an empty leaf, which is how FoxPro
+    // stores a tag with no keys.
+    private void DropEmpty(Node node, List<(Node Node, int Slot)> path, Plan plan)
     {
         var leafAttributes = (ushort)(node.Attributes & ~RootAttribute);
         for (var level = 0; ; level++)
         {
             GuardDepth(level);
             if (node.Left != NoPage)
-                PatchSibling(node.Left, leftLink: false, node.Right);
+                plan.Links.Add((node.Left, false, node.Right));
             if (node.Right != NoPage)
-                PatchSibling(node.Right, leftLink: true, node.Left);
-            _index.FreePage(node.Offset);
+                plan.Links.Add((node.Right, true, node.Left));
+            plan.Freed.Add(node.Offset);
 
             var (parent, slot) = path[^1];
             path.RemoveAt(path.Count - 1);
@@ -902,12 +1282,12 @@ public sealed partial class CdxTag : IMaintainedTag
 
             if (parent.Count > 0)
             {
-                Store(parent, path, appendedAtEnd: false);
+                Store(parent, path, appendedAtEnd: false, plan);
                 return;
             }
             if (path.Count == 0)
             {
-                WriteNode(new Node { Offset = parent.Offset, Attributes = (ushort)(leafAttributes | RootAttribute) });
+                plan.Changed.Add((level + 1, new Node { Offset = parent.Offset, Attributes = (ushort)(leafAttributes | RootAttribute) }));
                 return;
             }
             node = parent;
@@ -915,7 +1295,7 @@ public sealed partial class CdxTag : IMaintainedTag
     }
 
     // A root with a single child hands the root role to that child, so the tree stays as shallow as
-    // its keys need.
+    // its keys need. The header moves to the child before the old root is freed.
     private void CollapseRoot()
     {
         for (var depth = 0; ; depth++)
@@ -935,15 +1315,88 @@ public sealed partial class CdxTag : IMaintainedTag
 
     // ---- rebuild ----------------------------------------------------------------------------
 
-    /// <summary>Empties the tag: every page but the root goes on the free list, and the root becomes an empty leaf.</summary>
-    internal void Clear()
+    private static readonly Comparer<byte[]> ByteOrder = Comparer<byte[]>.Create((a, b) => a.AsSpan().SequenceCompareTo(b));
+
+    /// <summary>Empties the tag (a rebuild with no keys).</summary>
+    internal void Clear() => ReplaceAll([]);
+
+    /// <summary>
+    /// Rebuilds the tag from <paramref name="keys"/>, like FoxPro's REINDEX: a UNIQUE tag keeps the
+    /// lowest record number per key. The new tree is built in new pages, the header is switched to
+    /// its root last, and only then do the old tree's pages go on the free list, so a crash leaves
+    /// either the old tree or the new one, never half of each.
+    /// </summary>
+    internal void ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
-        var root = ReadNode(RootOffset());
-        var pages = new List<long>();
-        CollectPages(root, [], pages, leavesOnly: false, depth: 0);
-        var leafAttributes = (ushort)(LeafAttribute | (ReadNode(LeafOffsets()[0]).Attributes & 0x04));
-        foreach (var page in pages.Where(p => p != root.Offset))
+        foreach (var (key, _) in keys)
+            CheckKey(key);
+        var entries = keys.OrderBy(k => k.Key, ByteOrder).ThenBy(k => k.Record).ToList();
+        if (IsUnique)
+            entries = entries.Where((e, i) => i == 0 || !entries[i - 1].Key.AsSpan().SequenceEqual(e.Key)).ToList();
+
+        // Read the old tree first: a damaged one stops the rebuild before anything is written.
+        var oldPages = Pages();
+        var leafAttributes = (ushort)(LeafAttribute | (EdgeLeaf(last: false).Attributes & 0x04));
+
+        // Leaves packed as full as they go, then each level above, until one page holds them all.
+        var level = new List<Node>();
+        var leaf = new Node { Attributes = leafAttributes };
+        foreach (var (key, record) in entries)
+        {
+            leaf.Keys.Add(key);
+            leaf.Records.Add(record);
+            if (leaf.Count > 1 && EncodeLeaf(leaf) is null)
+            {
+                leaf.Keys.RemoveAt(leaf.Count - 1);
+                leaf.Records.RemoveAt(leaf.Records.Count - 1);
+                level.Add(leaf);
+                leaf = new Node { Attributes = leafAttributes, Keys = [key], Records = [record] };
+            }
+        }
+        level.Add(leaf);
+
+        var built = new List<Node>();
+        while (level.Count > 1)
+        {
+            Place(level);
+            built.AddRange(level);
+            var parents = new List<Node>();
+            var parent = new Node { Children = [] };
+            foreach (var child in level)
+            {
+                if (parent.Count == MaxInteriorKeys)
+                {
+                    parents.Add(parent);
+                    parent = new Node { Children = [] };
+                }
+                parent.Keys.Add(child.Keys[^1]);
+                parent.Records.Add(child.Records[^1]);
+                parent.Children!.Add((uint)child.Offset);
+            }
+            parents.Add(parent);
+            level = parents;
+        }
+        var root = level[0];
+        root.Attributes |= RootAttribute;
+        Place(level);
+        built.Add(root);
+
+        foreach (var node in built)
+            WriteNode(node);
+        SetRoot(root.Offset);
+        foreach (var page in oldPages)
             _index.FreePage(page);
-        WriteNode(new Node { Offset = root.Offset, Attributes = (ushort)(leafAttributes | RootAttribute) });
+    }
+
+    // New pages for one level, linked left to right.
+    private void Place(List<Node> level)
+    {
+        foreach (var node in level)
+            node.Offset = _index.AllocatePage();
+        for (var i = 0; i < level.Count; i++)
+        {
+            level[i].Left = i == 0 ? NoPage : (uint)level[i - 1].Offset;
+            level[i].Right = i == level.Count - 1 ? NoPage : (uint)level[i + 1].Offset;
+        }
     }
 }

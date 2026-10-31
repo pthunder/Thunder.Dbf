@@ -126,7 +126,8 @@ public sealed partial class DbfTable : IDisposable
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
             table._maintainFoxProIndexes = maintainFoxProIndexes;
-            if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is not null)
+            if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is { } cdx
+                && IsIndexOver(cdx, table.Header))
                 table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
             {
@@ -195,6 +196,30 @@ public sealed partial class DbfTable : IDisposable
         _unmaintainedIndexes = unmaintained;
     }
 
+    // A dBASE IV table whose .mdx went missing looks just like a FoxPro 2 table, so a .cdx of the same
+    // name only says "FoxPro 2" when it opens and every tag's expressions name nothing but this
+    // table's fields. A stray .cdx (another table's, renamed or copied in) leaves dBASE's rules in
+    // force: the missing .mdx keeps blocking writes, and dBASE's lock positions stay in use.
+    private static bool IsIndexOver(string cdxPath, DbfHeader header)
+    {
+        var fields = header.Fields.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var index = CdxIndex.Open(cdxPath);
+            return index.Tags.Count > 0 && index.Tags.All(tag =>
+            {
+                var names = DbfExpression.FieldNamesIn(tag.Expression);
+                var filter = tag.ForExpression is null ? (IReadOnlyCollection<string>)[] : DbfExpression.FieldNamesIn(tag.ForExpression);
+                return names.Count > 0 && names.Concat(filter).All(fields.Contains);
+            });
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException or UnauthorizedAccessException
+                                       or FormatException or ArgumentException or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>
     /// Keeps the index at <paramref name="path"/> up to date from now on, for an index whose name
     /// doesn't match the table's (dBASE III and Clipper indexes record nothing that ties them to a
@@ -213,18 +238,42 @@ public sealed partial class DbfTable : IDisposable
         EnsureWritable();
         var full = Path.GetFullPath(path);
         var name = Path.GetFileName(full);
-        if (_attachedIndexPaths.Contains(full))
+        if (_attachedIndexes.ContainsKey(full))
+        {
+            // Already kept: asking for a rebuild still rebuilds.
+            if (rebuild)
+                RebuildIndex();
             return;
+        }
         if (!File.Exists(full))
             throw new DbfException(DbfErrorCode.TableNotFound, "There's no index file at that path.", "Check the name and folder.", diagnostic: full);
+        var hadStructuralCdx = HasMaintainedStructuralCdx;
         if (!TryAttachIndex(full, acceptAfterRebuild: rebuild))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"The index {name} can't be kept up to date (unreadable, or a format or sort order Thunder.Dbf doesn't write).",
                 rebuild
                     ? "Rebuild it in the legacy app, or open with allowUnmaintainedIndexes: true if it will be rebuilt before use."
                     : "If it's only the sort order, MaintainIndex(path, rebuild: true) takes it over and rebuilds it in byte order. Otherwise rebuild it in the legacy app.", _path);
+        var unmaintainedBefore = _unmaintainedIndexes;
         _unmaintainedIndexes = _unmaintainedIndexes.Where(n => !n.Equals(name, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (rebuild)
+        if (!rebuild)
+            return;
+        try
+        {
             RebuildIndex();
+        }
+        catch
+        {
+            // A takeover whose rebuild failed leaves the index as it was (in an order or state these
+            // writes can't keep), so it's let go again and blocks writes as it did before.
+            var index = _attachedIndexes[full];
+            _attachedIndexes.Remove(full);
+            _otherIndexes.Remove(index);
+            index.RebuildAbandoned();
+            index.Dispose();
+            HasMaintainedStructuralCdx = hadStructuralCdx;
+            _unmaintainedIndexes = unmaintainedBefore;
+            throw;
+        }
     }
 
     private bool _maintainFoxProIndexes;
@@ -245,7 +294,7 @@ public sealed partial class DbfTable : IDisposable
                     if (!maintained.CanMaintain)
                         maintained.ExpectRebuild();
                     _otherIndexes.Add(maintained);
-                    _attachedIndexPaths.Add(Path.GetFullPath(file));
+                    _attachedIndexes[Path.GetFullPath(file)] = maintained;
                     if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)
                         && _path is not null
                         && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase))
@@ -271,7 +320,7 @@ public sealed partial class DbfTable : IDisposable
     // ---- indexes that appear after opening ------------------------------------------------
 
     private HashSet<string> _indexFilesAtOpen = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _attachedIndexPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IMaintainedIndex> _attachedIndexes = new(StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string> IndexFileNames(string tablePath) =>
         Directory.EnumerateFiles(Path.GetDirectoryName(Path.GetFullPath(tablePath))!)
@@ -888,7 +937,11 @@ public sealed partial class DbfTable : IDisposable
             values[i] = DbfValueCodec.IsMemoField(field) ? ReadMemo(field, value as int?) : value;
         }
 
-        return new DbfRecord(Header, index, record[0] == DeletedFlag, values, Encoding) { NullFlags = nulls };
+        return new DbfRecord(Header, index, record[0] == DeletedFlag, values, Encoding)
+        {
+            NullFlags = nulls,
+            Raw = ReferenceEquals(record, _buffer) ? record.ToArray() : record, // _buffer is reused by the next read
+        };
     }
 
     private object? ReadMemo(DbfField field, int? block)
@@ -1074,10 +1127,58 @@ public sealed partial class DbfTable : IDisposable
             var newKey = isIn ? tag.KeyFor(after) : null;
             if (oldKey is not null && newKey is not null && oldKey.AsSpan().SequenceEqual(newKey))
                 continue;
+            if (newKey is not null && tag.RefusesDuplicates)
+                ThrowIfKeyTaken(tag, newKey, after.RecordNumber);
             if (oldKey is not null || newKey is not null)
                 changes.Add(new TagChange(tag, oldKey, newKey));
         }
         return changes;
+    }
+
+    // A candidate key is checked against what the tag will hold once this batch's planned changes
+    // are applied, not only what's in it now: AppendRange applies its rows' keys at the commit, so
+    // two rows of one batch with the same key would otherwise both get in.
+    private void ThrowIfKeyTaken(IMaintainedTag tag, byte[] key, int recordNumber)
+    {
+        var holders = new HashSet<int>();
+        if (tag.FirstRecordFor(key) is { } holder)
+            holders.Add(holder);
+        foreach (var (changes, pendingRecord) in _pendingIndexChanges)
+        {
+            foreach (var change in changes)
+            {
+                if (!ReferenceEquals(change.Tag, tag))
+                    continue;
+                if (change.Remove is { } removed && removed.AsSpan().SequenceEqual(key))
+                    holders.Remove(pendingRecord);
+                if (change.Insert is { } inserted && inserted.AsSpan().SequenceEqual(key))
+                    holders.Add(pendingRecord);
+            }
+        }
+        holders.Remove(recordNumber);
+        if (holders.Count > 0)
+            throw DuplicateKey(tag, holders.Min());
+    }
+
+    private static DbfException DuplicateKey(IMaintainedTag tag, int holder) =>
+        new(DbfErrorCode.InvalidValue, $"Uniqueness of index {tag.Name} would be violated: record {holder} already has this key.",
+            $"Give the record a {tag.Name} value no other record has; FoxPro refuses duplicates in a candidate or primary key the same way.");
+
+    // A rebuild's keys are checked on their own, before the index is touched: the old tree says
+    // nothing about which records share a key now.
+    private static void ThrowIfRebuiltKeysRepeat(Dictionary<IMaintainedTag, List<(byte[] Key, int Record)>> keysByTag)
+    {
+        foreach (var (tag, keys) in keysByTag)
+        {
+            if (!tag.RefusesDuplicates)
+                continue;
+            var seen = new Dictionary<string, int>();
+            foreach (var (key, record) in keys)
+            {
+                if (!seen.TryAdd(Convert.ToHexString(key), record))
+                    throw DuplicateKey(tag, seen[Convert.ToHexString(key)]);
+            }
+        }
     }
 
     // Applies one record's index changes. If one fails partway (a damaged node, a full disk), the
@@ -1119,12 +1220,13 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
-    // A unique tag keeps one record per key: the lowest record number, as a rebuild would choose.
+    // A unique tag keeps one record per key: the lowest record number, as a rebuild would choose; or,
+    // for Visual FoxPro, whichever record got there first.
     private void InsertKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done)
     {
         if (tag.IsUnique && tag.FirstRecordFor(key) is { } holder)
         {
-            if (holder <= recordNumber)
+            if (holder <= recordNumber || tag.UniqueKeepsFirstIndexed)
                 return;
             tag.Remove(key, holder);
             done.Add(() => tag.Insert(key, holder));
@@ -1144,7 +1246,7 @@ public sealed partial class DbfTable : IDisposable
             return;
         }
         done.Add(() => tag.Insert(key, recordNumber));
-        if (tag.IsUnique && LowestOtherRecordWithKey(tag, key, recordNumber) is { } next)
+        if (tag.IsUnique && !tag.UniqueKeepsFirstIndexed && LowestOtherRecordWithKey(tag, key, recordNumber) is { } next)
         {
             tag.Insert(key, next);
             done.Add(() => tag.Remove(key, next));
@@ -1197,20 +1299,14 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // Swaps every tag's keys for the given ones (in record order) and commits. A unique tag keeps the
-    // lowest record number per key, judged by the tag's own comparison, so 1E2 and 100 count as one key.
+    // lowest record number per key (see IMaintainedTag.ReplaceAll).
     private void ReplaceAllKeys(Dictionary<IMaintainedTag, List<(byte[] Key, int Record)>> keysByTag)
     {
+        ThrowIfRebuiltKeysRepeat(keysByTag);
         // Until every tag is refilled and on disk, the indexes are half rebuilt.
         _indexesNeedRebuild = true;
         foreach (var (tag, keys) in keysByTag)
-        {
-            tag.Clear();
-            foreach (var (key, record) in keys)
-            {
-                if (!tag.IsUnique || tag.FirstRecordFor(key) is null)
-                    tag.Insert(key, record);
-            }
-        }
+            tag.ReplaceAll(keys);
         CommitIndexes();
         _indexesNeedRebuild = false;
     }

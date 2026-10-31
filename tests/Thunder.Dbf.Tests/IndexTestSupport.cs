@@ -28,9 +28,11 @@ internal static class IndexTestSupport
     /// checks the index holds exactly those keys, for exactly those records, in sorted order.
     /// <paramref name="notIndexed"/> lists records the file's own app added after the index was last updated.
     /// <paramref name="byteOrdered"/> is false for tags their writer sorted with a language collation.
+    /// <paramref name="uniqueFirstCome"/> is true for Visual FoxPro's UNIQUE tags, which may have lost a key
+    /// whose holder left (nothing is promoted until a REINDEX), so they hold at most one entry per key.
     /// </summary>
     public static void AssertTagMatchesTable(TagView tag, DbfTable table, IReadOnlyCollection<int>? notIndexed = null,
-        bool byteOrdered = true)
+        bool byteOrdered = true, bool uniqueFirstCome = false)
     {
         var key = DbfExpression.Parse(tag.Expression);
         var filter = tag.ForExpression is { } f ? DbfExpression.Parse(f) : null;
@@ -51,7 +53,10 @@ internal static class IndexTestSupport
             // really has the key it's filed under.
             var byRecord = expected.ToDictionary(e => e.Record, e => e.Key);
             Assert.Equal(actual.Count, actual.Select(e => e.Key).Distinct().Count());
-            Assert.Equal(expected.Select(e => e.Key).Distinct().Count(), actual.Count);
+            if (uniqueFirstCome)
+                Assert.True(actual.Count <= expected.Select(e => e.Key).Distinct().Count());
+            else
+                Assert.Equal(expected.Select(e => e.Key).Distinct().Count(), actual.Count);
             Assert.All(actual, e => Assert.Equal(byRecord[e.RecordNumber], e.Key));
             return;
         }
