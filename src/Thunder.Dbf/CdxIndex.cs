@@ -165,7 +165,8 @@ public sealed partial class CdxIndex : IDisposable
     /// <summary>Reads <paramref name="length"/> bytes at <paramref name="offset"/>, which must be page-aligned and inside the file.</summary>
     internal byte[] Read(long offset, int length)
     {
-        if (offset < 0 || offset % DefaultPageLength != 0 || offset + length > FileLength() && offset + length > FileLength(fresh: true))
+        // Past the length last seen: check the real one before refusing (another program may have grown the file).
+        if (offset < 0 || offset % DefaultPageLength != 0 || (offset + length > FileLength() && offset + length > FileLength(fresh: true)))
             throw new InvalidDataException($"Offset {offset} is outside the .cdx file or not on a page boundary.");
 
         var block = new byte[length];

@@ -573,7 +573,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
 
     internal void Write(long offset, ReadOnlySpan<byte> bytes)
     {
-        if (offset < 0 || offset % DefaultPageLength != 0 || offset + bytes.Length > FileLength() && offset + bytes.Length > FileLength(fresh: true))
+        if (offset < 0 || offset % DefaultPageLength != 0 || (offset + bytes.Length > FileLength() && offset + bytes.Length > FileLength(fresh: true)))
             throw new InvalidOperationException($"Can't write the .cdx page at offset {offset}.");
         if (!_changed)
         {
