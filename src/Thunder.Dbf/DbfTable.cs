@@ -787,12 +787,14 @@ public sealed partial class DbfTable : IDisposable
 
         var current = Read(index);
         var values = current.Values.ToArray();
+        var named = new bool[Fields.Count];
         foreach (var (name, value) in changes)
         {
             var i = FieldIndex(name) ?? throw new ArgumentException($"The table has no field named '{name}'.", nameof(changes));
             values[i] = value;
+            named[i] = true;
         }
-        UpdateCore(index, current, values);
+        UpdateCore(index, current, values, named);
         return (current, Read(index));
     }
 
@@ -808,16 +810,17 @@ public sealed partial class DbfTable : IDisposable
 
     // Writes a record's new values under the caller's locks. Order: memos (inside EncodeFields), the
     // record, then index entries; each reaches the disk before the next starts.
-    private void UpdateCore(int index, DbfRecord current, object?[] values)
+    // named: the fields UpdateFields was given. An empty memo or blank field also reads back as null,
+    // so null only means .NULL. for a field named there; anywhere else it's the value it already has.
+    private void UpdateCore(int index, DbfRecord current, object?[] values, bool[]? named = null)
     {
         Seek(index);
         _stream.ReadExactly(_buffer); // the on-disk bytes, which unchanged fields keep
         var changed = new bool[Fields.Count];
         for (var i = 0; i < Fields.Count; i++)
         {
-            // An empty memo or blank field also reads back as null; making it .NULL. is still a change.
             changed[i] = !SameValue(current.Values[i], values[i])
-                || (values[i] is null && Fields[i].NullBit is not null && !current.IsNull(i));
+                || (named is not null && named[i] && values[i] is null && Fields[i].NullBit is not null && !current.IsNull(i));
         }
 
         values = (object?[])values.Clone();

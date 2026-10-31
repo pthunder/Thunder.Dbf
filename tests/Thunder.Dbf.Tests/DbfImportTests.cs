@@ -61,7 +61,7 @@ public sealed class DbfImportTests : IDisposable
                 ["Score"] = DbfFieldDefinition.Double("SCORE"),
             },
         };
-        DbfImport.FromCsv(Csv("Code,When,Qty,Rate,Score\nAB,2026-10-31T14:30:15,-3,12.5,0.25\n,2026-10-31,,,\n"), Dbf(), options);
+        DbfImport.FromCsv(Csv("Code,When,Qty,Rate,Score\nAB,2026-10-31T14:30:15,-3,12.5,0.25\n,2026-10-31,,\"1,234.50\",\"2,000.5\"\n"), Dbf(), options);
 
         using var table = DbfTable.Open(Dbf());
         var first = table.Read(0);
@@ -72,6 +72,8 @@ public sealed class DbfImportTests : IDisposable
         Assert.Equal(0.25, first["SCORE"]);
         Assert.True(table.Read(1).IsNull(0));
         Assert.Equal(new DateTime(2026, 10, 31), table.Read(1)["WHEN"]);
+        Assert.Equal(1234.50m, table.Read(1)["RATE"]);   // thousands separators, as before
+        Assert.Equal(2000.5, table.Read(1)["SCORE"]);
     }
 
     [Fact]

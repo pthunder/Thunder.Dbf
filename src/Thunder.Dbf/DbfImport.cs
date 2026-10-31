@@ -363,9 +363,10 @@ public static class DbfImport
         {
             'L' => IsWord(value, TrueWords) ? true : IsWord(value, FalseWords) ? false : throw new FormatException(),
             'D' => ParseDate(value, options) ?? throw new FormatException(),
-            'N' or 'F' or 'Y' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture),
+            'N' or 'F' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture),
+            'Y' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowThousands, CultureInfo.InvariantCulture),
             'I' => int.Parse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture),
-            'B' => double.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture),
+            'B' => double.Parse(value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture),
             'T' => ParseDateTime(value, options) ?? throw new FormatException(),
             _ => value,
         };

@@ -185,6 +185,22 @@ public sealed class CreateFormatTests : IDisposable
     }
 
     [Fact]
+    public void Updating_other_fields_leaves_an_empty_nullable_memo_empty()
+    {
+        var path = PathOf("NOTES2.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+            [DbfFieldDefinition.Character("NAME", 5), DbfFieldDefinition.Memo("NOTES") with { Nullable = true }]))
+        {
+            table.Append("Ada", "", null);
+            table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "Grace" });
+            table.UpdateFields(0, new Dictionary<string, object?>());
+        }
+        using var reopened = DbfTable.Open(path);
+        Assert.False(reopened.Read(0).IsNull(1));
+        Assert.Equal("Grace", reopened.Read(0)["NAME"]);
+    }
+
+    [Fact]
     public void A_FoxPro_memo_file_refuses_a_stray_fpt()
     {
         File.WriteAllBytes(PathOf("PEOPLE.FPT"), [1, 2, 3]);
