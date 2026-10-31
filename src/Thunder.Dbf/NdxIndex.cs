@@ -11,18 +11,23 @@ using System.Text;
 
 namespace Thunder.Dbf;
 
-/// <summary>A dBASE III single-index (.ndx) file. Read-only.</summary>
+/// <summary>
+/// A dBASE III single-index (.ndx) file. Opened on its own it only reads; a writable
+/// <see cref="DbfTable"/> opens the .ndx files next to it itself and keeps them up to date.
+/// </summary>
 public sealed partial class NdxIndex : IDisposable
 {
     internal const int PageSize = 512;
 
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
+    private readonly DbfTable? _table; // kept so a reload still knows which numeric keys are dates
 
-    private NdxIndex(Stream stream, bool leaveOpen, Encoding encoding)
+    private NdxIndex(Stream stream, bool leaveOpen, Encoding encoding, DbfTable? table)
     {
         _stream = stream;
         _leaveOpen = leaveOpen;
+        _table = table;
         Encoding = encoding;
     }
 
@@ -73,7 +78,7 @@ public sealed partial class NdxIndex : IDisposable
             throw new ArgumentException("NDX files need a seekable stream.", nameof(stream));
 
         var name = stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
-        var index = new NdxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage));
+        var index = new NdxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage), table);
         index.Tag = NdxTag.Load(index, name, table);
         return index;
     }
