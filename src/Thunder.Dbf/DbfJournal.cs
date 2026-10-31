@@ -7,7 +7,7 @@
 //   TABLE.DBF.journal, empty when nothing's in flight:
 //
 //   +------+--------+-------+---------------------------------------------------+----------+
-//   | TDJ1 | record | count | per tag: index file, tag, old key, new key        | SHA-256  |
+//   | TDJ2 | record | count | per tag: index file, tag, old key, new key        | SHA-256  |
 //   +------+--------+-------+---------------------------------------------------+----------+
 //     4      4        4       1 + file, 1 + tag, 2 + old (-1: none), 2 + new       32
 
@@ -31,7 +31,8 @@ internal sealed record DbfJournalChange(string IndexFile, string Tag, byte[]? Ol
 /// </summary>
 internal static class DbfJournal
 {
-    private static readonly byte[] Magic = "TDJ1"u8.ToArray();
+    private static readonly byte[] Magic = "TDJ2"u8.ToArray();
+    private static readonly byte[] Family = "TDJ"u8.ToArray();
     private const int HashLength = 32;
 
     public static string PathFor(string tablePath) => tablePath + ".journal";
@@ -58,7 +59,10 @@ internal static class DbfJournal
         file.Flush(flushToDisk: true);
     }
 
-    /// <summary>The note, or null when there's none (no file, an empty one, or one torn before any index change).</summary>
+    /// <summary>
+    /// The note, or null when there's none (no file, an empty one, or one torn before any index change).
+    /// Throws <see cref="InvalidDataException"/> for a whole note in another version of the format.
+    /// </summary>
     public static DbfJournalEntry? Read(string tablePath)
     {
         var path = PathFor(tablePath);
@@ -72,9 +76,12 @@ internal static class DbfJournal
             bytes = new byte[file.Length];
             file.ReadExactly(bytes);
         }
-        if (bytes.Length < Magic.Length + 8 + HashLength
-            || !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic)
-            || !SHA256.HashData(bytes.AsSpan(0, bytes.Length - HashLength)).AsSpan().SequenceEqual(bytes.AsSpan(bytes.Length - HashLength)))
+        var hashed = bytes.Length >= Magic.Length + 8 + HashLength
+            && SHA256.HashData(bytes.AsSpan(0, bytes.Length - HashLength)).AsSpan().SequenceEqual(bytes.AsSpan(bytes.Length - HashLength));
+        // A whole note in another version of the format can't be read safely, nor dropped as torn.
+        if (hashed && bytes.AsSpan(0, Family.Length).SequenceEqual(Family) && !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic))
+            throw new InvalidDataException($"The journal note is in format {Encoding.ASCII.GetString(bytes, 0, Magic.Length)}, not {Encoding.ASCII.GetString(Magic)}.");
+        if (!hashed || !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic))
             return null;
 
         var at = Magic.Length;

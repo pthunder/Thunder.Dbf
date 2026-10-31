@@ -151,6 +151,7 @@ public sealed partial class DbfTable : IDisposable
                 {
                     if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
                         table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
+                    table._journalPending = DbfJournal.IsPending(path);
                     table.AttachOtherIndexes(path, table.Header);
                     table.RepairUnfinishedAppends();
                 }
@@ -217,7 +218,7 @@ public sealed partial class DbfTable : IDisposable
                 unmaintained.Add(Path.GetFileName(file));
                 continue;
             }
-            if (!TryAttachIndex(file))
+            if (!TryAttachIndex(file, forJournal: _journalPending))
                 unmaintained.Add(Path.GetFileName(file));
         }
         _unmaintainedIndexes = unmaintained;
@@ -313,7 +314,10 @@ public sealed partial class DbfTable : IDisposable
         Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase) && _path is not null
         && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase);
 
-    private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
+    // forJournal: a journal note is waiting, and a cut-off key change leaves an index out of step
+    // with the table in just the way the note will put right. Such an index is attached on
+    // probation: writes wait for the replay, which then checks it again.
+    private bool TryAttachIndex(string file, bool acceptAfterRebuild = false, bool forJournal = false)
     {
         // FoxPro index writing is a preview, so it's only used when asked for.
         if (!_maintainFoxProIndexes && Path.GetExtension(file).ToLowerInvariant() is ".cdx" or ".idx")
@@ -324,10 +328,15 @@ public sealed partial class DbfTable : IDisposable
             {
                 stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
                 IDbfIndex index = OpenAnyIndex(file, stream, Encoding, this);
-                if (index is IMaintainedIndex maintained && (maintained.CanMaintain || (acceptAfterRebuild && maintained.CanMaintainAfterRebuild)))
+                if (index is IMaintainedIndex maintained
+                    && (maintained.CanMaintain || ((acceptAfterRebuild || forJournal) && maintained.CanMaintainAfterRebuild)))
                 {
                     if (!maintained.CanMaintain)
+                    {
                         maintained.ExpectRebuild();
+                        if (!acceptAfterRebuild)
+                            _awaitingReplay.Add(maintained);
+                    }
                     _otherIndexes.Add(maintained);
                     _attachedIndexes[Path.GetFullPath(file)] = maintained;
                     if (IsStructuralCdx(file))
@@ -402,7 +411,7 @@ public sealed partial class DbfTable : IDisposable
     // custom .ntx, say) stops writes, like one that was that way at open. Its tags are left alone.
     private void ThrowIfIndexCantBeMaintained()
     {
-        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain) is not { } index)
+        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain && !_awaitingReplay.Contains(i)) is not { } index)
             return;
         throw new DbfException(DbfErrorCode.IndexWouldGoStale,
             "One of this table's indexes was changed by another program into a kind Thunder.Dbf can't keep up to date.",
@@ -954,9 +963,7 @@ public sealed partial class DbfTable : IDisposable
             FlushToDisk(_stream);
         });
         CommitCounters(counters);
-        CommitHeader();
-        if (journaled)
-            DbfJournal.Clear(_path!);
+        CommitAfterKeyChange(journaled);
     }
 
     /// <summary>
@@ -1252,9 +1259,7 @@ public sealed partial class DbfTable : IDisposable
             _stream.WriteByte(flag);
             FlushToDisk(_stream);
         });
-        CommitHeader();
-        if (journaled)
-            DbfJournal.Clear(_path!);
+        CommitAfterKeyChange(journaled);
     }
 
     // ---- index maintenance ----------------------------------------------------------------
@@ -1367,6 +1372,23 @@ public sealed partial class DbfTable : IDisposable
         return journaled;
     }
 
+    // A failed commit leaves the index's state on disk unknown, so writes wait for a rebuild; the note
+    // stays, and is cleared only once everything it covers is committed.
+    private void CommitAfterKeyChange(bool journaled)
+    {
+        try
+        {
+            CommitHeader();
+        }
+        catch (IOException)
+        {
+            _indexesNeedRebuild = true;
+            throw;
+        }
+        if (journaled)
+            DbfJournal.Clear(_path!);
+    }
+
     // The index file a tag lives in, by name, so a journal note finds the same tag in another process.
     private string IndexFileOf(IMaintainedTag tag)
     {
@@ -1382,6 +1404,8 @@ public sealed partial class DbfTable : IDisposable
         MaintainedIndexes.SelectMany(i => i.MaintainedTags).Select(t => (IndexFileOf(t), t));
 
     private bool _useJournal;
+    private bool _journalPending; // a note was waiting when the table opened
+    private readonly HashSet<IMaintainedIndex> _awaitingReplay = [];
 
     /// <summary>For the tests: called between a key change's steps, where throwing stands in for a killed process.</summary>
     internal Action<string>? CrashPoint { get; set; }
@@ -1409,39 +1433,63 @@ public sealed partial class DbfTable : IDisposable
 
     // Finishes a key change a writer was cut off in the middle of. Every journaled write holds the
     // header lock, which the caller holds now; the record is locked too, against legacy programs
-    // editing it meanwhile. Each noted change is matched to exactly one kept tag (index file, tag
-    // name and key length); a note this table can't match stops writes, rather than being written
-    // over, until the table is opened with those indexes or they're all rebuilt. Steps never leave a
-    // key missing: a key the record has now is added (if it isn't there) before stale ones go.
+    // editing it meanwhile (without waiting: whoever holds it may be waiting for this header lock,
+    // and will finish the note itself). Each noted change is matched to exactly one kept tag (index
+    // file, tag name, key length); a note this table can't match stops writes, rather than being
+    // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
+    // record has are added and forced to disk before stale ones go, so none goes missing on the way.
     private void ReplayJournal()
     {
-        if (_path is null || !_stream.CanWrite || !DbfJournal.IsPending(_path))
+        if (_path is null || !_stream.CanWrite)
             return;
-        if (DbfJournal.Read(_path) is not { } entry)
+        if (!DbfJournal.IsPending(_path))
         {
-            DbfJournal.Clear(_path); // torn: cut off while noting, before any index change
+            RecheckAfterReplay();
             return;
         }
 
+        DbfJournalEntry? entry;
+        try
+        {
+            entry = DbfJournal.Read(_path);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale, "The table's journal holds a note in a format this version doesn't read.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears it.", _path, ex);
+        }
+        if (entry is null)
+        {
+            DbfJournal.Clear(_path); // torn: cut off while noting, before any index change
+            RecheckAfterReplay();
+            return;
+        }
+
+        var record = entry.RecordNumber >= 1 && entry.RecordNumber <= RecordCount ? Read(entry.RecordNumber - 1) : null;
         var tags = TagsWithFiles().ToList();
         var matched = new List<(DbfJournalChange Change, IMaintainedTag Tag)>();
         foreach (var change in entry.Changes)
         {
             var candidates = tags.Where(t => string.Equals(t.File, change.IndexFile, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(t.Tag.Name, change.Tag, StringComparison.OrdinalIgnoreCase)).ToList();
-            if (candidates.Count != 1)
+            var noted = (change.OldKey ?? change.NewKey)?.Length;
+            if (candidates.Count != 1 || (record is not null && noted is { } length && candidates[0].Tag.KeyFor(record).Length != length))
                 throw new DbfException(DbfErrorCode.IndexWouldGoStale,
                     $"A Thunder.Dbf write to record {entry.RecordNumber} was cut off while changing keys in {change.IndexFile} (tag {change.Tag}), which this table doesn't keep, so it can't be finished here.",
                     "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
             matched.Add((change, candidates[0].Tag));
         }
 
-        using var recordLock = entry.RecordNumber >= 1 ? Locks.Record(entry.RecordNumber, "finished") : null;
-        var record = entry.RecordNumber >= 1 && entry.RecordNumber <= RecordCount ? Read(entry.RecordNumber - 1) : null;
+        using var recordLock = entry.RecordNumber >= 1 ? TryLockRecordNow(entry.RecordNumber) : null;
         try
         {
+            // Keys the record has go in first, and reach the disk, before anything is taken out.
             foreach (var (change, tag) in matched)
-                Reconcile(tag, change, record, entry.RecordNumber);
+                Reconcile(tag, change, record, entry.RecordNumber, adding: true);
+            CommitIndexes();
+            foreach (var (change, tag) in matched)
+                Reconcile(tag, change, record, entry.RecordNumber, adding: false);
+            CommitIndexes();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException)
         {
@@ -1449,17 +1497,53 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.IndexDamaged, $"A cut-off write to record {entry.RecordNumber} couldn't be finished in the index.",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex().", _path, ex);
         }
-        CommitIndexes();
         DbfJournal.Clear(_path);
+        RecheckAfterReplay();
     }
 
-    // Makes one tag hold what the record has now. A tag without UNIQUE gets the record's key (added
-    // only if it's missing), then loses the noted keys that are now stale. A UNIQUE tag changed only
-    // after the record was written: if the record has its new key, that change is finished the way the
-    // write would have (the key goes to its holder by the tag's rules, the old one is let go); if it
-    // still has its old key, nothing in the tag had changed yet, and only a noted new key pointing at
-    // it is taken back, never the old key added (a Visual FoxPro UNIQUE tag can rightly lack it).
-    private void Reconcile(IMaintainedTag tag, DbfJournalChange change, DbfRecord? record, int recordNumber)
+    private DbfLock TryLockRecordNow(int recordNumber)
+    {
+        var timeout = Locks.Timeout;
+        Locks.Timeout = TimeSpan.Zero;
+        try
+        {
+            return Locks.Record(recordNumber, "finished after a cut-off write");
+        }
+        finally
+        {
+            Locks.Timeout = timeout;
+        }
+    }
+
+    // An index attached on probation (out of step with the table when it opened, while a note was
+    // waiting) is checked again once the note is finished: if it still doesn't match, writes stop
+    // until a rebuild.
+    private void RecheckAfterReplay()
+    {
+        foreach (var index in _awaitingReplay.ToList())
+        {
+            _awaitingReplay.Remove(index);
+            index.RebuildAbandoned();
+            try
+            {
+                index.ReloadTags();
+            }
+            catch (DbfException)
+            {
+                _indexesNeedRebuild = true;
+                throw;
+            }
+        }
+    }
+
+    // Makes one tag hold what the record has now, in two passes: adding (the record's key, if it's
+    // missing) and removing (noted keys that are now stale). A UNIQUE tag changed only after the
+    // record was written: if the record has its new key, or has left the tag, that change is finished
+    // the way the write would have (the key goes to its holder by the tag's rules, the old one is let
+    // go); if it still has its old key, nothing in the tag had changed yet, and only a noted new key
+    // pointing at it is taken back, never the old key added (a Visual FoxPro UNIQUE tag can rightly
+    // lack it).
+    private void Reconcile(IMaintainedTag tag, DbfJournalChange change, DbfRecord? record, int recordNumber, bool adding)
     {
         var current = record is not null && tag.Includes(record) ? tag.KeyFor(record) : null;
         var done = new List<Action>();
@@ -1467,21 +1551,31 @@ public sealed partial class DbfTable : IDisposable
 
         if (!tag.IsUnique)
         {
-            if (current is not null && !tag.Contains(current, recordNumber))
+            if (adding && current is not null && !tag.Contains(current, recordNumber))
                 tag.Insert(current, recordNumber);
-            foreach (var stale in new[] { change.OldKey, change.NewKey }.OfType<byte[]>().Where(k => !Same(k, current)))
-                tag.Remove(stale, recordNumber);
+            if (!adding)
+            {
+                foreach (var stale in new[] { change.OldKey, change.NewKey }.OfType<byte[]>().Where(k => !Same(k, current)))
+                    tag.Remove(stale, recordNumber);
+            }
             return;
         }
 
-        if (current is not null && Same(current, change.NewKey) && !Same(current, change.OldKey))
+        // Out of the tag now: written if the change was the record leaving (or moving within) the tag;
+        // if it was the record coming in, the record wasn't written yet. In the tag: written if it has
+        // the new key.
+        var written = current is null ? change.OldKey is not null : Same(current, change.NewKey) && !Same(current, change.OldKey);
+        if (written)
         {
-            if (!tag.Contains(current, recordNumber))
+            if (adding && current is not null && !tag.Contains(current, recordNumber))
                 InsertKey(tag, current, recordNumber, done);
-            if (change.OldKey is { } old)
-                RemoveKey(tag, old, recordNumber, done, mayBeMissing: true);
+            if (!adding)
+            {
+                foreach (var stale in new[] { change.OldKey, change.NewKey }.OfType<byte[]>().Where(k => !Same(k, current)))
+                    RemoveKey(tag, stale, recordNumber, done, mayBeMissing: true);
+            }
         }
-        else if (change.NewKey is { } added && !Same(added, current))
+        else if (!adding && change.NewKey is { } added && !Same(added, current))
         {
             RemoveKey(tag, added, recordNumber, done, mayBeMissing: true);
         }
@@ -1626,14 +1720,21 @@ public sealed partial class DbfTable : IDisposable
         _indexesNeedRebuild = false;
         // Rebuilt from the table, so a note about these indexes is moot; one naming an index this
         // table doesn't keep stays for a process that does.
-        if (_path is not null && DbfJournal.Read(_path) is { } note)
+        if (_path is not null)
         {
+            DbfJournalEntry? note;
+            try
+            {
+                note = DbfJournal.Read(_path);
+            }
+            catch (InvalidDataException)
+            {
+                note = null; // a format this version can't read: the rebuild is the way past it
+            }
             var files = TagsWithFiles().Select(t => t.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (note.Changes.All(c => files.Contains(c.IndexFile)))
+            if (note is null || note.Changes.All(c => files.Contains(c.IndexFile)))
                 DbfJournal.Clear(_path);
         }
-        else if (_path is not null)
-            DbfJournal.Clear(_path); // torn, or nothing
     }
 
     private void CheckValueCount(object?[] values)

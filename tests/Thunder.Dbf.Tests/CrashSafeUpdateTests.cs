@@ -111,7 +111,7 @@ public sealed class CrashSafeUpdateTests : IDisposable
     {
         var path = Table();
         var before = Entries(path);
-        File.WriteAllBytes(path + ".journal", "TDJ1 torn"u8.ToArray());
+        File.WriteAllBytes(path + ".journal", "TDJ2 torn"u8.ToArray());
         using (var table = DbfTable.Open(path, writable: true))
         {
             table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 36m });
@@ -196,5 +196,76 @@ public sealed class CrashSafeUpdateTests : IDisposable
         using var index = table.OpenProductionIndex()!;
         Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Zelda");
         Assert.DoesNotContain(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Grace");
+    }
+
+    // A killed update leaves a .cdx tag with an extra key, which the open-time count check refuses.
+    // With a note waiting, the index is attached on probation, the next write finishes the note,
+    // and the index passes its checks again.
+    [Fact]
+    public void A_VFP_index_left_with_an_extra_key_is_put_right_by_the_journal()
+    {
+        foreach (var file in Directory.GetFiles(Path.GetDirectoryName(IndexTestSupport.Fixture("infused-dbf/foxprodb/calls.dbf"))!, "calls.*"))
+            File.Copy(file, Path.Combine(_dir.FullName, Path.GetFileName(file)));
+        var path = Path.Combine(_dir.FullName, "calls.dbf");
+        int oldId;
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.True(table.MaintainsIndex);
+            table.UseJournal = true;
+            oldId = (int)table.Read(3)["CALL_ID"]!;
+            table.CrashPoint = point => { if (point == "record") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.UpdateFields(3, new Dictionary<string, object?> { ["CALL_ID"] = 70_000 }));
+        }
+
+        using (var shared = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.True(shared.MaintainsIndex);    // on probation while the note waits
+            shared.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after" });
+            Assert.False(shared.HasPendingJournal);
+        }
+
+        using (var reopened = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
+            Assert.True(reopened.MaintainsIndex);  // passes the count check on its own now
+        using var check = DbfTable.Open(path);
+        using var index = CdxIndex.Open(Path.ChangeExtension(path, ".CDX"), table: check);
+        Assert.Equal(check.RecordCount, index["CALL_ID"].Entries().Count());
+        Assert.Equal(4, Assert.Single(index["CALL_ID"].SeekExact(70_000)).RecordNumber);
+        Assert.Empty(index["CALL_ID"].SeekExact(oldId));
+    }
+
+    // A deleted record leaves a UNIQUE ... FOR .NOT. DELETED() tag after its record is written; cut
+    // off there, the note takes its key out.
+    [Fact]
+    public void A_record_leaving_a_UNIQUE_FOR_tag_is_finished_by_the_journal()
+    {
+        var path = Table();
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("LIVE", "NAME", forExpression: ".NOT. DELETED()", unique: true);
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UseJournal = true;
+            table.CrashPoint = point => { if (point == "record") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.Delete(1));
+        }
+        using (var table = DbfTable.Open(path, writable: true))
+            table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m });
+        Assert.Equal(Rebuilt(path), Entries(path));
+        using var check = DbfTable.Open(path);
+        using var index = check.OpenProductionIndex()!;
+        Assert.DoesNotContain(index["LIVE"].Entries(), e => e.RecordNumber == 2);
+    }
+
+    [Fact]
+    public void A_whole_note_in_another_format_stops_writes_until_a_rebuild()
+    {
+        var path = Table();
+        var body = "TDJ1"u8.ToArray().Concat(new byte[12]).ToArray();
+        File.WriteAllBytes(path + ".journal", [.. body, .. System.Security.Cryptography.SHA256.HashData(body)]);
+        using (var table = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale,
+                Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m })).Code);
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.RebuildIndex();
+        Assert.Equal(0, new FileInfo(path + ".journal").Length);
     }
 }
