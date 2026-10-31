@@ -49,7 +49,7 @@ This adds a tag to the production `.mdx`, creating the file (and setting the tab
 - **A crash can't leave a half-filled tag.** The tag is filled while it's still unlisted, and listed last.
 - **Expressions and filters are stored in the table's code page.** A character the code page can't hold is refused.
 
-dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app is closed, because a program that already has the `.mdx` open won't see the new tag until it reopens it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
+Like dBASE's `INDEX ON`, it needs the table to itself: open it with `exclusive: true`, or it throws `ExclusiveUseRequired`. A program that already had the `.mdx` open wouldn't see the new tag until it reopened it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
 
 ## Rebuilding
 
@@ -57,7 +57,7 @@ dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app i
 table.RebuildIndex();   // like dBASE's REINDEX: every tag, from the table
 ```
 
-Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
+Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. An index another program left out of step isn't attached when the table opens; take it over with `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table. It rebuilds every index the table keeps, not only the `.mdx`. Like REINDEX in dBASE and FoxPro it needs the table opened with `exclusive: true` (so does `MaintainIndex(path, rebuild: true)`): a program with the table open would go on reading index pages a rebuild has replaced, which Visual FoxPro reports as a corrupted tag. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
 
 ## How it's verified
 
@@ -101,6 +101,9 @@ Thunder.Dbf keeps an index only when it can write exactly what the legacy progra
 - **A damaged `.cdx`:** pages shared by two tags, a free page still in a tree, or sibling links that don't point back. Reported as damage, not as a sort order, so `rebuild: true` doesn't take it over: REINDEX it in FoxPro.
 - **A stray `.cdx` next to a dBASE IV table** whose `.mdx` is missing: the table is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields. Otherwise the missing `.mdx` keeps blocking writes.
 - **An index created next to the table after it was opened:** reopen the table.
+- **A `.cdx` out of step with the table:** a tag holding a different number of keys than the table has records (when it has no FOR filter and no UNIQUE), the last records missing from a tag that should hold them, or stored keys that aren't the ones the table's records give. A write cut off between the record and its keys leaves this. Open the table with `writable: true, exclusive: true, maintainFoxProIndexes: true` and call `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table.
+
+Microsoft's Jet and ACE drivers (Access, and ADO with `Extended Properties=dBASE IV`) keep a `.mdx`'s plain tags but not its FOR tags: a FOR tag on a table that an Access or Jet program writes to goes out of date, and Jet can't create one either. Keep FOR tags off such tables, or rebuild them after Jet has written.
 
 If an index update fails partway, every later write to that table stops until `RebuildIndex()` succeeds. A half-applied change is never built on.
 

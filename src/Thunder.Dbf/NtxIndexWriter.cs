@@ -42,6 +42,8 @@ public sealed partial class NtxIndex : IMaintainedIndex
     private bool _changed;
     private DbfLocks? _fileLocks;
 
+    internal bool Writable => _stream is FileStream { CanWrite: true };
+
     IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => CannotMaintainReason is null ? Tags : [];
     bool IMaintainedIndex.CanMaintain => CannotMaintainReason is null;
     string? IMaintainedIndex.CannotMaintainReason => CannotMaintainReason;
@@ -240,7 +242,9 @@ public sealed partial class NtxTag : IMaintainedTag
         var digits = KeyLength - (KeyDecimals > 0 ? 1 : 0);
         if (KeyType == 'N' && digits > MaxNumericDigits)
             return $"Tag {Name}'s numeric keys hold {digits} digits, more than the {MaxNumericDigits} Clipper's STR() keeps exactly.";
-        return ByteOrderProblem();
+        // The walk reads every page, so it holds Clipper's index lock: a Clipper or Harbour program
+        // writing meanwhile would otherwise show a page mid-change, and a key "out of order" that isn't.
+        return _index.Writable ? _index.Update(this, ByteOrderProblem) : ByteOrderProblem();
     }
 
     // The file doesn't record a national sort order. Keys a collation ordered show up as a pair out

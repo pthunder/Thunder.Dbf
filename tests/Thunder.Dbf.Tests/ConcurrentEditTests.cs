@@ -79,6 +79,35 @@ public sealed class ConcurrentEditTests : IDisposable
         Assert.Equal((offset, 1L), table.Locks.RecordRange(recordNumber));
     }
 
+    // Microsoft's Jet (Access) reads a held header byte, 4,026,531,838, as "the table is opened
+    // exclusively by another user" and fails at once, and appends under the byte after it (measured
+    // against Jet 4.0). The Jet scheme makes header changes under that append byte; dBASE (dBASE IV,
+    // the Borland Database Engine) keeps the header byte.
+    [Theory]
+    [InlineData(DbfLockScheme.Dbase, 4_026_531_838L, 4_026_531_839L)]
+    [InlineData(DbfLockScheme.Jet, 4_026_531_839L, 4_026_531_839L)]
+    public void dBASE_and_Jet_take_their_own_header_bytes(DbfLockScheme scheme, long header, long append)
+    {
+        using var table = DbfTable.Open(_path, writable: true);
+        table.LockScheme = scheme;
+        Assert.Equal((header, 1L), table.Locks.HeaderRange);
+        Assert.Equal((append, 1L), table.Locks.AppendRange);
+        Assert.Contains((4_026_531_838L, 2L), table.Locks.TableRanges);
+        Assert.Contains((3_026_531_838L, 1_000_000_000L), table.Locks.TableRanges);
+        Assert.Equal((4_026_531_835L, 1L), table.Locks.RecordRange(3));
+    }
+
+    [Fact]
+    public void The_lock_scheme_can_change_while_no_lock_is_held()
+    {
+        using var table = DbfTable.Open(_path, writable: true);
+        using (table.LockTable()) { }
+        table.LockScheme = DbfLockScheme.Jet;
+        Assert.Equal(DbfLockScheme.Jet, table.LockScheme);
+        using var held = table.LockTable();
+        Assert.Throws<InvalidOperationException>(() => table.LockScheme = DbfLockScheme.Clipper);
+    }
+
     [Fact]
     public void Visual_FoxPro_tables_pick_the_FoxPro_scheme_by_themselves()
     {
@@ -194,7 +223,7 @@ public sealed class IndexSafetyTests : IDisposable
         Copy("xsharp/rdd-tests/TEST10K.CDX");
         var path = Copy("xsharp/rdd-tests/TEST10K.DBF");
 
-        using var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        using var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
         Assert.True(table.Header.HasStructuralCdx);
         Assert.False(table.Header.HasProductionMdx);
         Assert.Equal(DbfLockScheme.VisualFoxPro, table.LockScheme);
@@ -212,7 +241,7 @@ public sealed class IndexSafetyTests : IDisposable
         foreach (var file in new[] { "CHANGELOG.DBF", "CHANGELOG.DBT", "CHANGELOG.MDX" })
             Copy(Path.Combine("siemens-step7/siprom", file));
         var path = Path.Combine(_dir.FullName, "CHANGELOG.DBF");
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
 
         // Another program loses record 2's USER_TAG entry: the index is now out of step.
         using (var mdx = MdxIndex.Open(DbfException.OpenFile(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
@@ -258,7 +287,7 @@ internal static class IndexedTables
     /// </summary>
     public static DbfTable OpenWithIndexes(string path)
     {
-        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
         foreach (var index in DbfTable.FindCompanionIndexes(path, table.Header))
             table.MaintainIndex(index);
         return table;

@@ -23,7 +23,7 @@ public sealed class MdxWriteTests : IDisposable
 
     private DbfTable OpenWritable()
     {
-        var table = DbfTable.Open(_table, writable: true);
+        var table = DbfTable.Open(_table, writable: true, exclusive: true);
         Assert.True(table.MaintainsIndex);
         return table;
     }
@@ -162,7 +162,7 @@ public sealed class MdxWriteTests : IDisposable
     public void Writes_without_the_index_are_still_refused_unless_allowed()
     {
         File.Move(Path.Combine(_dir.FullName, "CHANGELOG.MDX"), Path.Combine(_dir.FullName, "moved.mdx"));
-        using var table = DbfTable.Open(_table, writable: true);
+        using var table = DbfTable.Open(_table, writable: true, exclusive: true);
 
         Assert.False(table.MaintainsIndex);
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, Assert.Throws<DbfException>(() => table.Delete(0)).Code);

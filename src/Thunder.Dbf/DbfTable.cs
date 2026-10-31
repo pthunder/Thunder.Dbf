@@ -107,12 +107,27 @@ public sealed partial class DbfTable : IDisposable
     /// <param name="path">The .dbf file.</param>
     /// <param name="writable">Open for writing. Read-only by default.</param>
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
+    /// <param name="exclusive">Open the .dbf so no other program can open it, like dBASE and FoxPro's
+    /// <c>USE ... EXCLUSIVE</c>; fails with <see cref="DbfErrorCode.FileInUse"/> while another program has it
+    /// open. <see cref="Pack"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/> and
+    /// <c>MaintainIndex(path, rebuild: true)</c> need it.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
-        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false)
+        bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false, bool exclusive = false)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive);
+
+    /// <summary>Opens a table shared: the 0.1.0 signature, kept so code compiled against it still runs.</summary>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public static DbfTable Open(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes)
+        => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive: false);
+
+    private static DbfTable OpenPath(string path, bool writable, Encoding? encoding, bool ignoreMissingMemo,
+        bool allowUnmaintainedIndexes, bool maintainFoxProIndexes, bool exclusive)
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
-        var stream = DbfException.OpenFile(path, FileMode.Open, access, share);
+        // Every program has to open the .dbf to use the table, so holding it unshared is enough.
+        var stream = DbfException.OpenFile(path, FileMode.Open, access, exclusive ? FileShare.None : share);
         FileStream? memoStream = null;
         try
         {
@@ -125,15 +140,25 @@ public sealed partial class DbfTable : IDisposable
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
+            table._exclusive = exclusive;
             table._maintainFoxProIndexes = maintainFoxProIndexes;
             if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is { } cdx
                 && IsIndexOver(cdx, table.Header))
                 table.Header.TreatIndexFlagAsCdx(); // a FoxPro 2 table without memos: it says 0x03, like dBASE
             if (writable)
             {
-                if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
-                    table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
-                table.AttachOtherIndexes(path, table.Header);
+                try
+                {
+                    if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
+                        table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
+                    table.AttachOtherIndexes(path, table.Header);
+                    table.RepairUnfinishedAppends();
+                }
+                catch
+                {
+                    table.Dispose();
+                    throw;
+                }
             }
             return table;
         }
@@ -147,7 +172,9 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Opens a table from a seekable stream, with its memo file in <paramref name="memoStream"/> if it has memo fields.
-    /// Text uses <paramref name="encoding"/>, else the header's language driver.
+    /// Text uses <paramref name="encoding"/>, else the header's language driver. PACK, rebuilds and INDEX ON don't
+    /// check for exclusive use on a stream: when it's a file other programs could have open, keeping them out
+    /// (opening it with <see cref="FileShare.None"/>) is the caller's job.
     /// </summary>
     public static DbfTable Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false, Stream? memoStream = null,
         bool ignoreMissingMemo = false, bool allowUnmaintainedIndexes = false, Stream? indexStream = null)
@@ -236,6 +263,8 @@ public sealed partial class DbfTable : IDisposable
     public void MaintainIndex(string path, bool rebuild = false)
     {
         EnsureWritable();
+        if (rebuild)
+            RequireExclusive("Rebuilding an index");
         var full = Path.GetFullPath(path);
         var name = Path.GetFileName(full);
         if (_attachedIndexes.ContainsKey(full))
@@ -277,6 +306,12 @@ public sealed partial class DbfTable : IDisposable
     }
 
     private bool _maintainFoxProIndexes;
+    private string? _structuralCdxRefusal; // why the structural .cdx wasn't attached, for the write refusal
+    private bool _structuralCdxRebuildable; // and whether a takeover with a rebuild would take it
+
+    private bool IsStructuralCdx(string file) =>
+        Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase) && _path is not null
+        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase);
 
     private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
     {
@@ -295,12 +330,18 @@ public sealed partial class DbfTable : IDisposable
                         maintained.ExpectRebuild();
                     _otherIndexes.Add(maintained);
                     _attachedIndexes[Path.GetFullPath(file)] = maintained;
-                    if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)
-                        && _path is not null
-                        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase))
+                    if (IsStructuralCdx(file))
+                    {
                         HasMaintainedStructuralCdx = true;
+                        _structuralCdxRefusal = null;
+                    }
                     stream = null; // the index owns it now
                     return true;
+                }
+                if (index is IMaintainedIndex refused && IsStructuralCdx(file))
+                {
+                    _structuralCdxRefusal = refused.CannotMaintainReason;
+                    _structuralCdxRebuildable = refused.CanMaintainAfterRebuild;
                 }
                 index.Dispose();
                 stream = null;
@@ -354,7 +395,7 @@ public sealed partial class DbfTable : IDisposable
     {
         if (_indexesNeedRebuild)
             throw new DbfException(DbfErrorCode.IndexDamaged, "An earlier write couldn't update this table's indexes, so they may be out of step.",
-                "Call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
+                "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
     }
 
     // An attached index another program has since rebuilt into something Thunder.Dbf can't keep (a
@@ -409,6 +450,22 @@ public sealed partial class DbfTable : IDisposable
     // ---- locking ---------------------------------------------------------------------------
 
     private DbfLocks? _locks;
+    private bool _exclusive;
+
+    /// <summary>True when this table holds its .dbf so no other program can open it (see the <c>exclusive</c> parameter of Open).</summary>
+    public bool IsExclusive => _exclusive;
+
+    // PACK, REINDEX and INDEX ON rewrite pages and renumber records other programs may hold in their
+    // caches, so dBASE and FoxPro only run them on a table opened EXCLUSIVE; so does Thunder.Dbf.
+    // A table opened from a stream is the caller's to share or not.
+    private void RequireExclusive(string operation)
+    {
+        if (_path is null || _exclusive)
+            return;
+        throw new DbfException(DbfErrorCode.ExclusiveUseRequired,
+            $"{operation} needs the table opened exclusively, as dBASE and FoxPro require: other programs could be holding its records or index pages.",
+            "Close the legacy app, then open the table with exclusive: true (Exclusive=true in a connection string).", _path);
+    }
     internal DbfLocks Locks => _locks ??= new DbfLocks(_stream as FileStream, _path, _lockScheme, Header) { Timeout = _lockTimeout, RequireLocks = _requireLocks };
     private TimeSpan _lockTimeout = TimeSpan.FromSeconds(3);
     private bool _requireLocks;
@@ -425,8 +482,12 @@ public sealed partial class DbfTable : IDisposable
         get => _locks?.Scheme ?? DbfLocks.Resolve(_lockScheme, Header);
         set
         {
-            if (_locks is not null && _locks.Scheme != value && value != DbfLockScheme.Auto)
-                throw new InvalidOperationException("Set LockScheme before the table's first write or lock.");
+            if (_locks is not null && _locks.Scheme != DbfLocks.Resolve(value, Header))
+            {
+                if (!_locks.HoldsNothing)
+                    throw new InvalidOperationException("Set LockScheme while the table holds no lock.");
+                _locks = null; // made again, with the new positions, by the next lock
+            }
             _lockScheme = value;
         }
     }
@@ -478,6 +539,15 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed.</summary>
     public DbfLock LockTable() => Locks.Table();
 
+    /// <summary>Re-reads only the header's record count and counters, for an index checking itself against the table.</summary>
+    internal void ReloadHeader()
+    {
+        if (_stream is not FileStream)
+            return;
+        DiscardReadBuffer(_stream);
+        Header.Reload(_stream);
+    }
+
     /// <summary>
     /// Re-reads the record count (and autoincrement counters) from disk, to see records other
     /// programs have added since the table was opened. Writes do this on their own, under lock.
@@ -505,7 +575,7 @@ public sealed partial class DbfTable : IDisposable
         ThrowIfIndexAppeared();
         ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
-                structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
+                structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
             throw blocker;
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
@@ -516,6 +586,75 @@ public sealed partial class DbfTable : IDisposable
         if (appending && dataEnd + Header.RecordLength + 1 > MaxTableBytes)
             throw new DbfException(DbfErrorCode.InvalidValue, "The table has reached the 2 GB size dBASE and FoxPro can handle.",
                 "Archive or pack older records before adding more.", _path);
+    }
+
+    // An append writes the record, then the header's count, then the keys. Cut off after the first,
+    // it leaves whole records past the count, and Visual FoxPro calls the table corrupted (error
+    // 2091). Bytes past the count can also be another program's append in progress (Harbour, for
+    // one, can publish the count later, after releasing its lock), so only a table opened
+    // exclusively, where nobody else can be writing, takes them off. Only bytes that look like
+    // records (each starting with a delete flag, then at most the 0x1A end mark) count.
+    private long UnfinishedAppends(long dataEnd)
+    {
+        if (_stream is not FileStream)
+            return 0;
+        var extra = _stream.Length - dataEnd;
+        if (extra < Header.RecordLength)
+            return 0;
+        var whole = extra / Header.RecordLength;
+        var tail = extra - whole * Header.RecordLength;
+        if (tail > 1)
+            return 0;
+        Span<byte> one = stackalloc byte[1];
+        for (var i = 0L; i < whole; i++)
+        {
+            _stream.Position = dataEnd + i * Header.RecordLength;
+            _stream.ReadExactly(one);
+            if (one[0] is not ((byte)' ' or (byte)'*'))
+                return 0;
+        }
+        if (tail == 1)
+        {
+            _stream.Position = _stream.Length - 1;
+            _stream.ReadExactly(one);
+            if (one[0] != EndOfFile)
+                return 0;
+        }
+        return whole;
+    }
+
+    /// <summary>How many whole records sit past the header's count, read fresh from disk: an append cut off, or one in progress.</summary>
+    internal long RecordsPastCount()
+    {
+        ReloadHeader();
+        DiscardReadBuffer(_stream);
+        return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
+    }
+
+    // On a writable exclusive open: takes records left past the count back off and rebuilds every
+    // index, since a writer cut off may already have added keys for them, and a key left behind would
+    // point at whatever record is appended there next. So nothing is taken off unless every index
+    // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
+    // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
+    private void RepairUnfinishedAppends()
+    {
+        if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
+            return;
+        var takeOverCdx = Header.HasStructuralCdx && !HasMaintainedStructuralCdx;
+        if (_unmaintainedIndexes.Any(name => !IsStructuralCdx(name))
+            || (Header.HasProductionMdx && _index is null)
+            || (takeOverCdx && !(_maintainFoxProIndexes && _structuralCdxRebuildable && FindCompanion(_path!, ".cdx") is not null)))
+            return;
+
+        var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+        _stream.SetLength(dataEnd);
+        _stream.Position = dataEnd;
+        _stream.WriteByte(EndOfFile);
+        FlushToDisk(_stream);
+        if (takeOverCdx)
+            MaintainIndex(FindCompanion(_path!, ".cdx")!, rebuild: true); // rebuilds every index the table keeps
+        else if (MaintainsIndex)
+            RebuildIndex();
     }
 
     /// <summary>The table's file path, or null for a stream. For plans and logs, never for messages.</summary>
@@ -545,7 +684,8 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.TableAlreadyExists, $"'{Path.GetFileName(existing)}' already exists next to the new table.",
                 "Pick another table name, or move the old files away first; Thunder.Dbf won't adopt or overwrite another table's files.", existing);
 
-        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
+        // Unshared, like a table opened EXCLUSIVE, so INDEX ON and PACK can follow straight away.
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
         FileStream? memoStream = null;
         try
         {
@@ -554,6 +694,7 @@ public sealed partial class DbfTable : IDisposable
 
             var table = Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
+            table._exclusive = true; // brand new, and held unshared
             return table;
         }
         catch
@@ -1216,7 +1357,7 @@ public sealed partial class DbfTable : IDisposable
                 }
             }
             throw new DbfException(DbfErrorCode.IndexDamaged, $"Record {recordNumber} was written, but its index entries couldn't be updated.",
-                "Run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
         }
     }
 
@@ -1278,6 +1419,7 @@ public sealed partial class DbfTable : IDisposable
             throw new DbfException(DbfErrorCode.IndexDamaged, "The table has no index open that Thunder.Dbf can rebuild.",
                 "Open the table by path, writable, with its index files next to it.", _path);
 
+        RequireExclusive("Rebuilding the indexes");
         using var tableLock = Locks.Table();
         Refresh();
         if (Header.HasIncompleteTransaction)
@@ -1337,7 +1479,7 @@ public sealed partial class DbfTable : IDisposable
     /// Shared by writes and <see cref="DbfDatabase.Check"/> so the handshake never promises what writes refuse.
     /// </summary>
     internal static DbfException? WriteBlocker(DbfHeader header, bool allowUnmaintainedIndexes, bool indexMaintained, string? path,
-        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false)
+        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false, string? structuralCdxRefusal = null)
     {
         if (header.HasIncompleteTransaction)
             return new DbfException(DbfErrorCode.IncompleteTransaction, "dBASE IV marked a transaction on this table as unfinished.",
@@ -1347,7 +1489,12 @@ public sealed partial class DbfTable : IDisposable
         if (header.HasProductionMdx && !indexMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table says it has a production .mdx index, but it isn't open (missing, or the table was opened from a stream without it), so writing would leave it out of date.",
-                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and call RebuildIndex() afterwards.", path);
+                "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and rebuild it afterwards (exclusive: true, RebuildIndex).", path);
+        if (header.HasStructuralCdx && !structuralCdxMaintained && structuralCdxRefusal is not null)
+            return new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "The table's FoxPro .cdx index can't be kept up to date as it stands, so writing would leave it further out of date.",
+                "If it's out of step with the table (a write that reached the table but not the index), close the legacy app, open the table with exclusive: true and call MaintainIndex(path, rebuild: true), or REINDEX in FoxPro.",
+                path, diagnostic: structuralCdxRefusal);
         if (header.HasStructuralCdx && !structuralCdxMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table has a FoxPro .cdx index that isn't open for updating (missing, unreadable, or opened from a stream), so writing would leave it out of date.",

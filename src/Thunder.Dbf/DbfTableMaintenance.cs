@@ -20,8 +20,8 @@ public sealed partial class DbfTable
     /// as dBASE does) and kept up to date by every write after that.
     /// </summary>
     /// <remarks>
-    /// Takes the table lock. dBASE needs the table opened EXCLUSIVE for INDEX ON, so do this while the legacy
-    /// app is closed: a program that already has the .mdx open won't see the new tag until it reopens it.
+    /// Needs the table opened exclusively (as dBASE needs EXCLUSIVE for INDEX ON), so the legacy app must be
+    /// closed: a program that already had the .mdx open wouldn't see the new tag until it reopened it.
     /// dBASE IV tables only; FoxPro tables use .cdx indexes.
     /// </remarks>
     public void CreateIndexTag(string name, string expression, string? forExpression = null, bool unique = false, bool descending = false)
@@ -35,6 +35,7 @@ public sealed partial class DbfTable
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't get a new .mdx file.",
                 "Open the table by path, or pass its .mdx stream to DbfTable.Open.");
 
+        RequireExclusive("INDEX ON");
         var parsed = ParseIndexExpression(expression, "key expression");
         var filter = forExpression is null ? null : ParseIndexExpression(forExpression, "FOR filter");
 
@@ -235,8 +236,8 @@ public sealed partial class DbfTable
     /// </summary>
     /// <remarks>
     /// Record numbers change, so anything that remembered one (a web page, the SQL bridge, another
-    /// program's open table) is wrong afterwards. dBASE needs the table opened EXCLUSIVE for PACK: run it
-    /// while the legacy app is closed. A copy of the .dbf is kept beside it (<c>.dbf.packing</c>) until
+    /// program's open table) is wrong afterwards, so, as dBASE needs EXCLUSIVE for PACK, the table must be
+    /// opened exclusively (the legacy app closed). A copy of the .dbf is kept beside it (<c>.dbf.packing</c>) until
     /// the pack has finished. If a crash interrupts it, every write is refused until the table is put
     /// back: replace the .dbf with that copy, delete the copy, and call <see cref="RebuildIndex"/>.
     /// </remarks>
@@ -246,6 +247,7 @@ public sealed partial class DbfTable
         if (_path is null)
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "A table opened from a stream can't be packed, because there's nowhere to keep its safety copy.",
                 "Open the table by path.");
+        RequireExclusive("PACK");
 
         using var tableLock = Locks.Table();
         PrepareWrite(appending: false); // also refuses while an earlier pack is unfinished
@@ -314,7 +316,7 @@ public sealed partial class DbfTable
         if (PackBackupPath is { } backup && File.Exists(backup))
             throw new DbfException(DbfErrorCode.IncompleteTransaction,
                 "A PACK of this table didn't finish, so its records may be half moved.",
-                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then call RebuildIndex().", _path);
+                "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then open the table with exclusive: true and call RebuildIndex().", _path);
     }
 
     private void BackUpForPack(string backup, long bytes)
