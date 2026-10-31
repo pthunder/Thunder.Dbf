@@ -16,6 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` preview) is safer:
 
+- **Tag roots stay put:** a full root's keys move down into new pages and the root is rewritten in place; shrinking and rebuilds also keep the root's address. Visual FoxPro reads each root's address once, when it opens the table, so a moved root left it walking a stale page while Thunder.Dbf wrote (found by the Visual FoxPro round-trip test).
+
 - **Visual FoxPro's index lock:** every change, and every reload of the tag list, runs under the lock Visual FoxPro takes on the index file itself (one byte at 0x7FFFFFFE), following `LockTimeout` and `RequireLocks`; pages are re-read under it and the update counter is bumped before it's released.
 - **Crash-safe page order:** splits write the new page before the page that links it in, emptied pages go on the free list only once nothing points at them, and a rebuild builds a whole new tree and switches to it in one header write. A crash can leave keys listed twice or unused pages, never a key missing.
 - **Visual FoxPro's UNIQUE tags** change the way Visual FoxPro changes them between rebuilds: the first record with a key keeps it, and nothing is promoted when it leaves. A rebuild still picks the lowest record.

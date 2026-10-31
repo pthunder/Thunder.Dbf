@@ -83,6 +83,7 @@ public sealed partial class CdxWriteTests : IDisposable
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
         var before = TagDirectory(cdx);
+        var roots = Roots(cdx);
         using (var table = OpenWritable(dbf))
         {
             Assert.Equal(1, Tag(cdx, "CALL_ID").Height());
@@ -95,6 +96,7 @@ public sealed partial class CdxWriteTests : IDisposable
         Assert.Equal(3, Tag(cdx, "CALL_ID").Height()); // the root leaf split, then the root above it
         Assert.True(Tag(cdx, "CONTACT_ID").Height() >= 2);
         Assert.Equal(before, TagDirectory(cdx));
+        Assert.Equal(roots, Roots(cdx));   // grown in place: Visual FoxPro keeps reading each root where it was
 
         using var reopened = DbfTable.Open(dbf);
         using var index = CdxIndex.Open(cdx, table: reopened);
@@ -102,6 +104,36 @@ public sealed partial class CdxWriteTests : IDisposable
         Assert.Equal(17 + 4321, reopened.Read(hit.RecordNumber - 1)["CALL_ID"]);
         Assert.Equal(reopened.ReadAll().Count(r => (int)r["CONTACT_ID"]! == 7), index["CONTACT_ID"].SeekExact(7).Count());
     }
+
+    // Visual FoxPro reads each tag's root address when it opens the table and never again, so a root
+    // that moved would leave it walking a page that no longer heads the tree (found by the round trip).
+    [Fact]
+    public void Roots_stay_where_they_are_through_growth_shrinking_and_rebuilds()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        var roots = Roots(cdx);
+        using (var table = OpenWritable(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            var first = table.RecordCount;
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+            Assert.True(Tag(cdx, "CALL_ID").Height() >= 2);
+            Assert.Equal(roots, Roots(cdx));
+
+            // Changing every key empties pages and collapses the tree back toward one page.
+            for (var i = first; i < table.RecordCount; i++)
+                table.UpdateFields(i, new Dictionary<string, object?> { ["CALL_ID"] = -i });
+            Assert.Equal(roots, Roots(cdx));
+
+            table.RebuildIndex();
+            Assert.Equal(roots, Roots(cdx));
+        }
+
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
+    private static Dictionary<string, long> Roots(string cdx) =>
+        CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx))).Tags.ToDictionary(t => t.Name, t => t.RootPage);
 
     [Fact]
     public void Updates_deletes_and_recalls_keep_every_tag_exact()

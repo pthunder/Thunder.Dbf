@@ -956,6 +956,9 @@ public sealed partial class CdxTag : IMaintainedTag
         return pages;
     }
 
+    /// <summary>Where the tag's root page is, for the tests: it never moves (Visual FoxPro holds on to it).</summary>
+    internal long RootPage => RootOffset();
+
     /// <summary>Levels from the root down to the leaves, for the tests.</summary>
     internal int Height()
     {
@@ -992,13 +995,6 @@ public sealed partial class CdxTag : IMaintainedTag
             throw new InvalidDataException($"Tag {Name} is deeper than {MaxDepth} levels; the index is probably corrupt.");
     }
 
-    private void SetRoot(long offset)
-    {
-        var header = _index.Read(HeaderOffset, CdxIndex.DefaultPageLength);
-        BinaryPrimitives.WriteUInt32LittleEndian(header, checked((uint)offset));
-        _index.Write(HeaderOffset, header);
-    }
-
     private static int CompareEntries(byte[] key, int record, byte[] otherKey, int otherRecord)
     {
         var order = key.AsSpan().SequenceCompareTo(otherKey);
@@ -1022,7 +1018,6 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         public readonly List<Node> Fresh = [];
         public readonly List<(int Level, Node Node)> Changed = [];
-        public long? NewRoot;
         public readonly List<(uint Offset, bool LeftLink, uint Target)> Links = [];
         public readonly List<long> Freed = [];
     }
@@ -1035,12 +1030,8 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         foreach (var node in plan.Fresh)
             WriteNode(node);
-        if (topDown && plan.NewRoot is { } grownRoot)
-            SetRoot(grownRoot);
         foreach (var (_, node) in topDown ? plan.Changed.OrderByDescending(c => c.Level) : plan.Changed.OrderBy(c => c.Level))
             WriteNode(node);
-        if (!topDown && plan.NewRoot is { } root)
-            SetRoot(root);
         foreach (var (offset, leftLink, target) in plan.Links)
             PatchSibling(offset, leftLink, target);
         foreach (var page in plan.Freed)
@@ -1102,27 +1093,35 @@ public sealed partial class CdxTag : IMaintainedTag
                 continue;
             }
 
+            // Visual FoxPro reads a tag's root address once, when it opens the table, and keeps using
+            // it, so the root never moves: a full root's keys go down into two new pages and the root
+            // page is rewritten in place above them, which is also the one write that switches over.
             var isRoot = path.Count == 0;
+            var rootOffset = node.Offset;
             if (isRoot)
+            {
                 node.Attributes &= unchecked((ushort)~RootAttribute);
+                node.Offset = _index.AllocatePage();
+            }
             var right = Split(node, appendedAtEnd);
             plan.Fresh.Add(right);
-            plan.Changed.Add((level, node));
+            if (isRoot)
+                plan.Fresh.Add(node);
+            else
+                plan.Changed.Add((level, node));
             if (right.Right != NoPage)
                 plan.Links.Add((right.Right, true, (uint)right.Offset));
 
             if (isRoot)
             {
-                var root = new Node
+                plan.Changed.Add((level + 1, new Node
                 {
-                    Offset = _index.AllocatePage(),
+                    Offset = rootOffset,
                     Attributes = RootAttribute,
                     Keys = [node.Keys[^1], right.Keys[^1]],
                     Records = [node.Records[^1], right.Records[^1]],
                     Children = [(uint)node.Offset, (uint)right.Offset],
-                };
-                plan.Fresh.Add(root);
-                plan.NewRoot = root.Offset;
+                }));
                 return;
             }
 
@@ -1294,8 +1293,9 @@ public sealed partial class CdxTag : IMaintainedTag
         }
     }
 
-    // A root with a single child hands the root role to that child, so the tree stays as shallow as
-    // its keys need. The header moves to the child before the old root is freed.
+    // A root with a single child takes that child's entries, so the tree stays as shallow as its keys
+    // need. The root keeps its page (Visual FoxPro holds on to its address): the child's contents are
+    // written over it in one page write, and only then is the child's page freed.
     private void CollapseRoot()
     {
         for (var depth = 0; ; depth++)
@@ -1305,11 +1305,12 @@ public sealed partial class CdxTag : IMaintainedTag
             if (root.IsLeaf || root.Count > 1)
                 return;
             var child = ReadNode(root.Children![0]);
+            var childPage = child.Offset;
+            child.Offset = root.Offset;
             child.Attributes |= RootAttribute;
             child.Left = child.Right = NoPage;
             WriteNode(child);
-            SetRoot(child.Offset);
-            _index.FreePage(root.Offset);
+            _index.FreePage(childPage);
         }
     }
 
@@ -1322,9 +1323,10 @@ public sealed partial class CdxTag : IMaintainedTag
 
     /// <summary>
     /// Rebuilds the tag from <paramref name="keys"/>, like FoxPro's REINDEX: a UNIQUE tag keeps the
-    /// lowest record number per key. The new tree is built in new pages, the header is switched to
-    /// its root last, and only then do the old tree's pages go on the free list, so a crash leaves
-    /// either the old tree or the new one, never half of each.
+    /// lowest record number per key. The new tree is built in new pages and its root is written over
+    /// the old root last, in place (Visual FoxPro keeps the root's address), and only then do the old
+    /// tree's other pages go on the free list, so a crash leaves either the old tree or the new one,
+    /// never half of each.
     /// </summary>
     internal void ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
@@ -1378,13 +1380,13 @@ public sealed partial class CdxTag : IMaintainedTag
         }
         var root = level[0];
         root.Attributes |= RootAttribute;
-        Place(level);
-        built.Add(root);
+        root.Offset = RootOffset();
+        root.Left = root.Right = NoPage;
 
         foreach (var node in built)
             WriteNode(node);
-        SetRoot(root.Offset);
-        foreach (var page in oldPages)
+        WriteNode(root);
+        foreach (var page in oldPages.Where(p => p != root.Offset))
             _index.FreePage(page);
     }
 
