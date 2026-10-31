@@ -12,13 +12,13 @@
   '
 ```
 
-From 0.1.0, the first release on nuget.org (coming soon), install it as a global .NET tool:
+Install it from nuget.org as a global .NET tool:
 
 ```bash
 dotnet tool install -g thunder-dbf
 ```
 
-Until then, run it from the repository:
+Or run it from a clone of the repository:
 
 ```bash
 dotnet run --project tools/Thunder.Dbf.Cli -- <command>

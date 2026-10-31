@@ -51,7 +51,7 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 
 ## Install
 
-Coming with 0.1.0, the first release on nuget.org (not published yet):
+From [nuget.org](https://www.nuget.org/packages/Thunder.Dbf):
 
 ```bash
 dotnet add package Thunder.Dbf
@@ -65,7 +65,7 @@ dotnet add package Thunder.Dbf.Sql
 dotnet tool install -g thunder-dbf
 ```
 
-The web service will be a self-contained download for Windows, Linux and macOS on each [GitHub release](https://github.com/pthunder/Thunder.Dbf/releases). Until then, build from a clone:
+The web service is a self-contained download for Windows, Linux and macOS on each [GitHub release](https://github.com/pthunder/Thunder.Dbf/releases).
 
 ## Quick start
 
@@ -152,13 +152,13 @@ Done:
 11. ~~Typed records and a LINQ provider that seeks through `.mdx` tags~~
 12. ~~`INDEX ON` (`CreateIndexTag`) and `PACK`~~
 13. ~~Keeping `.ndx` and `.ntx` indexes up to date on writes~~
+14. ~~0.1.0 on nuget.org: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool, plus web service downloads on each GitHub release~~
 
 Next:
 
 - FoxPro `.cdx` writing out of preview: a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself) (the index lock, large record numbers, batch candidate keys and crash-safe page order are in)
 - Creating `.ndx`, `.ntx` and `.cdx` tags (today `INDEX ON` writes `.mdx` tags)
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
-- NuGet packages, coming with 0.1.0: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool on nuget.org, and self-contained web service downloads for Windows, Linux and macOS on each GitHub release. The packaging and release workflow are ready.
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).
 
