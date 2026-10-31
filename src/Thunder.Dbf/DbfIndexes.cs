@@ -95,6 +95,12 @@ internal interface IMaintainedIndex : IDisposable
 {
     IEnumerable<IMaintainedTag> MaintainedTags { get; }
 
+    /// <summary>
+    /// False when this particular file can't be kept exactly as its own program would (an unknown sort
+    /// order, a maintenance mode that isn't supported): the table then refuses writes instead.
+    /// </summary>
+    bool CanMaintain => true;
+
     /// <summary>Re-reads the tag list, in case another program changed the file.</summary>
     void ReloadTags();
 

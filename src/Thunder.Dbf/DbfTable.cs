@@ -171,21 +171,63 @@ public sealed partial class DbfTable : IDisposable
     private void AttachOtherIndexes(string path, DbfHeader header)
     {
         var unmaintained = new List<string>();
+        _indexFilesAtOpen = IndexFileNames(path);
         foreach (var file in FindCompanionIndexes(path, header))
+        {
+            // .ndx, .ntx and .idx files don't record which table they belong to, and a field name like
+            // ID is in many tables, so only an index named after the table is taken to be its own.
+            // Any other that looks like it belongs blocks writes until MaintainIndex names it.
+            if (!Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(path), StringComparison.OrdinalIgnoreCase))
+            {
+                unmaintained.Add(Path.GetFileName(file));
+                continue;
+            }
+            if (!TryAttachIndex(file))
+                unmaintained.Add(Path.GetFileName(file));
+        }
+        _unmaintainedIndexes = unmaintained;
+    }
+
+    /// <summary>
+    /// Keeps the index at <paramref name="path"/> up to date from now on, for an index whose name
+    /// doesn't match the table's (dBASE III and Clipper indexes record nothing that ties them to a
+    /// table, so Thunder.Dbf won't guess). Use it for every index the legacy app opens with this table,
+    /// such as <c>USE CUSTOMER INDEX CUSTNAME, CUSTZIP</c>.
+    /// </summary>
+    /// <exception cref="DbfException">The index can't be read, or its format can't be kept up to date.</exception>
+    public void MaintainIndex(string path)
+    {
+        EnsureWritable();
+        var full = Path.GetFullPath(path);
+        var name = Path.GetFileName(full);
+        if (_attachedIndexPaths.Contains(full))
+            return;
+        if (!File.Exists(full))
+            throw new DbfException(DbfErrorCode.TableNotFound, "There's no index file at that path.", "Check the name and folder.", diagnostic: full);
+        if (!TryAttachIndex(full))
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"The index {name} can't be kept up to date (unreadable, or a format or sort order Thunder.Dbf doesn't write).",
+                "Rebuild it in the legacy app, or open with allowUnmaintainedIndexes: true if it will be rebuilt before use.", _path);
+        _unmaintainedIndexes = _unmaintainedIndexes.Where(n => !n.Equals(name, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    private bool TryAttachIndex(string file)
+    {
         {
             Stream? stream = null;
             try
             {
                 stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
                 IDbfIndex index = OpenAnyIndex(file, stream, Encoding, this);
-                if (index is IMaintainedIndex maintained)
+                if (index is IMaintainedIndex { CanMaintain: true } maintained)
                 {
                     _otherIndexes.Add(maintained);
+                    _attachedIndexPaths.Add(Path.GetFullPath(file));
                     if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)
-                        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(path), StringComparison.OrdinalIgnoreCase))
+                        && _path is not null
+                        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase))
                         HasMaintainedStructuralCdx = true;
                     stream = null; // the index owns it now
-                    continue;
+                    return true;
                 }
                 index.Dispose();
                 stream = null;
@@ -198,9 +240,48 @@ public sealed partial class DbfTable : IDisposable
             {
                 stream?.Dispose();
             }
-            unmaintained.Add(Path.GetFileName(file));
+            return false;
         }
-        _unmaintainedIndexes = unmaintained;
+    }
+
+    // ---- indexes that appear after opening ------------------------------------------------
+
+    private HashSet<string> _indexFilesAtOpen = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _attachedIndexPaths = new(StringComparer.OrdinalIgnoreCase);
+
+    private static HashSet<string> IndexFileNames(string tablePath) =>
+        Directory.EnumerateFiles(Path.GetDirectoryName(Path.GetFullPath(tablePath))!)
+            .Where(f => Path.GetExtension(f).ToLowerInvariant() is ".ndx" or ".ntx" or ".idx" or ".cdx" or ".mdx")
+            .Select(Path.GetFileName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase)!;
+
+    // An index created next to the table after it was opened (by the legacy app's INDEX ON, say)
+    // isn't attached, so writing would leave it stale. Only a new file name triggers the slower check.
+    private void ThrowIfIndexAppeared()
+    {
+        if (_path is null || !_stream.CanWrite || _allowUnmaintainedIndexes)
+            return;
+        var now = IndexFileNames(_path);
+        if (now.IsSubsetOf(_indexFilesAtOpen))
+            return;
+        var fresh = FindCompanionIndexes(_path, Header).Select(Path.GetFileName).Where(n => !_indexFilesAtOpen.Contains(n!)).ToList();
+        if (fresh.Count > 0)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                $"An index that belongs to this table appeared after it was opened ({string.Join(", ", fresh)}), so writing would leave it out of date.",
+                "Close and reopen the table so it can be kept up to date.", _path);
+        _indexFilesAtOpen = now; // new files that don't belong to this table
+    }
+
+    // ---- failed index updates -------------------------------------------------------------
+
+    private bool _indexesNeedRebuild;
+
+    // After a failed index update the index may hold half a change, so no write may build on it.
+    private void ThrowIfIndexesNeedRebuild()
+    {
+        if (_indexesNeedRebuild)
+            throw new DbfException(DbfErrorCode.IndexDamaged, "An earlier write couldn't update this table's indexes, so they may be out of step.",
+                "Call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
     }
 
     private static IDbfIndex OpenAnyIndexReadOnly(string path)
@@ -335,6 +416,8 @@ public sealed partial class DbfTable : IDisposable
     {
         Refresh();
         ThrowIfPackUnfinished();
+        ThrowIfIndexesNeedRebuild();
+        ThrowIfIndexAppeared();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
                 structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
             throw blocker;
@@ -980,6 +1063,9 @@ public sealed partial class DbfTable : IDisposable
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException)
         {
+            // Undo what can be undone, but don't trust it: a tree operation that failed halfway can't be
+            // undone key by key, and the record itself is already written. Writes stop until a rebuild.
+            _indexesNeedRebuild = true;
             for (var i = done.Count - 1; i >= 0; i--)
             {
                 try
@@ -1013,7 +1099,13 @@ public sealed partial class DbfTable : IDisposable
     private void RemoveKey(IMaintainedTag tag, byte[] key, int recordNumber, List<Action> done)
     {
         if (!tag.Remove(key, recordNumber))
+        {
+            // A unique tag may hold another record under this key. Any other tag must have had this
+            // entry: if it's missing, the index is already out of step with the table.
+            if (!tag.IsUnique)
+                throw new InvalidDataException($"Index tag {tag.Name} has no entry for record {recordNumber}, which it should.");
             return;
+        }
         done.Add(() => tag.Insert(key, recordNumber));
         if (tag.IsUnique && LowestOtherRecordWithKey(tag, key, recordNumber) is { } next)
         {
@@ -1071,6 +1163,8 @@ public sealed partial class DbfTable : IDisposable
     // lowest record number per key, judged by the tag's own comparison, so 1E2 and 100 count as one key.
     private void ReplaceAllKeys(Dictionary<IMaintainedTag, List<(byte[] Key, int Record)>> keysByTag)
     {
+        // Until every tag is refilled and on disk, the indexes are half rebuilt.
+        _indexesNeedRebuild = true;
         foreach (var (tag, keys) in keysByTag)
         {
             tag.Clear();
@@ -1081,6 +1175,7 @@ public sealed partial class DbfTable : IDisposable
             }
         }
         CommitIndexes();
+        _indexesNeedRebuild = false;
     }
 
     private void CheckValueCount(object?[] values)

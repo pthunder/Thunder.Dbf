@@ -28,7 +28,7 @@ public sealed class NdxWriteTests : IDisposable
 
     private static DbfTable OpenWritable(string path)
     {
-        var table = DbfTable.Open(path, writable: true);
+        var table = IndexedTables.OpenWithIndexes(path);
         Assert.True(table.MaintainsIndex);
         return table;
     }

@@ -48,7 +48,7 @@ public sealed class NtxWriteTests : IDisposable
 
     private static DbfTable OpenWritable(string path)
     {
-        var table = DbfTable.Open(path, writable: true);
+        var table = IndexedTables.OpenWithIndexes(path);
         Assert.True(table.MaintainsIndex);
         return table;
     }
@@ -167,7 +167,7 @@ public sealed class NtxWriteTests : IDisposable
         }
 
         var random = new Random(2024);
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = IndexedTables.OpenWithIndexes(path))
         {
             table.RebuildIndex();
             table.AppendRange(Enumerable.Range(0, 250).Select(i => Customer(table, random.Next(1, 2000), $"F{random.Next(40):D2}", $"L{random.Next(40):D2}")));
@@ -248,7 +248,7 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyCustomers();
         SetHeaderByte("Custname.ntx", 278, 1);
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = IndexedTables.OpenWithIndexes(path))
             table.RebuildIndex();
 
         int firstDuplicate;
@@ -284,7 +284,7 @@ public sealed class NtxWriteTests : IDisposable
     {
         var path = CopyCustomers();
         SetHeaderByte("Custnum.ntx", 280, 1);
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = IndexedTables.OpenWithIndexes(path))
         {
             table.RebuildIndex();
             var random = new Random(11);
@@ -312,7 +312,7 @@ public sealed class NtxWriteTests : IDisposable
             Encoding.ASCII.GetBytes("CUSTNUM >= 5000").CopyTo(header, 282);
         });
 
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = IndexedTables.OpenWithIndexes(path))
         {
             table.RebuildIndex();
             var random = new Random(3);
@@ -363,7 +363,7 @@ public sealed class NtxWriteTests : IDisposable
         }
         File.WriteAllBytes(file, bytes);
 
-        using var table = DbfTable.Open(path, writable: true);
+        using var table = IndexedTables.OpenWithIndexes(path);
         var template = table.Read(0).Values.ToArray();
         var error = Assert.Throws<DbfException>(() => table.Append(template));
         Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
