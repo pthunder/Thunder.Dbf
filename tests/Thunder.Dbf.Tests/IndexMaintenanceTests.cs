@@ -53,6 +53,7 @@ public sealed class IndexMaintenanceTests : IDisposable
         Assert.Equal(theirs[0], ours[0]);
         Assert.Equal(theirs.AsSpan(4, 16).ToArray(), ours.AsSpan(4, 16).ToArray());
         Assert.Equal(theirs.AsSpan(20, 10).ToArray(), ours.AsSpan(20, 10).ToArray());
+        Assert.Equal(theirs.AsSpan(512, 32).ToArray(), ours.AsSpan(512, 32).ToArray()); // the name tree's anchor
 
         for (var i = 0; i < SiemensTags.Length; i++)
         {
@@ -167,13 +168,124 @@ public sealed class IndexMaintenanceTests : IDisposable
     }
 
     [Fact]
-    public void Pack_refuses_to_run_over_an_unfinished_pack()
+    public void An_unfinished_pack_blocks_every_write_until_the_table_is_restored()
     {
         var path = CopyChangelog(withIndex: true);
         File.WriteAllText(path + ".packing", "left over from a crash");
         using var table = DbfTable.Open(path, writable: true);
-        var error = Assert.Throws<DbfException>(() => table.Pack());
-        Assert.Equal(DbfErrorCode.IncompleteTransaction, error.Code);
+
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Pack()).Code);
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray())).Code);
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Delete(0)).Code);
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.CreateIndexTag("X", "ID")).Code);
+
+        File.Delete(path + ".packing");
+        table.Delete(0); // restored: writes work again
+    }
+
+    [Fact]
+    public void A_pack_whose_keys_cant_be_worked_out_changes_nothing()
+    {
+        var path = Path.Combine(_dir.FullName, "bad.dbf");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("N", 4)]))
+        {
+            table.Append(5m);
+            table.Append(4m);
+            table.Append(2m);
+            table.CreateIndexTag("BYRATIO", "STR(100/N, 10)");
+            table.Delete(0);
+        }
+
+        // Another program writes 0 into record 2 without updating the index: 100/N now fails for it.
+        long offset;
+        using (var probe = DbfTable.Open(path))
+            offset = probe.Header.HeaderLength + probe.Header.RecordLength + 1;
+        using (var file = File.OpenWrite(path))
+        {
+            file.Position = offset;
+            file.Write("   0"u8);
+        }
+        var before = File.ReadAllBytes(path);
+
+        using var reopened = DbfTable.Open(path, writable: true);
+        Assert.ThrowsAny<Exception>(() => reopened.Pack());
+        Assert.Equal(before, File.ReadAllBytes(path));   // not one record moved
+        Assert.False(File.Exists(path + ".packing"));    // and no backup, since nothing started
+    }
+
+    [Fact]
+    public void Character_keys_are_as_wide_as_the_widest_real_value()
+    {
+        var path = CopyChangelog(withIndex: true);
+        using var table = DbfTable.Open(path, writable: true);
+        // On a synthetic all-blank record LEVEL is 0, which would pick the 1-character branch.
+        table.CreateIndexTag("LONGLVL", "IIF(LEVEL > 0, \"LONGVALUE\", \"X\")");
+
+        using var index = table.OpenProductionIndex()!;
+        var real = table.ReadAll().Max(r => (decimal)r["LEVEL"]! > 0 ? 9 : 1);
+        Assert.Equal(real, index["LONGLVL"].KeyLength);
+    }
+
+    [Fact]
+    public void An_expression_whose_type_changes_between_records_is_refused_before_anything_is_written()
+    {
+        var path = Path.Combine(_dir.FullName, "mixed.dbf");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("N", 4)]))
+        {
+            table.Append(1m);
+            table.Append(2m);
+            table.CreateIndexTag("FIRST", "N"); // so the .mdx exists to compare
+        }
+        var mdx = Path.ChangeExtension(path, ".mdx");
+        var before = File.ReadAllBytes(mdx);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("MIXED", "IIF(N = 1, \"text\", N)"));
+            Assert.Equal(DbfErrorCode.InvalidValue, error.Code);
+        }
+        Assert.Equal(before, File.ReadAllBytes(mdx));
+    }
+
+    [Fact]
+    public void Date_tags_carry_dBASEs_secondary_type_and_filters_keep_their_code_page()
+    {
+        var path = Path.Combine(_dir.FullName, "people.dbf");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Character("CITY", 10), DbfFieldDefinition.Date("BORN")], languageDriver: 0x02))
+        {
+            table.Append("Québec", new DateOnly(1990, 5, 1));
+            table.Append("Paris", new DateOnly(1980, 1, 2));
+            table.CreateIndexTag("BYBORN", "BORN", forExpression: "CITY = \"Québec\"");
+        }
+
+        var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".mdx"));
+        var headerPage = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(544));
+        Assert.Equal(1, BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(headerPage * 512 + 16)));
+
+        using var check = DbfTable.Open(path);
+        using var index = check.OpenProductionIndex()!;
+        Assert.Equal("CITY = \"Québec\"", index["BYBORN"].ForExpression);
+        Assert.Equal([1], index["BYBORN"].Entries().Select(e => e.RecordNumber));
+    }
+
+    [Fact]
+    public void A_table_just_created_by_path_can_be_indexed_and_packed()
+    {
+        var path = Path.Combine(_dir.FullName, "fresh.dbf");
+        using var table = DbfTable.Create(path, [DbfFieldDefinition.Character("NAME", 8)]);
+        table.Append("b");
+        table.Append("a");
+        table.CreateIndexTag("NAME", "NAME");
+        table.Delete(0);
+        Assert.Equal(1, table.Pack());
+        Assert.False(File.Exists(path + ".packing"));
+    }
+
+    [Fact]
+    public void Tables_from_streams_cant_be_packed()
+    {
+        using var table = DbfTable.Create(new MemoryStream(), [DbfFieldDefinition.Character("NAME", 5)]);
+        Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => table.Pack()).Code);
     }
 
     [Fact]

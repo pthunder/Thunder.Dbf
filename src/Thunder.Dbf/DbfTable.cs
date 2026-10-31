@@ -334,6 +334,7 @@ public sealed partial class DbfTable : IDisposable
     private void PrepareWrite(bool appending)
     {
         Refresh();
+        ThrowIfPackUnfinished();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
                 structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
             throw blocker;
@@ -382,7 +383,9 @@ public sealed partial class DbfTable : IDisposable
             if (memoPath is not null)
                 memoStream = new FileStream(memoPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
 
-            return Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
+            var table = Create(stream, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
+            table._path = path; // so locks, INDEX ON and PACK know where the table lives
+            return table;
         }
         catch
         {
@@ -1061,14 +1064,19 @@ public sealed partial class DbfTable : IDisposable
             }
         }
 
+        ReplaceAllKeys(keysByTag);
+    }
+
+    // Swaps every tag's keys for the given ones (in record order) and commits. A unique tag keeps the
+    // lowest record number per key, judged by the tag's own comparison, so 1E2 and 100 count as one key.
+    private void ReplaceAllKeys(Dictionary<IMaintainedTag, List<(byte[] Key, int Record)>> keysByTag)
+    {
         foreach (var (tag, keys) in keysByTag)
         {
             tag.Clear();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var (key, record) in keys)
             {
-                // Records arrive in record order, so a unique tag keeps the lowest number per key.
-                if (!tag.IsUnique || seen.Add(Convert.ToHexString(key)))
+                if (!tag.IsUnique || tag.FirstRecordFor(key) is null)
                     tag.Insert(key, record);
             }
         }

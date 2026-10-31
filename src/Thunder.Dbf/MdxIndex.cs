@@ -189,6 +189,9 @@ public sealed partial class MdxTag
     /// <inheritdoc />
     public string Name { get; }
 
+    /// <summary>The page holding this tag's header block.</summary>
+    internal int HeaderPage => _headerPage;
+
     /// <summary>'C' (character), 'N' (numeric) or 'D' (date).</summary>
     public char KeyType { get; private init; }
     /// <inheritdoc />
