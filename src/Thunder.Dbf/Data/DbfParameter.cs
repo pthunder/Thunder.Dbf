@@ -19,10 +19,12 @@ public sealed class DbfParameter : DbParameter
     private string _name = "";
     private string _sourceColumn = "";
 
+    /// <summary>A parameter with no name or value yet.</summary>
     public DbfParameter()
     {
     }
 
+    /// <summary>A parameter called <paramref name="name"/> holding <paramref name="value"/>.</summary>
     public DbfParameter(string name, object? value)
     {
         ParameterName = name;
@@ -47,8 +49,10 @@ public sealed class DbfParameter : DbParameter
         }
     }
 
+    /// <inheritdoc />
     public override bool IsNullable { get; set; } = true;
 
+    /// <inheritdoc />
     [AllowNull]
     public override string ParameterName
     {
@@ -56,8 +60,10 @@ public sealed class DbfParameter : DbParameter
         set => _name = value ?? "";
     }
 
+    /// <inheritdoc />
     public override int Size { get; set; }
 
+    /// <inheritdoc />
     [AllowNull]
     public override string SourceColumn
     {
@@ -65,12 +71,16 @@ public sealed class DbfParameter : DbParameter
         set => _sourceColumn = value ?? "";
     }
 
+    /// <inheritdoc />
     public override bool SourceColumnNullMapping { get; set; }
 
+    /// <inheritdoc />
     public override DataRowVersion SourceVersion { get; set; } = DataRowVersion.Current;
 
+    /// <inheritdoc />
     public override object? Value { get; set; }
 
+    /// <inheritdoc />
     public override void ResetDbType() => _dbType = null;
 
     /// <summary>The name without its '@' or ':' prefix, as the SQL refers to it.</summary>

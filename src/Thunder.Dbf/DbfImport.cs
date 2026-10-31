@@ -44,8 +44,10 @@ public sealed record DbfImportColumn(string CsvName, DbfFieldDefinition Field, s
 /// <summary>What an import will create, before it creates anything.</summary>
 public sealed record DbfImportPlan(IReadOnlyList<DbfImportColumn> Columns, int RowCount, char Delimiter, IReadOnlyList<string> Warnings)
 {
+    /// <summary>The fields the new table will have, in column order.</summary>
     public IReadOnlyList<DbfFieldDefinition> Fields => Columns.Select(c => c.Field).ToList();
 
+    /// <inheritdoc />
     public override string ToString()
     {
         var text = new StringBuilder($"{Columns.Count} columns, {RowCount} rows, delimiter '{(Delimiter == '\t' ? "\\t" : Delimiter.ToString())}'\n");

@@ -41,8 +41,10 @@ To hash a key you already have without leaving it in your shell history, pipe it
 |---|---|---|
 | GET | `/health` | `{"status":"ok"}`, or 503 if the data folder can't be seen. No key needed. |
 | GET | `/openapi/v1.json` | The OpenAPI document. No key needed; it lists routes, not tables. |
+| GET | `/openapi/tables.json` | The same document plus a typed schema for every table this caller may read. Needs `CanListTables`. |
 | GET | `/tables` | The tables this key may read, and whether it may write each one. Needs `CanListTables`. |
 | GET | `/tables/{name}` | Fields (name, type, width, decimals), record count, code page and index tags. |
+| GET | `/tables/{name}/openapi` | The OpenAPI document plus the typed schema of this one table. |
 | GET | `/tables/{name}/records?skip=&take=&includeDeleted=` | A page of records. `take` is capped at `Paging:MaxTake`. |
 | GET | `/tables/{name}/records/{recno}` | One record by its 1-based record number. |
 | GET | `/tables/{name}/seek?tag=&key=&take=` | Records found through the production `.mdx` index, like dBASE's `SEEK`. |
@@ -99,6 +101,30 @@ When writing, every value is checked against the table before a byte changes: th
 
 A PATCH starts from the stored record and changes only the fields you send. Every other field, memo included, keeps its exact bytes, so formatting the legacy app wrote survives.
 
+### A schema per table
+
+`/openapi/v1.json` is served to anyone, so it describes records generically and never names a table. A caller who signs in can ask for a copy of the document that adds one component schema per table, `Table_<NAME>`, read from the DBF header at that moment, so code generators get real types:
+
+- `GET /tables/{name}/openapi` for one table the caller may read. A table it can't read answers 404, the same as one that doesn't exist.
+
+Both answer with `Cache-Control: private, no-store`, because each copy is personal to the caller. `/openapi/tables.json` describes at most 500 tables, and only two are built at a time across the server, since each one opens every table.
+- `GET /openapi/tables.json` for every table the caller may read. It names them all, so like `GET /tables` it needs `CanListTables`.
+
+Each schema lists `_recno`, `_deleted` and every field the caller may see. Fields hidden by an allow-list aren't mentioned. A table name with characters a component name can't hold becomes `_`, and the schema's `title` keeps the real name.
+
+| DBF field | Schema |
+|---|---|
+| C character | `string`, `maxLength` = the width (bytes in the table's code page) |
+| N, F with no decimals, up to 18 digits; I integer | `integer` (`int64`; `int32` for I) |
+| N, F with decimals; Y currency | `number` with `multipleOf` (0.01 for two decimals; 0.0001 for currency) |
+| B double | `number`, `double` |
+| D date / T datetime | `string`, `date` / `date-time` (no time zone: DBF doesn't store one) |
+| L logical | `boolean` |
+| M memo | `string` |
+| binary, picture and OLE memos | `string`, `byte` (base64) |
+
+A type is nullable (`["number", "null"]`) when a blank value reads as `null`, which covers numbers, dates, logicals and memos, and for every Visual FoxPro nullable field. Visual FoxPro autoincrement fields are `readOnly`.
+
 ### Errors
 
 Every error is a ProblemDetails object with `status`, `title`, `detail`, a machine-readable `code` and, when there's something to do about it, a `hint`. Library errors keep their codes (`FileInUse`, `IndexWouldGoStale`, `EncryptedTable`, ...) and status codes. Responses never include file paths, user names or stack traces; the server log has the full story under the same `traceId`.
@@ -114,6 +140,7 @@ Everything lives under `Thunder` in `appsettings.json`, which has a commented ex
 | `Data:CodePage` | (each table's own) | Force a code page, like 1252, 437 or 850. |
 | `Data:IgnoreMissingMemo` | `false` | Read memos as null when a `.dbt`/`.fpt` is missing. |
 | `Tables:{NAME}:AllowWrites` | `false` | Lets keys with write permission change this table. |
+| `Data:MaintainFoxProIndexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes. Off until checked against Visual FoxPro itself. |
 | `Tables:{NAME}:AllowUnmaintainedIndexes` | `false` | Allows writes to a table whose index Thunder.Dbf can't keep up to date: a FoxPro `.cdx`, or a production `.mdx` that's missing. A present `.mdx` is always kept up to date. Only if the legacy app reindexes before relying on it. |
 | `ApiKeys:n:Id` | (required) | The key's name in logs and the journal. |
 | `ApiKeys:n:Sha256` | (required) | SHA-256 of the key, 64 hex digits. |
@@ -121,35 +148,76 @@ Everything lives under `Thunder` in `appsettings.json`, which has a commented ex
 | `ApiKeys:n:Read` | `[]` | Tables it may read, or `["*"]`. |
 | `ApiKeys:n:Write` | `[]` | Tables it may write, or `["*"]`. The table needs `AllowWrites` too. |
 | `ApiKeys:n:Fields:{NAME}` | (all fields) | An allow-list. Other fields don't exist for this key. |
+| `OpenIdConnect:Authority` | (empty: off) | The provider's issuer URL. Setting it turns on bearer sign-in. |
+| `OpenIdConnect:Audience` | (required with Authority) | The audience tokens must be issued for: this API's client id or app ID URI. |
+| `OpenIdConnect:RequireHttpsMetadata` | `true` | Fetch the provider's metadata and keys over HTTPS only. Turn off only for a local test provider. |
+| `OpenIdConnect:SubjectClaim` | `sub` | The claim that names the user, as `oidc:<value>`, in logs, the journal and rate limits. |
+| `OpenIdConnect:AccessTokenTypes` | `["at+jwt", "application/at+jwt"]` | The `typ` values accepted, so only access tokens get in, never an ID token. Entra ID and Keycloak mark access tokens plain `JWT`: add it only when the API has its own audience that no app's ID token uses. Tokens carrying a `nonce` (always ID tokens) are refused regardless. |
+| `OpenIdConnect:Profiles:{name}` | (none) | A named set of permissions: `CanListTables`, `Read`, `Write` and `Fields`, exactly as on an API key. |
+| `OpenIdConnect:Map:n` | (none) | One rule: `Role`, `Group`, or `Claim` with `Value`, and the `Profile` it grants. The first rule that matches wins. |
 | `Paging:DefaultTake` / `MaxTake` | `50` / `500` | Page sizes. |
 | `Paging:MaxResponseBytes` | `8388608` | A rough cap on one response's size. A page of big memos ends early, with a `next` link. |
 | `Paging:MaxSeekScan` | `10000` | The most index entries one seek looks at. |
 | `Journal:Path` | `journal/writes.jsonl` | The write journal. Relative to the service's folder. |
 | `Backups:Folder` | `backups` | Where tables are copied before their first write. Relative to the service's folder. |
-| `RateLimit:PerKeyPerMinute` | `600` | Requests per key per minute. |
+| `RateLimit:PerKeyPerMinute` | `600` | Requests per key, or per signed-in user, per minute. |
 | `RateLimit:AnonymousPerMinute` | `60` | Requests per address per minute without a valid key. |
 | `RateLimit:PerAddressPerMinute` | `1200` | Requests per address per minute, checked before the key is. Raise it if many users share one address. |
 | `LockTimeoutSeconds` | `30` | How long a request waits for the table before a 503. |
 
-Mistakes such as a missing folder, a malformed hash or a duplicate key id stop the service at startup with a sentence saying what to fix.
+Mistakes such as a missing folder, a malformed hash, a duplicate key id or a mapping rule naming a profile that doesn't exist stop the service at startup with a sentence saying what to fix.
+
+## Signing in with OpenID Connect
+
+Besides API keys, the server can accept access tokens from an OpenID Connect provider such as Microsoft Entra ID, Auth0 or Keycloak. Clients send `Authorization: Bearer <token>`. A request carrying both a bearer token and `X-Api-Key` is refused with 400 (`TwoCredentials`), because guessing which one was meant could run it with permissions nobody expected.
+
+Users get permissions through **profiles**, which have the same shape as an API key's permissions. **Map** rules, checked in order, give a token a profile from one of its roles (the `roles` or `role` claim), groups (`groups`) or any other claim and value. The first rule that matches wins, so a user in two groups gets one profile's permissions, never a mix. A valid token that matches no rule gets 403 with a ProblemDetails saying so.
+
+```jsonc
+"Thunder": {
+  "OpenIdConnect": {
+    "Authority": "https://login.microsoftonline.com/<tenant id>/v2.0",
+    "Audience": "<the API's application id>",
+    "Profiles": {
+      "clerks":    { "Read": [ "CONTACT1" ], "Write": [ "CONTACT1" ],
+                     "Fields": { "CONTACT1": [ "ACCOUNTNO", "COMPANY", "CONTACT", "PHONE1" ] } },
+      "reporting": { "Read": [ "*" ], "CanListTables": true }
+    },
+    "Map": [
+      { "Role": "Thunder.Clerk", "Profile": "clerks" },
+      { "Group": "<group object id>", "Profile": "reporting" },
+      { "Claim": "scope", "Value": "dbf.read", "Profile": "reporting" }
+    ]
+  }
+}
+```
+
+| Provider | Authority | Audience | Roles and groups |
+|---|---|---|---|
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | the API's application (client) id; set `accessTokenAcceptedVersion` to 2 in its manifest, so tokens come from the v2.0 issuer | App roles arrive in `roles`; security groups in `groups` (as object ids) once the app registration emits them. Consider `"SubjectClaim": "oid"` for a stable user id. Entra marks access tokens `typ: JWT`, so set `"AccessTokenTypes": ["JWT"]`, with a separate app registration for the API so no app's ID token has its audience. |
+| Auth0 | `https://<tenant>.auth0.com/` (with the trailing slash) | the API's identifier | Add roles with an Action under a namespaced claim, then map it with `"Claim": "https://example.com/roles"`. API permissions arrive in `permissions`. |
+| Keycloak | `https://<host>/realms/<realm>` | the client id, added to `aud` with an audience mapper | Add a "User Realm Role" or "Group Membership" mapper that writes a flat `roles` or `groups` claim (Keycloak's own `realm_access` is nested and isn't read). Keycloak access tokens have `typ: JWT`: set `"AccessTokenTypes": ["JWT"]` and give the API its own client. |
+
+Scopes come as one space-separated claim (`scope` or `scp`), so a `Claim` rule on either matches one scope within it. Every other comparison is exact, case included.
+
+Tokens are checked against the provider's published keys, fetched over HTTPS from `<Authority>/.well-known/openid-configuration`. They must be signed with an RSA or ECDSA key, be issued by the Authority for the Audience, carry an expiry (with one minute of clock skew) and a subject. A 401 says only whether the token has expired; the server log has the rest. The token itself is never logged or kept.
 
 ## Security model
 
 - **Coexists with the legacy app.** Every write takes the same byte-range record and header locks dBASE IV takes, and keeps the production `.mdx` up to date, so the legacy app keeps working on the same files. Run the service on Windows (next to the data or on the file server) or Linux: .NET can't take byte-range locks on macOS. A record the legacy app has locked answers 423 after a short wait.
 - **Read-only by default, three switches for writes.** A write needs `Data:ReadOnly: false`, `AllowWrites` on the table, and the table in the key's `Write` list. With the master switch off, the write routes aren't even mapped.
 - **Keys are hashed.** Config holds only SHA-256 hashes, compared in constant time (`CryptographicOperations.FixedTimeEquals`) against every configured key. Someone who reads `appsettings.json` still can't call the API. Keys are only accepted in the `X-Api-Key` header, never the query string, so they don't end up in access logs. Generated keys are 256 random bits, so a fast unsalted hash is enough.
+- **Signed-in users go through the same checks as keys.** A token's roles and groups pick a profile shaped exactly like a key's permissions, and every endpoint checks it the same way. Which handler vouched for the caller decides where permissions come from, and claims named `thunder:*` in a token are dropped, so a token can't pass itself off as an API key. Users appear as `oidc:<sub>` in logs, the journal and rate limits. API key ids can't start with `oidc:`.
 - **Tables you can't read don't exist.** A table missing from the key's `Read` list gets the same 404, word for word, as a table that isn't there, so keys can't probe for names. Only keys with `CanListTables` see names in hints.
 - **Names can't become paths.** `{name}` is matched against the folder's own list of `.dbf` files, so `..%2F`, encoded backslashes, drive letters and companion files (`.dbt`, `.mdx`) never match anything. The library then refuses separators, `..`, and links pointing outside the folder as a second check.
-- **Field allow-lists hide fields everywhere:** in records, in the schema, in index tags whose expressions mention them (seeking by such a tag would reveal values; a tag whose expression can't be read is hidden too), and on write, where a hidden field gets the same error as one that doesn't exist.
+- **Field allow-lists hide fields everywhere:** in records, in the schema and the per-table OpenAPI schemas, in index tags whose expressions mention them (seeking by such a tag would reveal values; a tag whose expression can't be read is hidden too), and on write, where a hidden field gets the same error as one that doesn't exist.
 - **One writer, one request at a time per table.** `DbfTable` isn't thread-safe, so each table has its own lock. Requests on the same table take turns; different tables run in parallel. Each request opens the table and closes it again, so the legacy app is never locked out for longer than one request.
 - **Backups before the first write.** The first write to each table after startup first copies its `.dbf`, `.dbt`, `.fpt`, `.mdx` and `.cdx` into `backups/<yyyyMMdd-HHmmssZ>/`, holding the table lock so the legacy app can't change them mid-copy. Files are copied under a `.partial` name and renamed only when all of them are complete.
-- **A journal of every write.** Two JSON lines per insert, update or delete: an `intent` line before the file changes (with the values asked for), then a `done` line with the full record before and after. Each has the time, key id (never the key), table, record number and the caller's address. An `intent` with no `done` after it is a write that failed or was cut off. The file is only ever appended to and is flushed to disk before the response is sent.
+- **A journal of every write.** Two JSON lines per insert, update or delete: an `intent` line before the file changes (with the values asked for), then a `done` line with the full record before and after. Each has the time, key id or `oidc:<sub>` (never the key or token), table, record number and the caller's address. An `intent` with no `done` after it is a write that failed or was cut off. The file is only ever appended to and is flushed to disk before the response is sent.
 - **PATCH changes only the fields you send.** They're written under the record lock onto the record as it is on disk at that moment, so a change the legacy app just made to another field survives.
-- **Rate limits** apply per address before any key is checked, then per key. Failed key attempts are logged at most once a minute per address, with a count, so a guessing attack can't flood the log.
+- **Rate limits** apply per address before any key or token is checked, then per key or signed-in user. Failed key attempts are logged at most once a minute per address, with a count, so a guessing attack can't flood the log.
 - **HTTPS** redirection and HSTS are on outside the Development environment.
 - **No leaks in errors.** Library messages name files and the service account so that whoever runs the server can fix things. Before a message reaches a client, the server strips paths down to file names and replaces the account name. Unexpected errors return only a `traceId`.
-
-OpenID Connect can be added later as another authentication scheme. Permissions hang off a key id claim rather than the scheme, so endpoints won't change.
 
 ## Deploying as a Windows service next to the data folder
 
@@ -172,7 +240,5 @@ sc.exe start Thunder.Dbf
 
 ## Not done yet
 
-- Writes to FoxPro tables with a `.cdx` index. dBASE IV `.mdx` indexes are kept up to date on every write; `.cdx` is read-only for now, so those writes are refused unless `AllowUnmaintainedIndexes` is set.
+- Writes to FoxPro tables with a `.cdx` index by default: `.cdx` maintenance is a preview, switched on with `Data:MaintainFoxProIndexes`. `.mdx`, `.ndx` and `.ntx` indexes are kept up to date on every write.
 - Recall (undelete), packing, and creating tables over HTTP.
-- An OpenAPI schema per table, generated from the DBF fields. Today records are described generically, and `GET /tables/{name}` gives the real fields.
-- OpenID Connect.

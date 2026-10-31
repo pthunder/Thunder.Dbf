@@ -67,10 +67,13 @@ public sealed class DbfDataReader : DbDataReader
         _recordsAffected = recordsAffected;
     }
 
+    /// <inheritdoc />
     public override int Depth => 0;
 
+    /// <inheritdoc />
     public override int FieldCount => _columns.Count;
 
+    /// <inheritdoc />
     public override bool HasRows
     {
         get
@@ -87,15 +90,19 @@ public sealed class DbfDataReader : DbDataReader
         }
     }
 
+    /// <inheritdoc />
     public override bool IsClosed => _closed;
 
     /// <summary>Records changed by an INSERT, UPDATE or DELETE; -1 for a SELECT.</summary>
     public override int RecordsAffected => _recordsAffected;
 
+    /// <inheritdoc />
     public override object this[int ordinal] => GetValue(ordinal);
 
+    /// <inheritdoc />
     public override object this[string name] => GetValue(GetOrdinal(name));
 
+    /// <inheritdoc />
     public override bool Read()
     {
         ThrowIfClosed();
@@ -114,6 +121,7 @@ public sealed class DbfDataReader : DbDataReader
         return false;
     }
 
+    /// <inheritdoc />
     public override bool NextResult()
     {
         ThrowIfClosed();
@@ -123,6 +131,7 @@ public sealed class DbfDataReader : DbDataReader
         return false;
     }
 
+    /// <inheritdoc />
     public override void Close()
     {
         if (_closed)
@@ -137,8 +146,10 @@ public sealed class DbfDataReader : DbDataReader
 
     // ---- columns --------------------------------------------------------------------------
 
+    /// <inheritdoc />
     public override string GetName(int ordinal) => Column(ordinal).Name;
 
+    /// <inheritdoc />
     public override int GetOrdinal(string name)
     {
         for (var i = 0; i < _columns.Count; i++)
@@ -160,6 +171,7 @@ public sealed class DbfDataReader : DbDataReader
     /// <summary>The dBASE type, like Character, Numeric, Date or Memo.</summary>
     public override string GetDataTypeName(int ordinal) => Column(ordinal).TypeName;
 
+    /// <inheritdoc />
     public override DataTable GetSchemaTable()
     {
         var table = new DataTable("SchemaTable") { Locale = CultureInfo.InvariantCulture };
@@ -225,6 +237,7 @@ public sealed class DbfDataReader : DbDataReader
 
     // ---- values ---------------------------------------------------------------------------
 
+    /// <inheritdoc />
     public override object GetValue(int ordinal)
     {
         var values = CurrentValues();
@@ -232,6 +245,7 @@ public sealed class DbfDataReader : DbDataReader
         return values[ordinal] ?? DBNull.Value;
     }
 
+    /// <inheritdoc />
     public override int GetValues(object[] values)
     {
         var current = CurrentValues();
@@ -241,34 +255,47 @@ public sealed class DbfDataReader : DbDataReader
         return count;
     }
 
+    /// <inheritdoc />
     public override bool IsDBNull(int ordinal) => GetValue(ordinal) is DBNull;
 
+    /// <inheritdoc />
     public override string GetString(int ordinal) => Get<string>(ordinal);
 
+    /// <inheritdoc />
     public override bool GetBoolean(int ordinal) => Get<bool>(ordinal);
 
+    /// <inheritdoc />
     public override DateTime GetDateTime(int ordinal) => Get<DateTime>(ordinal);
 
+    /// <inheritdoc />
     public override decimal GetDecimal(int ordinal) => Number(ordinal, Convert.ToDecimal);
 
+    /// <inheritdoc />
     public override double GetDouble(int ordinal) => Number(ordinal, Convert.ToDouble);
 
+    /// <inheritdoc />
     public override float GetFloat(int ordinal) => Number(ordinal, Convert.ToSingle);
 
+    /// <inheritdoc />
     public override int GetInt32(int ordinal) => Number(ordinal, Convert.ToInt32);
 
+    /// <inheritdoc />
     public override long GetInt64(int ordinal) => Number(ordinal, Convert.ToInt64);
 
+    /// <inheritdoc />
     public override short GetInt16(int ordinal) => Number(ordinal, Convert.ToInt16);
 
+    /// <inheritdoc />
     public override byte GetByte(int ordinal) => Number(ordinal, Convert.ToByte);
 
+    /// <inheritdoc />
     public override char GetChar(int ordinal)
     {
         var text = GetString(ordinal);
         return text.Length > 0 ? text[0] : throw new InvalidCastException($"Column {GetName(ordinal)} is empty, so it has no first character.");
     }
 
+    /// <inheritdoc />
     public override Guid GetGuid(int ordinal) => GetValue(ordinal) switch
     {
         Guid guid => guid,
@@ -276,6 +303,7 @@ public sealed class DbfDataReader : DbDataReader
         var other => throw Cast(ordinal, other, typeof(Guid)),
     };
 
+    /// <inheritdoc />
     public override long GetBytes(int ordinal, long dataOffset, byte[]? buffer, int bufferOffset, int length)
     {
         var bytes = Get<byte[]>(ordinal);
@@ -286,6 +314,7 @@ public sealed class DbfDataReader : DbDataReader
         return count;
     }
 
+    /// <inheritdoc />
     public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length)
     {
         var text = GetString(ordinal);
@@ -309,6 +338,7 @@ public sealed class DbfDataReader : DbDataReader
         throw Cast(ordinal, value, typeof(T));
     }
 
+    /// <inheritdoc />
     public override IEnumerator GetEnumerator() => new DbEnumerator(this, closeReader: false);
 
     // ---- helpers --------------------------------------------------------------------------

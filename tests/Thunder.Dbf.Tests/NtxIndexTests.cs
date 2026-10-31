@@ -88,10 +88,10 @@ public class NtxIndexTests
         Assert.Equal("19810101", bare.Tag.Entries().First().Key);
 
         // A header without a tag name (byte 538 below 0x20) takes the file's name instead.
-        var bytes = File.ReadAllBytes(Fixture("xsharp/rdd-tests/TESTNTX2.NTX"));
+        var bytes = SharedFile.ReadAllBytes(Fixture("xsharp/rdd-tests/TESTNTX2.NTX"));
         bytes.AsSpan(538, 12).Clear();
         var unnamedPath = Path.Combine(Path.GetTempPath(), $"unnamed-{Guid.NewGuid():N}.ntx");
-        File.WriteAllBytes(unnamedPath, bytes);
+        SharedFile.WriteAllBytes(unnamedPath, bytes);
         try
         {
             using var unnamed = NtxIndex.Open(unnamedPath);
@@ -239,7 +239,7 @@ public class NtxIndexTests
     [Fact]
     public void Streams_that_return_a_few_bytes_at_a_time_still_open()
     {
-        using var index = NtxIndex.Open(new TrickleStream(File.ReadAllBytes(Fixture("xsharp/rdd-tests/10kState.ntx")), chunk: 13));
+        using var index = NtxIndex.Open(new TrickleStream(SharedFile.ReadAllBytes(Fixture("xsharp/rdd-tests/10kState.ntx")), chunk: 13));
         Assert.Equal(10_000, index.Tag.Entries().Count());
     }
 

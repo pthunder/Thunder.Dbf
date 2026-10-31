@@ -23,12 +23,15 @@ public sealed class DbfConnection : DbConnection
     private string _connectionString = "";
     private DbfDatabase? _database;
 
+    /// <summary>A connection with no connection string yet.</summary>
     public DbfConnection()
     {
     }
 
+    /// <summary>A connection to the folder that <paramref name="connectionString"/> names. Nothing is opened until <see cref="Open"/>.</summary>
     public DbfConnection(string connectionString) => _connectionString = connectionString ?? "";
 
+    /// <inheritdoc />
     [AllowNull]
     public override string ConnectionString
     {
@@ -47,8 +50,10 @@ public sealed class DbfConnection : DbConnection
     /// <summary>The data folder: the full path once open, the Data Source setting before.</summary>
     public override string DataSource => _database?.Folder ?? DataSourceSetting();
 
+    /// <inheritdoc />
     public override string ServerVersion => typeof(DbfDatabase).Assembly.GetName().Version?.ToString() ?? "0.0";
 
+    /// <inheritdoc />
     public override ConnectionState State => _database is null ? ConnectionState.Closed : ConnectionState.Open;
 
     /// <summary>True when writes are refused, which is the default.</summary>
@@ -57,8 +62,10 @@ public sealed class DbfConnection : DbConnection
     /// <summary>The open folder, for anything ADO.NET can't express (index tags, the Check() handshake).</summary>
     public DbfDatabase DbfDatabase => RequireOpen();
 
+    /// <inheritdoc />
     protected override DbProviderFactory DbProviderFactory => DbfProviderFactory.Instance;
 
+    /// <inheritdoc />
     public override void Open()
     {
         if (_database is not null)
@@ -71,6 +78,7 @@ public sealed class DbfConnection : DbConnection
         OnStateChange(new StateChangeEventArgs(ConnectionState.Closed, ConnectionState.Open));
     }
 
+    /// <inheritdoc />
     public override void Close()
     {
         if (_database is null)
@@ -80,6 +88,7 @@ public sealed class DbfConnection : DbConnection
         OnStateChange(new StateChangeEventArgs(ConnectionState.Open, ConnectionState.Closed));
     }
 
+    /// <inheritdoc />
     public override void ChangeDatabase(string databaseName) =>
         throw new NotSupportedException("A DbfConnection is one folder. Open another connection for another folder.");
 
@@ -90,8 +99,10 @@ public sealed class DbfConnection : DbConnection
     /// <summary>Creates a command on this connection.</summary>
     public new DbfCommand CreateCommand() => new() { Connection = this };
 
+    /// <inheritdoc />
     protected override DbCommand CreateDbCommand() => CreateCommand();
 
+    /// <inheritdoc />
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -104,6 +115,7 @@ public sealed class DbfConnection : DbConnection
     /// <summary>The collections <see cref="GetSchema(string, string?[])"/> knows.</summary>
     public override DataTable GetSchema() => GetSchema(DbMetaDataCollectionNames.MetaDataCollections);
 
+    /// <inheritdoc />
     public override DataTable GetSchema(string collectionName) => GetSchema(collectionName, []);
 
     /// <summary>

@@ -18,7 +18,9 @@ Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read Fo
 - `DbfTable`:
   - reads: `Read(index)`, `ReadAll()`, `Refresh()`
   - writes: `Append(values)`, `AppendRange(rows)`, `Update(index, values)`, `UpdateFields(index, changes)` (only the named fields, under the record lock), `Delete(index)`, `Recall(index)`
-  - indexes: `OpenProductionIndex()` (.mdx), `OpenStructuralIndex()` (.cdx), `OpenIndex(path)` (.mdx/.ndx/.ntx/.cdx/.idx), `Seek(tag, key)`, `ReadInOrder(tag)`, `RebuildIndex()`
+  - indexes: `OpenProductionIndex()` (.mdx), `OpenStructuralIndex()` (.cdx), `OpenIndex(path)` (.mdx/.ndx/.ntx/.cdx/.idx), `Seek(tag, key)`, `ReadInOrder(tag)`, `RebuildIndex()`, `CreateIndexTag(name, expression, forExpression, unique, descending)` (INDEX ON, dBASE IV .mdx)
+  - maintenance: `Pack()` (PACK: removes deleted records, renumbers, rebuilds indexes)
+  - typed: `ReadAll<T>()`, `Read<T>(i)`, `AppendRecord(item)`, `UpdateRecord(i, item)`, `AsQueryable<T>()` (LINQ; seeks through .mdx tags), `query.Explain()`
   - locks: `LockRecord(i)`, `LockTable()`
 - `DbfRecord`: `record["FIELD"]`, `RecordNumber` (1-based), `IsDeleted`, `IsNull(i)`.
 - `DbfException`: `Code` (`DbfErrorCode`), safe `Message` and `Hint`, `HttpStatus`, `Diagnostic` (for logs only).
@@ -47,9 +49,9 @@ Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read Fo
 
 ## Facts worth getting right
 
-- Writes keep dBASE IV `.mdx` indexes exact. `.ndx`, `.ntx` and `.cdx` are read-only for now; tables with a structural `.cdx` refuse writes unless `allowUnmaintainedIndexes` is set.
+- Writes keep dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` indexes exact (`.ntx` under Clipper's own index lock). FoxPro `.cdx`/`.idx` maintenance is a preview, enabled with `maintainFoxProIndexes` / `Maintain FoxPro Indexes=true`; without it tables with a `.cdx` refuse writes.
 - Byte-range locks are enforced on Windows and Linux, not on macOS (a .NET and macOS limitation). dBASE, Clipper and Visual FoxPro lock offsets are supported (`LockScheme`); Clipper must be chosen explicitly.
-- Writes are refused while a stray `.ndx`, `.ntx` or `.idx` sits next to the table, since it can't be kept up to date.
-- LINQ: LINQ to Objects works over `ReadAll()`. There's no IQueryable or Entity Framework provider yet.
+- An `.ndx`/`.ntx`/`.idx` named after the table is kept up to date automatically; one named otherwise that looks like it belongs blocks writes until `table.MaintainIndex(path)` names it (these formats don't record their table). Indexes in a national sort order, Clipper custom/changes-only indexes and very wide numeric keys are refused rather than guessed at.
+- LINQ: `table.AsQueryable<T>()` is an IQueryable provider. Equalities on fields with their own complete .mdx tag become seeks; everything else scans and runs as LINQ to Objects. There's no Entity Framework provider.
 - dBASE II and dBASE 7 tables are refused with `UnsupportedFormat`.
 - Verified against files from dBASE III Plus, dBASE IV, FoxPro 2, Visual FoxPro, Clipper, X#, Siemens STEP 7 and US Census TIGER, plus private GoldMine CRM data.

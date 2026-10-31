@@ -178,7 +178,7 @@ public class IndexRegressionTests
     [Fact]
     public void Streams_that_return_a_few_bytes_at_a_time_still_open()
     {
-        var bytes = File.ReadAllBytes(Path.Combine(FixtureRoot, "siemens-step7/siprom/CHANGELOG.MDX"));
+        var bytes = SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, "siemens-step7/siprom/CHANGELOG.MDX"));
         using var index = MdxIndex.Open(new TrickleStream(bytes, chunk: 32));
 
         Assert.Equal(6, index.Tags.Count);
@@ -355,7 +355,7 @@ public class IndexRegressionTests
     private static MemoryStream Copy(string fixture)
     {
         var stream = new MemoryStream();
-        stream.Write(File.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
+        stream.Write(SharedFile.ReadAllBytes(Path.Combine(FixtureRoot, fixture)));
         return stream;
     }
 

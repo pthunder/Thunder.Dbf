@@ -52,7 +52,7 @@ internal static class IndexKeys
 
     // Every field empty: spaces, zero, false, blank date. Built by hand rather than decoded from a
     // space-filled buffer so binary fields (I, Y, B) and nullable fields still produce their type.
-    private static DbfRecord BlankRecord(DbfTable table)
+    internal static DbfRecord BlankRecord(DbfTable table)
     {
         var values = new object?[table.Fields.Count];
         for (var i = 0; i < values.Length; i++)

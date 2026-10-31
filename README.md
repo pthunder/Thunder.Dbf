@@ -35,7 +35,7 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 
 | Package | What it does |
 |---|---|
-| **Thunder.Dbf** | The engine. Reads and writes tables, `.dbt`/`.fpt` memos and dBASE IV `.mdx` indexes, keeping every tag exact. Reads `.ndx`, `.ntx` and `.cdx` indexes. Takes dBASE-compatible locks, evaluates dBASE expressions, imports and exports CSV, and includes an ADO.NET provider. No dependencies. |
+| **Thunder.Dbf** | The engine. Reads and writes tables, `.dbt`/`.fpt` memos and indexes: dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` are kept exact on every write, and FoxPro `.cdx` as a preview. Typed records with LINQ, `INDEX ON` and `PACK`. Takes dBASE-compatible locks, evaluates dBASE expressions, imports and exports CSV, and includes an ADO.NET provider. No dependencies. |
 | **Thunder.Dbf.Sql** | Migrates tables to SQLite, SQL Server or PostgreSQL, and keeps a live two-way bridge between a DBF table and its SQL twin. |
 | **Thunder.Dbf.Server** | A safe JSON web API over the legacy folder: hashed API keys, per-table and per-field permissions, validation, a write journal, backups, rate limits, OpenAPI. |
 | **thunder-dbf** | The command line: `check`, `info`, `import`, `export`, `migrate`. |
@@ -48,6 +48,24 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 - **Errors explain themselves.** Every failure has a code, a hint and an HTTP status, and messages never leak paths or account names.
 - **Untrusted input can't escape the folder.** Table names and links are checked, and hostile files can't crash or hang the process.
 - **Tested on real files,** not only on files it wrote itself (see below).
+
+## Install
+
+Coming with 0.1.0, the first release on nuget.org (not published yet):
+
+```bash
+dotnet add package Thunder.Dbf
+```
+
+```bash
+dotnet add package Thunder.Dbf.Sql
+```
+
+```bash
+dotnet tool install -g thunder-dbf
+```
+
+The web service will be a self-contained download for Windows, Linux and macOS on each [GitHub release](https://github.com/pthunder/Thunder.Dbf/releases). Until then, build from a clone:
 
 ## Quick start
 
@@ -90,7 +108,8 @@ More in [Use cases](docs/use-cases.md).
 | FoxPro 2 and Visual FoxPro tables, `.fpt` memos | ✅ | ✅ |
 | Visual FoxPro integer, currency, double, datetime, nulls, autoincrement | ✅ | ✅ |
 | dBASE IV `.mdx` indexes | ✅ | ✅, every tag kept exact |
-| dBASE III `.ndx`, Clipper `.ntx`, FoxPro `.cdx`/`.idx` indexes | ✅ | writes refused while one sits next to the table, since it would go stale |
+| dBASE III `.ndx`, Clipper `.ntx` indexes | ✅ | ✅, with Clipper's index lock |
+| FoxPro / Visual FoxPro `.cdx`/`.idx` indexes | ✅ | preview: opt in with `MaintainFoxProIndexes` (otherwise writes are refused) |
 | Code pages: over 60, including DOS 437/850, Windows 125x and Polish Mazovia | ✅ | ✅ |
 
 ## Tested on real files
@@ -129,15 +148,17 @@ Done:
 7. ~~Safe JSON API service~~
 8. ~~Live bridge with SQL Server, PostgreSQL or SQLite~~
 9. ~~Migrator and ADO.NET provider~~
+10. ~~OpenID Connect sign-in for the web service, and an OpenAPI schema per table~~
+11. ~~Typed records and a LINQ provider that seeks through `.mdx` tags~~
+12. ~~`INDEX ON` (`CreateIndexTag`) and `PACK`~~
+13. ~~Keeping `.ndx` and `.ntx` indexes up to date on writes~~
 
 Next:
 
-- Keeping `.cdx`, `.ntx` and `.ndx` indexes up to date on writes, so FoxPro and Clipper tables can be written safely too
-- Typed records and LINQ: map a table to a C# class, and a LINQ provider that turns `Where` on an indexed field into a seek. Today LINQ to Objects works over `ReadAll()`.
+- FoxPro `.cdx` writing out of preview: the `.cdx` index lock, very large tables, candidate keys within one batch, crash-safe page splits, and a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself)
+- Creating `.ndx`, `.ntx` and `.cdx` tags (today `INDEX ON` writes `.mdx` tags)
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
-- Creating index tags (`INDEX ON`) and packing tables (`PACK`)
-- OpenID Connect sign-in for the web service, and an OpenAPI schema per table
-- NuGet packages
+- NuGet packages, coming with 0.1.0: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool on nuget.org, and self-contained web service downloads for Windows, Linux and macOS on each GitHub release. The packaging and release workflow are ready.
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).
 

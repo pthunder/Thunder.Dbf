@@ -62,6 +62,6 @@ Thunder.Dbf exists so people can put web apps on top of legacy data that often h
 | Workflows | every GitHub Action pinned to a full commit SHA |
 | Size | files over 5 MB |
 
-CI also runs the full test suite on Windows, Linux and macOS, a vulnerable-package scan and CodeQL.
+CI also runs the full test suite on Windows, Linux and macOS, a vulnerable-package scan, CodeQL, and `scripts/check-packages.sh` on freshly packed NuGet packages. The libraries fail to build if a public member has no XML doc comment.
 
 Everything else on this page is checked by the reviewer, using the pull-request checklist.

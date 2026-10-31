@@ -1,8 +1,8 @@
 #        .-----.
 #       /     /      ProjectThunder :: Thunder.Dbf
 #      /     /__     Every push and pull request: build and test on all three
-#     /__      /     operating systems, then the editorial and security gates.
-#       /    /
+#     /__      /     operating systems, pack the NuGet packages and check them,
+#       /    /       then the editorial and security gates.
 #      /   /
 #     /  /
 #    //
@@ -44,6 +44,22 @@ jobs:
         with:
           name: test-results-${{ matrix.os }}
           path: test-results
+
+  pack:
+    name: Pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      # The same pack and checks the release workflow runs, so a broken package shows up
+      # in the pull request rather than on release day.
+      - run: dotnet pack Thunder.Dbf.slnx -c Release -o artifacts
+      - name: Check packages (README, icon, symbols, XML docs, CLI installs and runs)
+        run: scripts/check-packages.sh artifacts
 
   editorial:
     name: Editorial and security gates

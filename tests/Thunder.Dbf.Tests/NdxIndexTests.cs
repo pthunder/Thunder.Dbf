@@ -192,7 +192,7 @@ public class NdxIndexTests
     [Fact]
     public void Streams_that_return_a_few_bytes_at_a_time_still_open()
     {
-        using var index = NdxIndex.Open(new TrickleStream(File.ReadAllBytes(Fixture("retroinv/NUM993.NDX")), chunk: 7));
+        using var index = NdxIndex.Open(new TrickleStream(SharedFile.ReadAllBytes(Fixture("retroinv/NUM993.NDX")), chunk: 7));
         Assert.Equal(993, index.Tag.Entries().Count());
     }
 

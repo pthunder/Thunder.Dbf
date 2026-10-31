@@ -34,13 +34,30 @@ When a table with a production `.mdx` is opened writable by path, or with `index
 
 `table.MaintainsIndex` says whether this is happening. A table that declares a production index which isn't available is refused writes (`IndexWouldGoStale`) rather than silently letting it go stale.
 
+## Creating tags (INDEX ON)
+
+```csharp
+table.CreateIndexTag("LASTNAME", "UPPER(LAST)+UPPER(FIRST)");                  // INDEX ON ... TAG LASTNAME
+table.CreateIndexTag("ACTIVE", "CUSTNO", forExpression: ".NOT. DELETED()", unique: true);
+table.CreateIndexTag("NEWEST", "DTOS(HIRED)", descending: true);
+```
+
+This adds a tag to the production `.mdx`, creating the file (and setting the table's flag for it) when the table has none. The new tag is filled from every record and kept up to date by every write after that. It's laid out byte for byte as dBASE software writes it: the tests rebuild a Siemens table's six tags from scratch and compare them with the `.mdx` SIMATIC Manager wrote.
+
+- **The key's type** (character, number or date) and **width** come from the expression's results on the real records, so no existing key is cut short.
+- **Every key is worked out first.** An expression that fails on some record, or gives text for one record and a number for another, stops the command with nothing written.
+- **A crash can't leave a half-filled tag.** The tag is filled while it's still unlisted, and listed last.
+- **Expressions and filters are stored in the table's code page.** A character the code page can't hold is refused.
+
+dBASE needs the table `EXCLUSIVE` for `INDEX ON`. Do this while the legacy app is closed, because a program that already has the `.mdx` open won't see the new tag until it reopens it. For dBASE IV tables only: FoxPro keeps its tags in `.cdx` files.
+
 ## Rebuilding
 
 ```csharp
 table.RebuildIndex();   // like dBASE's REINDEX: every tag, from the table
 ```
 
-Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step.
+Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone out of step. It rebuilds every index the table keeps, not only the `.mdx`. `table.Pack()` rebuilds them too (see [Packing](reading-and-writing.md#packing)).
 
 ## How it's verified
 
@@ -55,9 +72,34 @@ Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone 
 | Format | From | Read and seek | Kept up to date on writes |
 |---|---|---|---|
 | `.mdx` | dBASE IV | ✅ | ✅ |
-| `.ndx` | dBASE III | ✅ | not yet |
-| `.ntx` | Clipper | ✅ | not yet |
-| `.cdx`, `.idx` | FoxPro, Visual FoxPro | ✅ | not yet |
+| `.ndx` | dBASE III | ✅ | ✅ |
+| `.ntx` | Clipper, Harbour | ✅ | ✅, under Clipper's index lock |
+| `.cdx`, `.idx` | FoxPro, Visual FoxPro | ✅ | preview, with `maintainFoxProIndexes` |
+
+### Which indexes are kept
+
+- **`.mdx` and the structural `.cdx`:** the table's header says it has them, so they're always the table's own.
+- **`.ndx`, `.ntx` and `.idx`:** these record nothing about their table. One named after the table (`CUSTOMER.NTX` for `CUSTOMER.DBF`) is kept automatically. Any other that looks like it belongs (its key names only this table's fields) blocks writes until you name it, as the legacy app does with `USE CUSTOMER INDEX CUSTNAME, CUSTZIP`:
+
+  ```csharp
+  using var table = DbfTable.Open(@"data\CUSTOMER.DBF", writable: true);
+  table.MaintainIndex(@"data\CUSTNAME.NTX");
+  table.MaintainIndex(@"data\CUSTZIP.NTX");
+  ```
+
+  Guessing could be wrong: two tables with an `ID` field would both claim an index on `ID`.
+
+### Refused rather than guessed
+
+Thunder.Dbf keeps an index only when it can write exactly what the legacy program would. Otherwise writes stop with `IndexWouldGoStale`, and the reason is in the exception's `Diagnostic`. It refuses:
+
+- **Keys not in byte order:** an index built with a national or case-blind sort order. `MaintainIndex(path, rebuild: true)` takes it over and rebuilds it in byte order, like REINDEX with `SET COLLATE TO "MACHINE"`.
+- **Clipper's custom, changes-only, template and multi-key indexes,** whose keys the program sets itself.
+- **Numeric `.ntx` keys wider than 15 significant digits,** which Clipper formats differently.
+- **`.cdx` tags over nullable, datetime or currency fields,** or with a collation other than MACHINE.
+- **An index created next to the table after it was opened:** reopen the table.
+
+If an index update fails partway, every later write to that table stops until `RebuildIndex()` succeeds. A half-applied change is never built on.
 
 Every format opens the same way, and every tag works through `IDbfIndexTag`:
 

@@ -29,9 +29,13 @@ public sealed record DbfField(string Name, char Type, int Length, int DecimalCou
     /// <summary>Visual FoxPro field flags (descriptor byte 18). Always 0 for other dialects.</summary>
     public byte Flags { get; init; }
 
+    /// <summary>A hidden system field, such as Visual FoxPro's _NullFlags.</summary>
     public bool IsSystem => (Flags & 0x01) != 0;
+    /// <summary>The field can hold .NULL. (Visual FoxPro).</summary>
     public bool IsNullable => (Flags & 0x02) != 0;
+    /// <summary>The field holds bytes, not text, so no code page conversion applies (Visual FoxPro NOCPTRANS).</summary>
     public bool IsBinary => (Flags & 0x04) != 0;
+    /// <summary>The field numbers new records itself (Visual FoxPro autoincrement).</summary>
     public bool IsAutoIncrement => (Flags & 0x08) != 0;
 
     /// <summary>Visual FoxPro autoincrement step (descriptor byte 23).</summary>
@@ -44,10 +48,15 @@ public sealed record DbfField(string Name, char Type, int Length, int DecimalCou
 /// <summary>A field to create in a new table.</summary>
 public sealed record DbfFieldDefinition(string Name, char Type, int Length, int DecimalCount = 0)
 {
+    /// <summary>A character (C) field of <paramref name="length"/> characters.</summary>
     public static DbfFieldDefinition Character(string name, int length) => new(name, 'C', length);
+    /// <summary>A numeric (N) field, <paramref name="length"/> characters wide including the sign and decimal point.</summary>
     public static DbfFieldDefinition Numeric(string name, int length, int decimals = 0) => new(name, 'N', length, decimals);
+    /// <summary>A date (D) field.</summary>
     public static DbfFieldDefinition Date(string name) => new(name, 'D', 8);
+    /// <summary>A logical (L) field.</summary>
     public static DbfFieldDefinition Logical(string name) => new(name, 'L', 1);
+    /// <summary>A memo (M) field, stored in the table's .dbt or .fpt file.</summary>
     public static DbfFieldDefinition Memo(string name) => new(name, 'M', 10);
 }
 
@@ -84,6 +93,7 @@ public sealed class DbfHeader
 
     internal void SetNextAutoIncrement(int fieldIndex, int value) => _autoIncrementNext[fieldIndex] = value;
 
+    /// <summary>The version byte (header byte 0), which says which dBASE or FoxPro dialect wrote the table.</summary>
     public byte Version => _fixed[0];
 
     /// <summary>Any FoxPro dialect: FoxBASE, FoxPro 2 or Visual FoxPro.</summary>
@@ -117,20 +127,36 @@ public sealed class DbfHeader
         }
     }
 
+    /// <summary>The number of records, including those marked deleted.</summary>
     public uint RecordCount
     {
         get => BinaryPrimitives.ReadUInt32LittleEndian(_fixed.AsSpan(4, 4));
         internal set => BinaryPrimitives.WriteUInt32LittleEndian(_fixed.AsSpan(4, 4), value);
     }
 
+    /// <summary>Bytes before the first record: the fixed header, the field descriptors and the terminator.</summary>
     public int HeaderLength => BinaryPrimitives.ReadUInt16LittleEndian(_fixed.AsSpan(8, 2));
+    /// <summary>Bytes per record, including the one-byte delete flag.</summary>
     public int RecordLength => BinaryPrimitives.ReadUInt16LittleEndian(_fixed.AsSpan(10, 2));
 
     /// <summary>dBASE IV: set when a production .mdx with the same base name accompanies the table.</summary>
-    public bool HasProductionMdx => !IsVisualFoxPro && _fixed[28] == 0x01;
+    public bool HasProductionMdx => !IsVisualFoxPro && !_indexFlagMeansCdx && Version is not (0xF5 or 0xFB) && _fixed[28] == 0x01;
+
+    /// <summary>Records that a production .mdx now accompanies the table (byte 28). Written with the fixed header.</summary>
+    internal void MarkProductionMdx() => _fixed[28] = 0x01;
 
     /// <summary>Visual FoxPro: set when a structural .cdx with the same base name accompanies the table.</summary>
-    public bool HasStructuralCdx => IsVisualFoxPro && (_fixed[28] & 0x01) != 0;
+    public bool HasStructuralCdx => (IsVisualFoxPro || Version is 0xF5 or 0xFB || _indexFlagMeansCdx) && (_fixed[28] & 0x01) != 0;
+
+    // FoxPro 2 writes version 0x03, dBASE's own, for tables without memos, and byte 28's flag then
+    // means "has a structural .cdx" rather than dBASE IV's "has a production .mdx". Only the files
+    // next to the table can tell them apart (see DbfTable.Open).
+    private bool _indexFlagMeansCdx;
+
+    /// <summary>True for a FoxPro 2 table that shares dBASE's version byte, as decided from its companion files.</summary>
+    internal bool IsFoxProByCompanion => _indexFlagMeansCdx;
+
+    internal void TreatIndexFlagAsCdx() => _indexFlagMeansCdx = true;
 
     /// <summary>dBASE IV: byte 15 says the table was encrypted with PROTECT. Its records are scrambled.</summary>
     public bool IsEncrypted => !IsVisualFoxPro && _fixed[15] == 0x01;
@@ -141,6 +167,7 @@ public sealed class DbfHeader
     /// <summary>Language driver / code page mark (byte 29).</summary>
     public byte LanguageDriver => _fixed[29];
 
+    /// <summary>The fields, in table order.</summary>
     public IReadOnlyList<DbfField> Fields { get; }
 
     /// <summary>True when the table has a companion memo file (.dbt for dBASE, .fpt for FoxPro).</summary>

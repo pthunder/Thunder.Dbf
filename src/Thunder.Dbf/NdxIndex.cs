@@ -11,18 +11,23 @@ using System.Text;
 
 namespace Thunder.Dbf;
 
-/// <summary>A dBASE III single-index (.ndx) file. Read-only.</summary>
+/// <summary>
+/// A dBASE III single-index (.ndx) file. Opened on its own it only reads; a writable
+/// <see cref="DbfTable"/> opens the .ndx files next to it itself and keeps them up to date.
+/// </summary>
 public sealed partial class NdxIndex : IDisposable
 {
     internal const int PageSize = 512;
 
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
+    private readonly DbfTable? _table; // kept so a reload still knows which numeric keys are dates
 
-    private NdxIndex(Stream stream, bool leaveOpen, Encoding encoding)
+    private NdxIndex(Stream stream, bool leaveOpen, Encoding encoding, DbfTable? table)
     {
         _stream = stream;
         _leaveOpen = leaveOpen;
+        _table = table;
         Encoding = encoding;
     }
 
@@ -35,6 +40,8 @@ public sealed partial class NdxIndex : IDisposable
     /// <summary>The one tag, as a list, so code written for .mdx and .cdx tags works here too.</summary>
     public IReadOnlyList<NdxTag> Tags => [Tag];
 
+    /// <summary>The index's one tag, if it's called <paramref name="tagName"/> (in any case).</summary>
+    /// <exception cref="KeyNotFoundException">The tag has another name.</exception>
     public NdxTag this[string tagName] =>
         string.Equals(Tag.Name, tagName, StringComparison.OrdinalIgnoreCase)
             ? Tag
@@ -47,6 +54,8 @@ public sealed partial class NdxIndex : IDisposable
     /// <param name="table">The table the index belongs to. dBASE stores date keys as plain numbers
     /// (Julian day numbers); with the table, a key expression that returns a date reads back as
     /// <see cref="DateOnly"/>. Without it, date keys read as numbers.</param>
+    /// <param name="path">The .ndx file.</param>
+    /// <param name="encoding">How character keys decode, overriding the table's encoding.</param>
     public static NdxIndex Open(string path, Encoding? encoding = null, DbfTable? table = null)
     {
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -69,11 +78,12 @@ public sealed partial class NdxIndex : IDisposable
             throw new ArgumentException("NDX files need a seekable stream.", nameof(stream));
 
         var name = stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
-        var index = new NdxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage));
+        var index = new NdxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage), table);
         index.Tag = NdxTag.Load(index, name, table);
         return index;
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (!_leaveOpen)
@@ -121,11 +131,14 @@ public sealed partial class NdxTag
     /// 'D' needs the table (see <see cref="NdxIndex.Open(string, Encoding?, DbfTable?)"/>).
     /// </summary>
     public char KeyType { get; private init; }
+    /// <inheritdoc />
     public int KeyLength { get; private init; }
 
     /// <summary>Always false: dBASE III indexes only ascend.</summary>
     public bool IsDescending => false;
+    /// <inheritdoc />
     public bool IsUnique { get; private init; }
+    /// <inheritdoc />
     public string Expression { get; private init; } = "";
 
     /// <summary>Always null: dBASE III indexes have no FOR filter.</summary>

@@ -12,19 +12,26 @@ using System.Text;
 
 namespace Thunder.Dbf;
 
-/// <summary>A Clipper (and Harbour, xHarbour, X#) single-index (.ntx) file. Read-only.</summary>
+/// <summary>
+/// A Clipper (and Harbour, xHarbour, X#) single-index (.ntx) file. Opened on its own it's read-only;
+/// a table opened writable keeps the .ntx files next to it up to date (see NtxIndexWriter.cs).
+/// </summary>
 public sealed partial class NtxIndex : IDisposable
 {
     internal const int PageSize = 1024;
 
     private readonly Stream _stream;
     private readonly bool _leaveOpen;
+    private readonly string _fileName;
+    private readonly DbfTable? _table;
 
-    private NtxIndex(Stream stream, bool leaveOpen, Encoding encoding)
+    private NtxIndex(Stream stream, bool leaveOpen, Encoding encoding, string fileName, DbfTable? table)
     {
         _stream = stream;
         _leaveOpen = leaveOpen;
         Encoding = encoding;
+        _fileName = fileName;
+        _table = table;
     }
 
     /// <summary>The code page character keys and expressions decode with.</summary>
@@ -36,6 +43,8 @@ public sealed partial class NtxIndex : IDisposable
     /// <summary>The one tag, as a list, so code written for .mdx and .cdx tags works here too.</summary>
     public IReadOnlyList<NtxTag> Tags => [Tag];
 
+    /// <summary>The index's one tag, if it's called <paramref name="tagName"/> (in any case).</summary>
+    /// <exception cref="KeyNotFoundException">The tag has another name.</exception>
     public NtxTag this[string tagName] =>
         string.Equals(Tag.Name, tagName, StringComparison.OrdinalIgnoreCase)
             ? Tag
@@ -49,6 +58,8 @@ public sealed partial class NtxIndex : IDisposable
     /// file doesn't say what the text means, so without the table all keys read as strings. With it,
     /// the key expression is evaluated on a blank record to learn its type, as Clipper itself does,
     /// and numeric, date and logical keys read back as numbers, <see cref="DateOnly"/> and bool.</param>
+    /// <param name="path">The .ntx file.</param>
+    /// <param name="encoding">How character keys decode, overriding the table's encoding.</param>
     public static NtxIndex Open(string path, Encoding? encoding = null, DbfTable? table = null)
     {
         var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -70,14 +81,20 @@ public sealed partial class NtxIndex : IDisposable
             throw new ArgumentException("NTX files need a seekable stream.", nameof(stream));
 
         var fileName = stream is FileStream file ? Path.GetFileNameWithoutExtension(file.Name).ToUpperInvariant() : "";
-        var index = new NtxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage));
+        var index = new NtxIndex(stream, leaveOpen, encoding ?? table?.Encoding ?? DbfEncoding.GetEncoding(DbfEncoding.DefaultCodePage), fileName, table);
         index.Tag = NtxTag.Load(index, fileName, table);
         return index;
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
-        if (!_leaveOpen)
+        if (_leaveOpen)
+            return;
+        // On Linux closing any handle drops this process's locks on the file, another table's too.
+        if (_stream is FileStream file)
+            DbfLocks.CloseWhenSafe(file);
+        else
             _stream.Dispose();
     }
 
@@ -139,16 +156,27 @@ public sealed partial class NtxTag
 
     /// <summary>'C', 'N', 'D' or 'L'. Always 'C' unless the index was opened with its table.</summary>
     public char KeyType { get; private init; }
+    /// <inheritdoc />
     public int KeyLength { get; private init; }
 
     /// <summary>Decimal places in a numeric key, as given to STR() when the key was built.</summary>
     public int KeyDecimals { get; private init; }
+    /// <inheritdoc />
     public bool IsDescending { get; private init; }
+    /// <inheritdoc />
     public bool IsUnique { get; private init; }
+    /// <inheritdoc />
     public string Expression { get; private init; } = "";
+    /// <inheritdoc />
     public string? ForExpression { get; private init; }
 
     internal int MaxKeys { get; private init; }
+
+    /// <summary>The header's signature flags (bytes 0-1), maintenance modes included.</summary>
+    internal ushort Signature { get; private init; }
+
+    /// <summary>Bytes per item: child pointer (4), record number (4), key, and any padding the writer added.</summary>
+    internal int ItemLength { get; private init; }
 
     internal static NtxTag Load(NtxIndex index, string fileName, DbfTable? table)
     {
@@ -184,9 +212,11 @@ public sealed partial class NtxTag
         return new NtxTag(index, largeFile ? root * (long)NtxIndex.PageSize : root, largeFile, tagName)
         {
             KeyType = table is null ? 'C' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
+            Signature = flags,
             KeyLength = keyLength,
             KeyDecimals = keyDecimals,
             MaxKeys = maxKeys,
+            ItemLength = itemLength,
             IsUnique = header[UniqueOffset] != 0,
             IsDescending = header[DescendOffset] != 0,
             Expression = expression,

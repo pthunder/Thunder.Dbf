@@ -26,7 +26,8 @@ Data Source=\\server\share\data;Read Only=false;Code Page=1252
 | `Read Only` / `Mode=ReadWrite` | `true` | Writes are refused unless this is off |
 | `Code Page` (or `Encoding`) | from each table | Text encoding for every table: `1252`, `437`, `850`, `utf-8`, `mazovia`, ... |
 | `Ignore Missing Memo` | `false` | Read memo fields as null when a `.dbt`/`.fpt` is missing |
-| `Allow Unmaintained Indexes` | `false` | Write even when an index can't be kept up to date (a FoxPro `.cdx`, a stray `.ndx`/`.ntx`/`.idx`, or a missing `.mdx`) |
+| `Allow Unmaintained Indexes` | `false` | Write even when an index can't be kept up to date (a missing `.mdx`, an unnamed `.ndx`/`.ntx`/`.idx`, a sort order or mode Thunder.Dbf doesn't write) |
+| `Maintain FoxPro Indexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes |
 | `Lock Scheme` | `Auto` | Whose lock offsets to use: `Dbase`, `Clipper` or `VisualFoxPro` (see [Locking](locking.md)) |
 
 `db.TableNames` lists the tables. `db["NAME"]` gives a table that the database keeps open and disposes with itself. `db.OpenTable("NAME")` gives one you own.
@@ -82,7 +83,7 @@ Every failure is a `DbfException`. `Message` and `Hint` are safe to show anyone;
 | `ReadOnlyLocation` | 409 | The file, share or volume is read-only | Clear the attribute or get write access |
 | `FileInUse` | 409 | Another program holds the file exclusively | Close it, or open read-only |
 | `TableAlreadyExists` | 409 | Creating would overwrite or adopt existing files | Choose another name |
-| `IndexWouldGoStale` | 409 | Writing would leave an index out of date | Put the `.mdx` next to the table, or opt in and rebuild |
+| `IndexWouldGoStale` | 409 | Writing would leave an index out of date | Put the `.mdx` next to the table, name the index with `MaintainIndex`, or see the reason in `Diagnostic` |
 | `IncompleteTransaction` | 409 | dBASE IV left a transaction unfinished | Let the legacy app roll it back |
 | `RecordLocked`, `TableLocked` | 423 | Another program holds the lock | Retry shortly, or raise `LockTimeout` |
 | `NotADbfFile`, `UnsupportedFormat` | 500 | Not a table, or dBASE II/7 | Check the file; save as dBASE III/IV or FoxPro |

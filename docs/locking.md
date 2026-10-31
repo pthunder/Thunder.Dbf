@@ -60,7 +60,9 @@ Locks nest: a write inside your own lock on the same record doesn't wait for its
 
 Locks are taken on the `.dbf` only, as dBASE does. The memo and index files have no locks of their own; they're protected because every program that writes them holds the table's header or record lock while it does. A program that changes a `.dbt` or `.mdx` without taking those locks (some old repair tools do) isn't held off.
 
-Stray single-file indexes (`.ndx`, `.ntx`, `.idx`) next to a table can't be kept up to date, and nothing in the table says they're there. Thunder.Dbf looks for them by name and refuses writes while one exists, unless `AllowUnmaintainedIndexes` is set (the legacy app must then reindex before relying on them).
+Clipper and Harbour also lock an `.ntx` file itself while they change it (byte 1,000,000,000, or Harbour's 64-bit position for large-file indexes). Thunder.Dbf takes the same lock around every `.ntx` change, so the two programs never rewrite the same index page at once. dBASE III doesn't lock `.ndx` files; it relies on the table's locks, and so does Thunder.Dbf. Visual FoxPro's `.cdx` lock isn't taken yet, which is one reason `.cdx` writing is still a preview.
+
+Single-file indexes (`.ndx`, `.ntx`, `.idx`) don't record which table they belong to. See [Which indexes are kept](indexes.md#which-indexes-are-kept).
 
 ## Where it works
 

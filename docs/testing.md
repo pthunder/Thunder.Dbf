@@ -45,3 +45,21 @@ Index tests don't compare against stored expected bytes. They rebuild what each 
 ## Proving tests can fail
 
 For format and index code, break the implementation on purpose (a wrong separator key in a node split, a wrong exponent bias in numeric keys) and confirm the tests fail before trusting a green run. The editorial guidelines ask this of every change to that code.
+
+## Checking against Visual FoxPro itself
+
+On a Windows machine with Visual FoxPro 9 installed (it comes with Visual Studio subscriptions), these tests let VFP judge the `.cdx` files Thunder.Dbf keeps, and the other way round:
+
+```powershell
+$env:THUNDER_VFP = "C:\Program Files (x86)\Microsoft Visual FoxPro 9\vfp9.exe"
+dotnet test --filter VisualFoxPro
+```
+
+Each run takes a FoxPro table with a `.cdx`, then:
+
+1. Thunder.Dbf appends, updates, deletes and recalls enough records to split index pages.
+2. VFP, running hidden, walks every tag in order. Its order must match the order Thunder.Dbf's index holds.
+3. VFP appends, edits and deletes through its own index, under its own locks.
+4. Thunder.Dbf checks that every tag now holds exactly what a fresh rebuild would.
+
+Without `THUNDER_VFP` the tests do nothing. VFP isn't redistributable, so it never goes in the repo.
