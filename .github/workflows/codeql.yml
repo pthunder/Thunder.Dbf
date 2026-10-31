@@ -12,6 +12,7 @@ on:
     - cron: "17 6 * * 1"
 
 permissions:
+  actions: read          # CodeQL reads its own run's details; private repositories require it
   contents: read
   security-events: write
 
