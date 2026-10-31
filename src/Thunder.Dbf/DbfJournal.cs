@@ -6,10 +6,13 @@
 //
 //   TABLE.DBF.journal, empty when nothing's in flight:
 //
-//   +------+--------+-------+---------------------------------------------------+----------+
-//   | TDJ2 | record | count | per tag: index file, tag, old key, new key        | SHA-256  |
-//   +------+--------+-------+---------------------------------------------------+----------+
-//     4      4        4       1 + file, 1 + tag, 2 + old (-1: none), 2 + new       32
+//   +------+------+--------+-------+--------------------------------------------+----------+
+//   | TDJ3 | kind | record | count | per tag: index file, tag, old key, new key  | SHA-256  |
+//   +------+------+--------+-------+--------------------------------------------+----------+
+//     4      1      4        4       1 + file, 1 + tag, 2 + old (-1: none), 2 + new 32
+//
+//   kind 'U': one record's key change. kind 'A': appending from that record on; the "tags" are
+//   just the index files the writer kept (no keys), which a replay must keep too.
 
 using System.Buffers.Binary;
 using System.Security.Cryptography;
@@ -18,7 +21,7 @@ using System.Text;
 namespace Thunder.Dbf;
 
 /// <summary>One record's key changes, noted before they're made.</summary>
-internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<DbfJournalChange> Changes);
+internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<DbfJournalChange> Changes, bool IsAppend = false);
 
 /// <summary>One tag's part of a key change. The index file's name and the key length pin down which tag.</summary>
 internal sealed record DbfJournalChange(string IndexFile, string Tag, byte[]? OldKey, byte[]? NewKey);
@@ -31,7 +34,7 @@ internal sealed record DbfJournalChange(string IndexFile, string Tag, byte[]? Ol
 /// </summary>
 internal static class DbfJournal
 {
-    private static readonly byte[] Magic = "TDJ2"u8.ToArray();
+    private static readonly byte[] Magic = "TDJ3"u8.ToArray();
     private static readonly byte[] Family = "TDJ"u8.ToArray();
     private const int HashLength = 32;
 
@@ -41,6 +44,7 @@ internal static class DbfJournal
     {
         using var body = new MemoryStream();
         body.Write(Magic);
+        body.WriteByte(entry.IsAppend ? (byte)'A' : (byte)'U');
         WriteInt(body, entry.RecordNumber);
         WriteInt(body, entry.Changes.Count);
         foreach (var change in entry.Changes)
@@ -76,7 +80,7 @@ internal static class DbfJournal
             bytes = new byte[file.Length];
             file.ReadExactly(bytes);
         }
-        var hashed = bytes.Length >= Magic.Length + 8 + HashLength
+        var hashed = bytes.Length >= Magic.Length + 9 + HashLength
             && SHA256.HashData(bytes.AsSpan(0, bytes.Length - HashLength)).AsSpan().SequenceEqual(bytes.AsSpan(bytes.Length - HashLength));
         // A whole note in another version of the format can't be read safely, nor dropped as torn.
         if (hashed && bytes.AsSpan(0, Family.Length).SequenceEqual(Family) && !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic))
@@ -85,6 +89,7 @@ internal static class DbfJournal
             return null;
 
         var at = Magic.Length;
+        var isAppend = bytes[at++] == (byte)'A';
         var record = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at));
         var count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at + 4));
         at += 8;
@@ -97,7 +102,7 @@ internal static class DbfJournal
             var newKey = ReadKey(bytes, ref at);
             changes.Add(new DbfJournalChange(file, tag, oldKey, newKey));
         }
-        return new DbfJournalEntry(record, changes);
+        return new DbfJournalEntry(record, changes, isAppend);
     }
 
     /// <summary>True when a note is waiting (a write was cut off, or one is in flight in another program).</summary>

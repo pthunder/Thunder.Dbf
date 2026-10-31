@@ -268,4 +268,53 @@ public sealed class CrashSafeUpdateTests : IDisposable
             table.RebuildIndex();
         Assert.Equal(0, new FileInfo(path + ".journal").Length);
     }
+
+    // Found against Visual FoxPro 9: an append cut off after its record but before the header's count
+    // left a record past the count (VFP error 2091), which only an exclusive open took off. Noted in
+    // the journal, it's the next write's to finish, shared or not.
+    [Theory]
+    [InlineData("appended record")]
+    [InlineData("counted")]
+    public void A_journaled_append_cut_off_is_finished_by_the_next_shared_write(string step)
+    {
+        var path = Table();
+        var committed = new FileInfo(path).Length;
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UseJournal = true;
+            table.CrashPoint = point => { if (point == step) throw new Killed(); };
+            Assert.Throws<Killed>(() => table.Append("Katherine", 50m));   // AppendRange would tidy up after an exception; a kill doesn't
+        }
+        Assert.True(File.Exists(path + ".journal") && new FileInfo(path + ".journal").Length > 0);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m });
+            Assert.False(table.HasPendingJournal);
+            Assert.Equal(step == "counted" ? 5 : 4, table.RecordCount);
+            Assert.Equal(0, table.RecordsPastCount());
+        }
+        if (step == "appended record")
+            Assert.Equal(committed, new FileInfo(path).Length);
+        Assert.Equal(Rebuilt(path), Entries(path));
+    }
+
+    [Fact]
+    public void Without_the_journal_a_record_past_the_count_waits_for_an_exclusive_open()
+    {
+        var path = Table();
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.CrashPoint = point => { if (point == "appended record") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.Append("Katherine", 50m));
+        }
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m });
+            Assert.Equal(1, table.RecordsPastCount());
+        }
+        using (DbfTable.Open(path, writable: true, exclusive: true)) { }
+        using var check = DbfTable.Open(path);
+        Assert.Equal(0, check.RecordsPastCount());
+    }
 }

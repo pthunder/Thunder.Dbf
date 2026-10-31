@@ -848,8 +848,18 @@ public sealed partial class DbfTable : IDisposable
         EncodeFields(values, changed: null);
         var keys = PlanIndexChanges(before: null, after: !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
+        // The first row of a batch notes where the batch starts, before any of it is written.
+        if (_useJournal && _path is not null && !_appendNoted)
+        {
+            DbfJournal.Write(_path, new DbfJournalEntry(index + 1,
+                TagsWithFiles().Select(t => t.File).Distinct(StringComparer.OrdinalIgnoreCase).Select(f => new DbfJournalChange(f, "", null, null)).ToList(),
+                IsAppend: true));
+            _appendNoted = true;
+        }
+
         Seek(index, forAppend: true);
         _stream.Write(_buffer);
+        CrashPoint?.Invoke("appended record");
 
         // The row's index entries wait for the commit, after the header counts the row: a crash in
         // between leaves keys missing (RebuildIndex repairs that), never keys for an uncounted row.
@@ -874,13 +884,21 @@ public sealed partial class DbfTable : IDisposable
             Header.WriteAutoIncrement(_stream, field);
         _dirtyCounters.Clear();
         CommitHeader();
+        CrashPoint?.Invoke("counted");
 
         var pending = _pendingIndexChanges.ToList();
         _pendingIndexChanges.Clear();
         foreach (var (changes, recordNumber) in pending)
             ApplyIndexChanges(changes, recordNumber);
         CommitIndexes();
+        if (_appendNoted)
+        {
+            DbfJournal.Clear(_path!);
+            _appendNoted = false;
+        }
     }
+
+    private bool _appendNoted; // the current batch of appends has its note
 
     private void CommitIndexes()
     {
@@ -1411,11 +1429,12 @@ public sealed partial class DbfTable : IDisposable
     internal Action<string>? CrashPoint { get; set; }
 
     /// <summary>
-    /// Opt-in: note each record's key changes in <c>TABLE.DBF.journal</c> before making them, so an update, delete or
-    /// recall cut off partway (a crash, a killed process) is finished by the next write, here or in another
-    /// Thunder.Dbf process keeping the same indexes. Costs two extra forced disk writes (the note and its clearing)
-    /// per such write. Appends aren't noted: an append cut off is caught when the table opens. Without it, a cut-off
-    /// key change leaves the record with an extra key (never a missing one, UNIQUE tags aside) until a rebuild.
+    /// Opt-in: note each record's key changes, and each batch of appends, in <c>TABLE.DBF.journal</c> before making
+    /// them, so an update, delete, recall or append cut off partway (a crash, a killed process) is finished by the next
+    /// write, here or in another Thunder.Dbf process keeping the same indexes. Costs two extra forced disk writes (the
+    /// note and its clearing) per such write or batch. Without it, a cut-off key change leaves the record with an
+    /// extra key (never a missing one, UNIQUE tags aside) until a rebuild, and an append cut off before its count
+    /// waits for an exclusive open.
     /// </summary>
     public bool UseJournal
     {
@@ -1464,6 +1483,13 @@ public sealed partial class DbfTable : IDisposable
             RecheckAfterReplay();
             return;
         }
+        if (entry.IsAppend)
+        {
+            ReplayAppend(entry);
+            DbfJournal.Clear(_path);
+            RecheckAfterReplay();
+            return;
+        }
 
         var record = entry.RecordNumber >= 1 && entry.RecordNumber <= RecordCount ? Read(entry.RecordNumber - 1) : null;
         var tags = TagsWithFiles().ToList();
@@ -1499,6 +1525,72 @@ public sealed partial class DbfTable : IDisposable
         }
         DbfJournal.Clear(_path);
         RecheckAfterReplay();
+    }
+
+    // Finishes a batch of appends that was cut off. The note says where the batch started (F). If the
+    // header's count never reached F, nothing of it was counted, and the records past the count are
+    // that batch's, so they come off (under the append lock too, taken without waiting: a dBASE
+    // writer holding it may be waiting for the header lock held here). If the count got to F or past
+    // it, those records were counted and only their keys may be missing: every kept tag gets the key
+    // of each record from F on that it doesn't hold yet.
+    private void ReplayAppend(DbfJournalEntry entry)
+    {
+        var files = TagsWithFiles().Select(t => t.File).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (entry.Changes.FirstOrDefault(c => !files.Contains(c.IndexFile)) is { } missing)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                $"A Thunder.Dbf append from record {entry.RecordNumber} was cut off while keeping {missing.IndexFile}, which this table doesn't keep, so it can't be finished here.",
+                "Open the table with the same indexes kept (MaintainIndex for an index the legacy app names), or open it exclusively and rebuild every index, then write again.", _path);
+
+        if (RecordCount < entry.RecordNumber)
+        {
+            if (RecordsPastCount() == 0)
+                return;
+            var timeout = Locks.Timeout;
+            Locks.Timeout = TimeSpan.Zero;
+            DbfLock append;
+            try
+            {
+                append = Locks.Append();
+            }
+            finally
+            {
+                Locks.Timeout = timeout;
+            }
+            using (append)
+            {
+                var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
+                _stream.SetLength(dataEnd);
+                _stream.Position = dataEnd;
+                _stream.WriteByte(EndOfFile);
+                FlushToDisk(_stream);
+            }
+            return;
+        }
+
+        var tags = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToList();
+        var done = new List<Action>();
+        try
+        {
+            for (var number = entry.RecordNumber; number <= RecordCount; number++)
+            {
+                var record = Read(number - 1);
+                foreach (var tag in tags)
+                {
+                    if (!tag.Includes(record))
+                        continue;
+                    var key = tag.KeyFor(record);
+                    if (!tag.Contains(key, number))
+                        InsertKey(tag, key, number, done);
+                }
+            }
+            CommitIndexes();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException)
+        {
+            _indexesNeedRebuild = true;
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"A cut-off append from record {entry.RecordNumber} couldn't be finished in the index.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex().", _path, ex);
+        }
     }
 
     private DbfLock TryLockRecordNow(int recordNumber)
