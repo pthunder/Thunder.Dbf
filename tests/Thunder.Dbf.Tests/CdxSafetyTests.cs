@@ -481,13 +481,36 @@ public sealed partial class CdxWriteTests
     public void Asking_to_rebuild_an_index_already_kept_rebuilds_it()
     {
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        using (var other = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
-            other.Append(Call(other.Read(0).Values.ToArray(), id: 777, contact: 1, subject: "unindexed"));
-
-        var table = OpenWritable(dbf);
-        table.MaintainIndex(cdx, rebuild: true);
-        table.Dispose();
+        var before = SharedFile.ReadAllBytes(cdx);
+        using (var table = OpenWritable(dbf))
+            table.MaintainIndex(cdx, rebuild: true);
+        Assert.NotEqual(before, SharedFile.ReadAllBytes(cdx)); // rebuilt, not just accepted
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // Found against Visual FoxPro 9: a writer killed between writing a record and its keys left a tag
+    // one key short, and the next open took the index as it was, so SEEK couldn't find that record.
+    // A short tag is now refused on open, and a takeover with a rebuild repairs it.
+    [Fact]
+    public void A_record_whose_keys_never_reached_the_index_is_caught_on_open()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var killed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+            killed.Append(Call(killed.Read(0).Values.ToArray(), id: 777, contact: 1, subject: "unindexed"));
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+            Assert.Contains("keys for", error.Diagnostic);
+        }
+
+        using (var table = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true, maintainFoxProIndexes: true, exclusive: true))
+            table.MaintainIndex(cdx, rebuild: true);
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+        using var reopened = OpenWritable(dbf);
+        Assert.True(reopened.MaintainsIndex);
     }
 
     // A takeover whose rebuild fails lets the index go again: it keeps blocking writes, and isn't

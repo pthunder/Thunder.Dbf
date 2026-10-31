@@ -139,13 +139,19 @@ public sealed partial class CdxIndex : IMaintainedIndex
             var identity = $"{tag.HeaderOffset}|{tag.KeyLength}|{tag.Expression}|{tag.ForExpression}";
             if (_verifiedTags.Contains(identity))
                 continue;
-            if (tag.CheckWholeOrder() is { } disorder)
+            if (tag.CheckWholeOrder(out var entries) is { } disorder)
             {
                 // Remember whether order is the only problem: MaintainIndex(path, rebuild: true) can fix that.
                 _refusedOnlyForOrder = Tags.All(t => t.PrepareForWriting(_table!) is null);
                 return $"Tag {tag.Name} can't be kept up to date: {disorder}.";
             }
-            if (tag.CompareSampleWithTable(_table!) is { } mismatch)
+            // A tag with no FOR filter and no UNIQUE holds one key per record, deleted ones included.
+            // Any other count is a write that reached the table and not the index (a writer killed
+            // between the two), which a sample of the first and last keys can miss.
+            var mismatch = tag.ForExpression is null && !tag.IsUnique && entries != _table!.RecordCount
+                ? $"it holds {entries:N0} keys for {_table.RecordCount:N0} records, so it isn't in step with the table (a write reached the table but not the index)"
+                : tag.CompareSampleWithTable(_table!);
+            if (mismatch is not null)
             {
                 // Keys out of step with the table (another program wrote without updating the index, or
                 // an update failed) are what a rebuild replaces, so a takeover with a rebuild can fix it too.
@@ -557,8 +563,12 @@ public sealed partial class CdxTag : IMaintainedTag
     /// the first write. Disorder anywhere, the root included, is reported here as a sort order a
     /// rebuild fixes, not as damage.
     /// </summary>
-    internal string? CheckWholeOrder()
+    internal string? CheckWholeOrder() => CheckWholeOrder(out _);
+
+    /// <summary>The same walk, also counting the entries in the leaves.</summary>
+    internal string? CheckWholeOrder(out long entries)
     {
+        long counted = 0;
         const string Disorder = "its keys aren't in FoxPro's MACHINE byte order, so it was built with a collation this code doesn't reproduce (rebuild it with RebuildIndex, or REINDEX with SET COLLATE TO \"MACHINE\" in FoxPro)";
         byte[]? previous = null;
         var ordered = true;
@@ -572,6 +582,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 ordered = node.Keys[i - 1].AsSpan().SequenceCompareTo(node.Keys[i]) <= 0;
             if (node.IsLeaf)
             {
+                counted += node.Count;
                 if (node.Count > 0)
                 {
                     ordered &= previous is null || previous.AsSpan().SequenceCompareTo(node.Keys[0]) <= 0;
@@ -587,6 +598,7 @@ public sealed partial class CdxTag : IMaintainedTag
             }
         }
         Visit(RootOffset(), 0, []);
+        entries = counted;
         return ordered ? null : Disorder;
     }
 

@@ -297,6 +297,11 @@ public sealed partial class DbfTable : IDisposable
     }
 
     private bool _maintainFoxProIndexes;
+    private string? _structuralCdxRefusal; // why the structural .cdx wasn't attached, for the write refusal
+
+    private bool IsStructuralCdx(string file) =>
+        Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase) && _path is not null
+        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase);
 
     private bool TryAttachIndex(string file, bool acceptAfterRebuild = false)
     {
@@ -315,13 +320,16 @@ public sealed partial class DbfTable : IDisposable
                         maintained.ExpectRebuild();
                     _otherIndexes.Add(maintained);
                     _attachedIndexes[Path.GetFullPath(file)] = maintained;
-                    if (Path.GetExtension(file).Equals(".cdx", StringComparison.OrdinalIgnoreCase)
-                        && _path is not null
-                        && Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(_path), StringComparison.OrdinalIgnoreCase))
+                    if (IsStructuralCdx(file))
+                    {
                         HasMaintainedStructuralCdx = true;
+                        _structuralCdxRefusal = null;
+                    }
                     stream = null; // the index owns it now
                     return true;
                 }
+                if (index is IMaintainedIndex refused && IsStructuralCdx(file))
+                    _structuralCdxRefusal = refused.CannotMaintainReason;
                 index.Dispose();
                 stream = null;
             }
@@ -541,7 +549,7 @@ public sealed partial class DbfTable : IDisposable
         ThrowIfIndexAppeared();
         ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
-                structuralCdxMaintained: HasMaintainedStructuralCdx) is { } blocker)
+                structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
             throw blocker;
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
@@ -1376,7 +1384,7 @@ public sealed partial class DbfTable : IDisposable
     /// Shared by writes and <see cref="DbfDatabase.Check"/> so the handshake never promises what writes refuse.
     /// </summary>
     internal static DbfException? WriteBlocker(DbfHeader header, bool allowUnmaintainedIndexes, bool indexMaintained, string? path,
-        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false)
+        IReadOnlyList<string>? unmaintainedIndexes = null, bool structuralCdxMaintained = false, string? structuralCdxRefusal = null)
     {
         if (header.HasIncompleteTransaction)
             return new DbfException(DbfErrorCode.IncompleteTransaction, "dBASE IV marked a transaction on this table as unfinished.",
@@ -1387,6 +1395,11 @@ public sealed partial class DbfTable : IDisposable
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table says it has a production .mdx index, but it isn't open (missing, or the table was opened from a stream without it), so writing would leave it out of date.",
                 "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and rebuild it afterwards (exclusive: true, RebuildIndex).", path);
+        if (header.HasStructuralCdx && !structuralCdxMaintained && structuralCdxRefusal is not null)
+            return new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "The table's FoxPro .cdx index can't be kept up to date as it stands, so writing would leave it further out of date.",
+                "If it's out of step with the table (a write that reached the table but not the index), close the legacy app, open the table with exclusive: true and call MaintainIndex(path, rebuild: true), or REINDEX in FoxPro.",
+                path, diagnostic: structuralCdxRefusal);
         if (header.HasStructuralCdx && !structuralCdxMaintained)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
                 "The table has a FoxPro .cdx index that isn't open for updating (missing, unreadable, or opened from a stream), so writing would leave it out of date.",
