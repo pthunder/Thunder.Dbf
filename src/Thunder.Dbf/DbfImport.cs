@@ -29,13 +29,16 @@ public sealed record DbfImportOptions
     public DbfTableFormat Format { get; init; } = DbfTableFormat.DbaseIV;
 
     /// <summary>
-    /// Language driver for the new table: 0x01 is DOS 437, 0x02 is DOS 850. Null (the default) means
-    /// Windows-1252 as the format marks it: 0x57 for dBASE, 0x03 for the FoxPros.
+    /// Language driver for the new table: 0x01 is DOS 437, 0x02 is DOS 850. Unless set, Windows-1252 as
+    /// the format marks it: 0x57 for dBASE, 0x03 for the FoxPros.
     /// </summary>
-    public byte? LanguageDriver { get; init; }
+    public byte LanguageDriver
+    {
+        get => _languageDriver ?? (Format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? (byte)0x03 : (byte)0x57);
+        init => _languageDriver = value;
+    }
 
-    internal byte EffectiveLanguageDriver => LanguageDriver
-        ?? (Format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? (byte)0x03 : (byte)0x57);
+    private readonly byte? _languageDriver;
 
     /// <summary>Create the empty table only (the "basic shape"), without loading rows.</summary>
     public bool ShapeOnly { get; init; }
@@ -108,7 +111,7 @@ public static class DbfImport
         {
             using (var stream = new FileStream(tempPaths[0], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None))
             using (var memo = tempPaths.Length > 1 ? new FileStream(tempPaths[1], FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None) : null)
-            using (var table = DbfTable.Create(stream, plan.Fields, options.Format, options.EffectiveLanguageDriver, leaveOpen: true, memo, Path.GetFileName(dbfPath)))
+            using (var table = DbfTable.Create(stream, options.Format, plan.Fields, options.LanguageDriver, leaveOpen: true, memo, Path.GetFileName(dbfPath)))
             {
                 if (!options.ShapeOnly)
                     Load(table, csvPath, options, plan);
@@ -150,7 +153,11 @@ public static class DbfImport
         var line = new int[1]; // the CSV line being loaded, for error messages
         try
         {
-            table.AppendRange(Rows(csvPath, options, plan, line));
+            // A Visual FoxPro table with nullable fields ends with the hidden _NullFlags, which takes a null.
+            var rows = Rows(csvPath, options, plan, line);
+            if (table.Fields.Count > plan.Columns.Count)
+                rows = rows.Select(r => (object?[])[.. r, .. new object?[table.Fields.Count - r.Length]]);
+            table.AppendRange(rows);
         }
         catch (Exception ex) when (ex is OverflowException or ArgumentException && ex is not DbfException)
         {
@@ -257,7 +264,7 @@ public static class DbfImport
     private static DbfImportPlan Shape(string csvPath, DbfImportOptions options)
     {
         var delimiter = options.Delimiter ?? DetectDelimiter(csvPath, options);
-        var strict = DbfEncoding.Strict(DbfEncoding.For(options.EffectiveLanguageDriver));
+        var strict = DbfEncoding.Strict(DbfEncoding.For(options.LanguageDriver));
         List<string>? header = null;
         ColumnStats[] stats = [];
         var rowCount = 0;
@@ -308,7 +315,7 @@ public static class DbfImport
 
             columns.Add(options.Overrides?.TryGetValue(csvName, out var forced) == true
                 ? new(csvName, forced with { Name = name }, "set by Overrides")
-                : Infer(csvName, name, stats[c]));
+                : Infer(csvName, name, stats[c], options.Format == DbfTableFormat.DbaseIII ? MaxNumericWidth - 1 : MaxNumericWidth));
         }
 
         if (ragged)
@@ -319,7 +326,7 @@ public static class DbfImport
         return new DbfImportPlan(columns, rowCount, delimiter, warnings);
     }
 
-    private static DbfImportColumn Infer(string csvName, string name, ColumnStats s)
+    private static DbfImportColumn Infer(string csvName, string name, ColumnStats s, int maxNumericWidth)
     {
         if (s.NonEmpty == 0)
             return new(csvName, DbfFieldDefinition.Character(name, Math.Max(1, s.MaxBytes)), "always empty, kept as text");
@@ -331,7 +338,7 @@ public static class DbfImport
         if (s.CouldBeNumber && !s.LeadingZero)
         {
             var width = Math.Max(1, s.MaxWhole) + (s.Negative ? 1 : 0) + (s.MaxDecimals > 0 ? s.MaxDecimals + 1 : 0);
-            if (width <= MaxNumericWidth && s.MaxDecimals <= 15)
+            if (width <= maxNumericWidth && s.MaxDecimals <= 15)
                 return new(csvName, DbfFieldDefinition.Numeric(name, width, s.MaxDecimals), $"numbers up to {width} wide, {s.MaxDecimals} decimals");
         }
 
@@ -356,12 +363,24 @@ public static class DbfImport
         {
             'L' => IsWord(value, TrueWords) ? true : IsWord(value, FalseWords) ? false : throw new FormatException(),
             'D' => ParseDate(value, options) ?? throw new FormatException(),
-            'N' or 'F' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture),
+            'N' or 'F' or 'Y' => decimal.Parse(value, NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture),
+            'I' => int.Parse(value, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture),
+            'B' => double.Parse(value, NumberStyles.Float, CultureInfo.InvariantCulture),
+            'T' => ParseDateTime(value, options) ?? throw new FormatException(),
             _ => value,
         };
     }
 
     private static bool IsWord(string value, string[] words) => words.Contains(value, StringComparer.OrdinalIgnoreCase);
+
+    // ISO date-times ("2026-10-31T14:30:00", "2026-10-31 14:30", with seconds or milliseconds), or any date alone.
+    private static DateTime? ParseDateTime(string value, DbfImportOptions options)
+    {
+        string[] formats = ["yyyy-MM-ddTHH:mm:ss.FFF", "yyyy-MM-ddTHH:mm", "yyyy-MM-dd HH:mm:ss.FFF", "yyyy-MM-dd HH:mm"];
+        if (DateTime.TryParseExact(value, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var moment))
+            return moment;
+        return ParseDate(value, options)?.ToDateTime(TimeOnly.MinValue);
+    }
 
     private static DateOnly? ParseDate(string value, DbfImportOptions options)
     {

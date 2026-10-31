@@ -28,7 +28,7 @@ public sealed partial class DbfTable
     {
         EnsureWritable();
         var tagName = ValidTagName(name);
-        if (Header.IsFoxPro)
+        if (Header.IsFoxPro || Header.IsFoxProByCompanion)
             throw new DbfException(DbfErrorCode.UnsupportedFormat, "FoxPro tables keep their tags in a .cdx file, which Thunder.Dbf can't create yet.",
                 "Create the tag in FoxPro (INDEX ON ... TAG ...).", _path);
         if (_path is null && _index is null)

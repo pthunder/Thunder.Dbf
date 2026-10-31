@@ -47,6 +47,50 @@ public sealed class DbfImportTests : IDisposable
     }
 
     [Fact]
+    public void Visual_FoxPro_overrides_load_nulls_datetimes_integers_and_currency()
+    {
+        var options = new DbfImportOptions
+        {
+            Format = DbfTableFormat.VisualFoxPro,
+            Overrides = new Dictionary<string, DbfFieldDefinition>
+            {
+                ["Code"] = DbfFieldDefinition.Character("CODE", 5) with { Nullable = true },
+                ["When"] = DbfFieldDefinition.DateTime("WHEN"),
+                ["Qty"] = DbfFieldDefinition.Integer("QTY"),
+                ["Rate"] = DbfFieldDefinition.Currency("RATE"),
+                ["Score"] = DbfFieldDefinition.Double("SCORE"),
+            },
+        };
+        DbfImport.FromCsv(Csv("Code,When,Qty,Rate,Score\nAB,2026-10-31T14:30:15,-3,12.5,0.25\n,2026-10-31,,,\n"), Dbf(), options);
+
+        using var table = DbfTable.Open(Dbf());
+        var first = table.Read(0);
+        Assert.Equal("AB", first["CODE"]);
+        Assert.Equal(new DateTime(2026, 10, 31, 14, 30, 15), first["WHEN"]);
+        Assert.Equal(-3, first["QTY"]);
+        Assert.Equal(12.5m, first["RATE"]);
+        Assert.Equal(0.25, first["SCORE"]);
+        Assert.True(table.Read(1).IsNull(0));
+        Assert.Equal(new DateTime(2026, 10, 31), table.Read(1)["WHEN"]);
+    }
+
+    [Fact]
+    public void dBASE_III_imports_keep_numbers_too_wide_for_it_as_text()
+    {
+        var plan = DbfImport.Plan(Csv("Amount\n12345678901234567890\n"), new DbfImportOptions { Format = DbfTableFormat.DbaseIII });
+        Assert.Equal('C', plan.Columns[0].Field.Type);
+        Assert.Equal('N', DbfImport.Plan(Csv("Amount\n12345678901234567890\n")).Columns[0].Field.Type);
+    }
+
+    [Fact]
+    public void The_import_language_driver_follows_the_format_unless_set()
+    {
+        Assert.Equal(0x57, new DbfImportOptions().LanguageDriver);
+        Assert.Equal(0x03, new DbfImportOptions { Format = DbfTableFormat.VisualFoxPro }.LanguageDriver);
+        Assert.Equal(0x01, new DbfImportOptions { Format = DbfTableFormat.VisualFoxPro, LanguageDriver = 0x01 }.LanguageDriver);
+    }
+
+    [Fact]
     public void Quoted_commas_quotes_and_newlines_survive()
     {
         var csv = Csv("Name,Note\r\n\"Smith, Jane\",\"She said \"\"hi\"\"\r\nthen left\"\r\nJones,plain\r\n");

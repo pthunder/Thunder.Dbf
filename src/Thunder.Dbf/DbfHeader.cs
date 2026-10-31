@@ -63,8 +63,6 @@ public sealed record DbfFieldDefinition(string Name, char Type, int Length, int 
 {
     /// <summary>Visual FoxPro: the field can hold .NULL. (stored in the hidden _NullFlags field).</summary>
     public bool Nullable { get; init; }
-    /// <summary>Visual FoxPro: character or memo bytes are stored as is, with no code page translation (NOCPTRANS).</summary>
-    public bool Binary { get; init; }
     /// <summary>Visual FoxPro: an integer field that numbers new records itself.</summary>
     public bool AutoIncrement { get; init; }
     /// <summary>The first number an autoincrement field hands out.</summary>
@@ -329,13 +327,13 @@ public sealed class DbfHeader
 
     /// <summary>Builds the header for a new dBASE IV table. Tables with memo fields get the dBASE IV memo version (0x8B).</summary>
     public static DbfHeader Create(IReadOnlyList<DbfFieldDefinition> definitions, byte languageDriver = 0x57)
-        => Create(definitions, DbfTableFormat.DbaseIV, languageDriver);
+        => Create(DbfTableFormat.DbaseIV, definitions, languageDriver);
 
     /// <summary>
     /// Builds the header for a new table in <paramref name="format"/>. The language driver (code page
     /// mark, byte 29) defaults to Windows-1252: 0x57 for dBASE, 0x03 for the FoxPros. dBASE III ignores the byte.
     /// </summary>
-    public static DbfHeader Create(IReadOnlyList<DbfFieldDefinition> definitions, DbfTableFormat format, byte? languageDriver = null)
+    public static DbfHeader Create(DbfTableFormat format, IReadOnlyList<DbfFieldDefinition> definitions, byte? languageDriver = null)
     {
         if (!Enum.IsDefined(format))
             throw new ArgumentOutOfRangeException(nameof(format));
@@ -367,8 +365,8 @@ public sealed class DbfHeader
 
             // Visual FoxPro keeps memo pointers in four binary bytes; the others in ten digits.
             var length = visualFoxPro && type == 'M' ? 4 : def.Length;
-            // Visual FoxPro marks its binary types (I, Y, B, T) binary too, as it does NOCPTRANS text.
-            var binary = def.Binary || (visualFoxPro && type is 'I' or 'Y' or 'B' or 'T');
+            // Visual FoxPro marks its binary types (I, Y, B, T) binary, the flag it also uses for NOCPTRANS text.
+            var binary = visualFoxPro && type is 'I' or 'Y' or 'B' or 'T';
             var flags = (byte)((def.Nullable ? 0x02 : 0) | (binary ? 0x04 : 0) | (def.AutoIncrement ? 0x08 : 0));
             fields.Add(new DbfField(def.Name, type, length, def.DecimalCount, offset)
             {
@@ -389,6 +387,8 @@ public sealed class DbfHeader
             offset += length;
         }
 
+        if (fields.Count > maxFields)
+            throw new ArgumentException($"Visual FoxPro tables with nullable fields hold at most {maxFields - 1} fields, since the hidden _NullFlags takes one.", nameof(definitions));
         if (offset > maxRecordLength)
             throw new ArgumentException($"{Describe(format)} records hold at most {maxRecordLength} bytes; these fields need {offset}.", nameof(definitions));
 
@@ -409,7 +409,11 @@ public sealed class DbfHeader
         BinaryPrimitives.WriteUInt16LittleEndian(fixedHeader.AsSpan(10, 2), (ushort)offset);
         fixedHeader[29] = languageDriver ?? (format is DbfTableFormat.DbaseIII or DbfTableFormat.DbaseIV ? (byte)0x57 : (byte)0x03);
 
-        return new DbfHeader(fixedHeader, fields.AsReadOnly(), [.. autoIncrementNext]) { LastUpdate = DateOnly.FromDateTime(System.DateTime.Today) };
+        var header = new DbfHeader(fixedHeader, fields.AsReadOnly(), [.. autoIncrementNext]) { LastUpdate = DateOnly.FromDateTime(System.DateTime.Today) };
+        // A FoxPro 2 table without memos shares dBASE's 0x03; remember what it is while it's open.
+        if (format == DbfTableFormat.FoxPro2 && !hasMemo)
+            header.TreatIndexFlagAsCdx();
+        return header;
     }
 
     private static string Describe(DbfTableFormat format) => format switch
@@ -508,10 +512,8 @@ public sealed class DbfHeader
                 break;
         }
 
-        if (!visualFoxPro && (def.Nullable || def.Binary || def.AutoIncrement))
-            throw new ArgumentException($"Field '{def.Name}': nullable, binary and autoincrement fields need a Visual FoxPro table (DbfTableFormat.VisualFoxPro).");
-        if (def.Binary && type is not ('C' or 'M'))
-            throw new ArgumentException($"Field '{def.Name}': only character and memo fields can be binary.");
+        if (!visualFoxPro && (def.Nullable || def.AutoIncrement))
+            throw new ArgumentException($"Field '{def.Name}': nullable and autoincrement fields need a Visual FoxPro table (DbfTableFormat.VisualFoxPro).");
         if (def.AutoIncrement)
         {
             if (def.Nullable)

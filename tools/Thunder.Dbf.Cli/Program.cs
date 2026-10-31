@@ -109,7 +109,7 @@ internal static class Cli
             ShapeOnly = args.Contains("--shape-only"),
             Delimiter = Option(args, "--delimiter") is { } d ? (d == "\\t" ? '\t' : d[0]) : null,
             Format = format,
-            LanguageDriver = Option(args, "--code-page") is { } cp ? DriverFor(int.Parse(cp, CultureInfo.InvariantCulture), format) : null,
+            LanguageDriver = Option(args, "--code-page") is { } cp ? DriverFor(int.Parse(cp, CultureInfo.InvariantCulture), format) : DriverFor(1252, format),
         };
 
         if (args.Contains("--plan"))

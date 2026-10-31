@@ -528,15 +528,15 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>Creates a new, empty dBASE IV .dbf file, plus a .dbt when there are memo fields. Fails if either exists.</summary>
     public static DbfTable Create(string path, IReadOnlyList<DbfFieldDefinition> fields, byte languageDriver = 0x57)
-        => Create(path, fields, DbfTableFormat.DbaseIV, languageDriver);
+        => Create(path, DbfTableFormat.DbaseIV, fields, languageDriver);
 
     /// <summary>
     /// Creates a new, empty .dbf file in <paramref name="format"/>, plus its memo file when there are memo
     /// fields: a .dbt for dBASE, an .fpt for the FoxPros. Fails if either exists.
     /// </summary>
-    public static DbfTable Create(string path, IReadOnlyList<DbfFieldDefinition> fields, DbfTableFormat format, byte? languageDriver = null)
+    public static DbfTable Create(string path, DbfTableFormat format, IReadOnlyList<DbfFieldDefinition> fields, byte? languageDriver = null)
     {
-        DbfHeader.Create(fields, format, languageDriver); // validate before touching the disk
+        DbfHeader.Create(format, fields, languageDriver); // validate before touching the disk
         var memoExtension = format is DbfTableFormat.FoxPro2 or DbfTableFormat.VisualFoxPro ? ".fpt" : ".dbt";
         var memoPath = fields.Any(f => char.ToUpperInvariant(f.Type) == 'M') ? Path.ChangeExtension(path, memoExtension) : null;
 
@@ -560,7 +560,7 @@ public sealed partial class DbfTable : IDisposable
             if (memoPath is not null)
                 memoStream = new FileStream(memoPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
 
-            var table = Create(stream, fields, format, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
+            var table = Create(stream, format, fields, languageDriver, leaveOpen: false, memoStream, Path.GetFileName(path));
             table._path = path; // so locks, INDEX ON and PACK know where the table lives
             return table;
         }
@@ -581,17 +581,17 @@ public sealed partial class DbfTable : IDisposable
     /// </summary>
     public static DbfTable Create(Stream stream, IReadOnlyList<DbfFieldDefinition> fields, byte languageDriver = 0x57,
         bool leaveOpen = false, Stream? memoStream = null, string tableName = "TABLE")
-        => Create(stream, fields, DbfTableFormat.DbaseIV, languageDriver, leaveOpen, memoStream, tableName);
+        => Create(stream, DbfTableFormat.DbaseIV, fields, languageDriver, leaveOpen, memoStream, tableName);
 
     /// <summary>
     /// Writes a new, empty table in <paramref name="format"/> into <paramref name="stream"/>, replacing anything
     /// already there. Tables with memo fields need a <paramref name="memoStream"/>, which gets an empty memo
     /// file of the matching kind (.dbt or .fpt).
     /// </summary>
-    public static DbfTable Create(Stream stream, IReadOnlyList<DbfFieldDefinition> fields, DbfTableFormat format, byte? languageDriver = null,
+    public static DbfTable Create(Stream stream, DbfTableFormat format, IReadOnlyList<DbfFieldDefinition> fields, byte? languageDriver = null,
         bool leaveOpen = false, Stream? memoStream = null, string tableName = "TABLE")
     {
-        var header = DbfHeader.Create(fields, format, languageDriver);
+        var header = DbfHeader.Create(format, fields, languageDriver);
         if (header.HasMemo && memoStream is null)
             throw new ArgumentException("Tables with memo fields need a memo stream.", nameof(memoStream));
 
@@ -814,7 +814,11 @@ public sealed partial class DbfTable : IDisposable
         _stream.ReadExactly(_buffer); // the on-disk bytes, which unchanged fields keep
         var changed = new bool[Fields.Count];
         for (var i = 0; i < Fields.Count; i++)
-            changed[i] = !SameValue(current.Values[i], values[i]);
+        {
+            // An empty memo or blank field also reads back as null; making it .NULL. is still a change.
+            changed[i] = !SameValue(current.Values[i], values[i])
+                || (values[i] is null && Fields[i].NullBit is not null && !current.IsNull(i));
+        }
 
         values = (object?[])values.Clone();
         var counters = AssignAutoIncrements(values, changed);

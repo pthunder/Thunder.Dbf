@@ -17,7 +17,7 @@ Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add p
 ## API at a glance
 
 - `DbfDatabase.Open(folderOrConnectionString)`: read-only unless `new DbfDatabaseOptions { ReadOnly = false }`. Then `db.TableNames`, `db["NAME"]`, `db.Check()` (fast handshake report).
-- `DbfTable.Create(path, fields, DbfTableFormat.VisualFoxPro)`: new tables in dBASE III, dBASE IV (default), FoxPro 2 or Visual FoxPro format; `DbfFieldDefinition.Character/Numeric/Float/Date/Logical/Memo/Integer/Currency/Double/DateTime`, with `Nullable`, `Binary` and `AutoIncrement` for Visual FoxPro.
+- `DbfTable.Create(path, DbfTableFormat.VisualFoxPro, fields)`: new tables in dBASE III, dBASE IV (default), FoxPro 2 or Visual FoxPro format; `DbfFieldDefinition.Character/Numeric/Float/Date/Logical/Memo/Integer/Currency/Double/DateTime`, with `Nullable` and `AutoIncrement` for Visual FoxPro.
 - `DbfTable`:
   - reads: `Read(index)`, `ReadAll()`, `Refresh()`
   - writes: `Append(values)`, `AppendRange(rows)`, `Update(index, values)`, `UpdateFields(index, changes)` (only the named fields, under the record lock), `Delete(index)`, `Recall(index)`

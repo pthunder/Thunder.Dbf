@@ -24,13 +24,13 @@ public sealed class CreateFormatTests : IDisposable
     public void Each_format_writes_its_own_version_byte_and_memo_file(DbfTableFormat format, byte plain, byte withMemo, string memoExtension, byte languageDriver)
     {
         var plainPath = PathOf("PLAIN.DBF");
-        DbfTable.Create(plainPath, [DbfFieldDefinition.Character("NAME", 10)], format).Dispose();
+        DbfTable.Create(plainPath, format, [DbfFieldDefinition.Character("NAME", 10)]).Dispose();
         var bytes = SharedFile.ReadAllBytes(plainPath);
         Assert.Equal(plain, bytes[0]);
         Assert.Equal(languageDriver, bytes[29]);
 
         var memoPath = PathOf("NOTES.DBF");
-        using (var table = DbfTable.Create(memoPath, [DbfFieldDefinition.Character("NAME", 10), DbfFieldDefinition.Memo("NOTES")], format))
+        using (var table = DbfTable.Create(memoPath, format, [DbfFieldDefinition.Character("NAME", 10), DbfFieldDefinition.Memo("NOTES")]))
             table.Append("Ada", "A memo long enough to need a block of its own.");
 
         Assert.Equal(withMemo, SharedFile.ReadAllBytes(memoPath)[0]);
@@ -46,7 +46,7 @@ public sealed class CreateFormatTests : IDisposable
     {
         var path = PathOf("PEOPLE.DBF");
         var hired = new DateTime(2026, 10, 31, 14, 30, 15, 250);
-        using (var table = DbfTable.Create(path,
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
         [
             DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, AutoIncrementNext = 100, AutoIncrementStep = 5 },
             DbfFieldDefinition.Character("NAME", 20),
@@ -55,7 +55,7 @@ public sealed class CreateFormatTests : IDisposable
             DbfFieldDefinition.Double("SCORE", 2),
             DbfFieldDefinition.DateTime("HIRED") with { Nullable = true },
             DbfFieldDefinition.Memo("NOTES"),
-        ], DbfTableFormat.VisualFoxPro))
+        ]))
         {
             // Values cover the fields as created, plus the hidden _NullFlags field at the end.
             Assert.Equal("_NullFlags", table.Fields[^1].Name);
@@ -101,7 +101,7 @@ public sealed class CreateFormatTests : IDisposable
     public void Tables_without_nullable_fields_have_no_null_flags_field()
     {
         var path = PathOf("PLAIN.DBF");
-        using var table = DbfTable.Create(path, [DbfFieldDefinition.Integer("QTY"), DbfFieldDefinition.Character("NAME", 8)], DbfTableFormat.VisualFoxPro);
+        using var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Integer("QTY"), DbfFieldDefinition.Character("NAME", 8)]);
         Assert.Equal(2, table.Fields.Count);
         Assert.Equal(0x30, SharedFile.ReadAllBytes(path)[0]);
     }
@@ -109,23 +109,22 @@ public sealed class CreateFormatTests : IDisposable
     [Fact]
     public void Visual_FoxPro_types_and_flags_need_a_Visual_FoxPro_table()
     {
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Integer("QTY")], DbfTableFormat.DbaseIV));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.DateTime("AT")], DbfTableFormat.FoxPro2));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Character("NAME", 5) with { Nullable = true }], DbfTableFormat.DbaseIV));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Float("RATE", 8, 2)], DbfTableFormat.DbaseIII));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(DbfTableFormat.DbaseIV, [DbfFieldDefinition.Integer("QTY")]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(DbfTableFormat.FoxPro2, [DbfFieldDefinition.DateTime("AT")]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 5) with { Nullable = true }]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(DbfTableFormat.DbaseIII, [DbfFieldDefinition.Float("RATE", 8, 2)]));
     }
 
     [Fact]
     public void Bad_Visual_FoxPro_definitions_are_refused()
     {
         var vfp = DbfTableFormat.VisualFoxPro;
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Character("NAME", 5) with { AutoIncrement = true }], vfp));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, Nullable = true }], vfp));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, AutoIncrementStep = 0 }], vfp));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([DbfFieldDefinition.Integer("ID") with { Binary = true }], vfp));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([new DbfFieldDefinition("RATE", 'Y', 8, 2)], vfp));
-        Assert.Throws<ArgumentException>(() => DbfHeader.Create([new DbfFieldDefinition("NOTES", 'M', 6)], vfp));
-        Assert.Throws<ArgumentOutOfRangeException>(() => DbfHeader.Create([DbfFieldDefinition.Integer("ID")], (DbfTableFormat)42));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(vfp, [DbfFieldDefinition.Character("NAME", 5) with { AutoIncrement = true }]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(vfp, [DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, Nullable = true }]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(vfp, [DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, AutoIncrementStep = 0 }]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(vfp, [new DbfFieldDefinition("RATE", 'Y', 8, 2)]));
+        Assert.Throws<ArgumentException>(() => DbfHeader.Create(vfp, [new DbfFieldDefinition("NOTES", 'M', 6)]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => DbfHeader.Create((DbfTableFormat)42, [DbfFieldDefinition.Integer("ID")]));
     }
 
     [Fact]
@@ -138,11 +137,59 @@ public sealed class CreateFormatTests : IDisposable
     }
 
     [Fact]
+    public void A_zero_code_page_still_picks_the_dBASE_IV_overload()
+    {
+        using var stream = new MemoryStream();
+        using (DbfTable.Create(stream, [DbfFieldDefinition.Character("NAME", 5)], 0, leaveOpen: true)) { }
+        Assert.Equal(0x00, stream.ToArray()[29]);
+        Assert.Equal(0x00, DbfHeader.Create([DbfFieldDefinition.Character("NAME", 5)], 0).LanguageDriver);
+    }
+
+    [Fact]
+    public void The_hidden_null_flags_field_counts_toward_Visual_FoxPros_255()
+    {
+        var fields = Enumerable.Range(1, 255).Select(i => DbfFieldDefinition.Logical($"F{i}")).ToList();
+        Assert.Equal(255, DbfHeader.Create(DbfTableFormat.VisualFoxPro, fields).Fields.Count);
+
+        fields[0] = fields[0] with { Nullable = true };
+        var error = Assert.Throws<ArgumentException>(() => DbfHeader.Create(DbfTableFormat.VisualFoxPro, fields));
+        Assert.Contains("254", error.Message);
+        Assert.Equal(255, DbfHeader.Create(DbfTableFormat.VisualFoxPro, fields[..254]).Fields.Count);
+    }
+
+    [Fact]
+    public void A_new_FoxPro_2_table_without_memos_refuses_an_mdx_and_locks_like_FoxPro()
+    {
+        var path = PathOf("PLAIN.DBF");
+        using var table = DbfTable.Create(path, DbfTableFormat.FoxPro2, [DbfFieldDefinition.Character("NAME", 10)]);
+        Assert.Equal(0x03, SharedFile.ReadAllBytes(path)[0]);   // the same byte dBASE uses
+        var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("NAME", "NAME"));
+        Assert.Equal(DbfErrorCode.UnsupportedFormat, error.Code);
+        Assert.False(File.Exists(Path.ChangeExtension(path, ".mdx")));
+    }
+
+    [Fact]
+    public void Setting_an_empty_nullable_memo_to_null_is_written()
+    {
+        var path = PathOf("NOTES.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+            [DbfFieldDefinition.Character("NAME", 5), DbfFieldDefinition.Memo("NOTES") with { Nullable = true }]))
+        {
+            table.Append("Ada", "", null);
+            Assert.False(table.Read(0).IsNull(1));
+            table.UpdateFields(0, new Dictionary<string, object?> { ["NOTES"] = null });
+        }
+
+        using var reopened = DbfTable.Open(path);
+        Assert.True(reopened.Read(0).IsNull(1));
+    }
+
+    [Fact]
     public void A_FoxPro_memo_file_refuses_a_stray_fpt()
     {
         File.WriteAllBytes(PathOf("PEOPLE.FPT"), [1, 2, 3]);
         var error = Assert.Throws<DbfException>(() =>
-            DbfTable.Create(PathOf("PEOPLE.DBF"), [DbfFieldDefinition.Memo("NOTES")], DbfTableFormat.VisualFoxPro));
+            DbfTable.Create(PathOf("PEOPLE.DBF"), DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]));
         Assert.Equal(DbfErrorCode.TableAlreadyExists, error.Code);
         Assert.False(File.Exists(PathOf("PEOPLE.DBF")));
     }
