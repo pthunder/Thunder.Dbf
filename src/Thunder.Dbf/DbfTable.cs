@@ -404,9 +404,10 @@ public sealed partial class DbfTable : IDisposable
         DbfJournal.Write(_path!, entry);
     }
 
-    // On Windows the folder is watched instead: a file created, deleted or renamed in it (Windows file
-    // shares pass that on from other machines too) makes the next write look, and so does a second
-    // gone by. A watcher elsewhere only hears of this machine's changes, so other systems use the
+    // On Windows the folder is watched instead: a file created, deleted or renamed in it makes the next
+    // write look, and so does a second gone by. On a file share that's usually other machines' files
+    // too, but a server that doesn't pass notices on raises no error, so there the once-a-second look
+    // is what finds them. A watcher elsewhere only hears of this machine's changes, so other systems use the
     // folder's last-write time. A watcher that reports an error (its buffer overflowed, the share went
     // away) is given up for that too. Its events come a moment after the change, the same kind of
     // window as a file made between a write's checks and the write itself.
@@ -635,8 +636,126 @@ public sealed partial class DbfTable : IDisposable
         return Locks.Record(index + 1, "locked");
     }
 
-    /// <summary>Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed.</summary>
-    public DbfLock LockTable() => Locks.Table();
+    /// <summary>
+    /// Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed. With
+    /// <see cref="DeferIndexWrites"/> on, it also holds the FoxPro index lock and writes the index once,
+    /// when the lock is disposed.
+    /// </summary>
+    public DbfLock LockTable()
+    {
+        var held = Locks.Table();
+        if (!DeferIndexWrites || _useJournal || _forcedOperations > 0 || _path is null || !_stream.CanWrite || _deferring)
+            return held;
+        try
+        {
+            BeginDeferredIndexWrites();
+        }
+        catch
+        {
+            held.Dispose();
+            throw;
+        }
+        return new DbfLock(() =>
+        {
+            try
+            {
+                FinishDeferredIndexWrites();
+            }
+            finally
+            {
+                held.Dispose();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Opt-in, for migrations and bulk loads: while <see cref="LockTable"/> is held, keep the FoxPro
+    /// <c>.cdx</c> changes in memory and write each changed page once, when the lock is disposed,
+    /// rather than after every record. Much faster when many records go in at once. Meanwhile the
+    /// index lock is held too, so Visual FoxPro users wait, readers included. A process killed
+    /// during the batch leaves the index without the batch's keys: the next open reports it and a
+    /// rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
+    /// </summary>
+    public bool DeferIndexWrites { get; set; }
+
+    private bool _deferring;
+
+    // The batch is noted in the table's journal first and the note cleared only once every page is on
+    // disk, so a batch cut off (killed, or a write that failed) is reported by the next write or open,
+    // here or in another Thunder.Dbf process, even when the index's counts still match the table.
+    private void BeginDeferredIndexWrites()
+    {
+        ReplayJournal(); // a note already waiting is dealt with first: the batch's own would hide it
+        var begun = new List<IMaintainedIndex>();
+        try
+        {
+            // The index locks first (nothing is written yet), then the note, naming every index the
+            // batch defers: a rebuild only clears it once it has rebuilt all of them.
+            foreach (var index in MaintainedIndexes)
+            {
+                if (index.BeginDeferredWrites())
+                    begun.Add(index);
+            }
+            if (begun.Count == 0)
+                return; // nothing to defer (no .cdx kept): writes go as usual
+            var files = TagsWithFiles().Where(t => begun.Any(i => i.MaintainedTags.Contains(t.Tag))).Select(t => t.File).Distinct(StringComparer.OrdinalIgnoreCase);
+            WriteJournal(new DbfJournalEntry(0, [.. files.Select(f => new DbfJournalChange(f, "", null, null))], IsBatch: true));
+        }
+        catch
+        {
+            // Each is released, whatever happens to the others; no page was written yet.
+            foreach (var index in begun)
+            {
+                try
+                {
+                    index.FinishDeferredWrites(ForcesWrites);
+                }
+                catch (Exception)
+                {
+                    _indexesNeedRebuild = true;
+                }
+            }
+            throw;
+        }
+        _deferring = true;
+    }
+
+    // Writes every batch's pages and releases the index locks, even when one fails; a failure stops
+    // writes until a rebuild, as after any failed index update.
+    private void FinishDeferredIndexWrites()
+    {
+        if (!_deferring)
+            return;
+        _deferring = false;
+        Exception? failure = null;
+        var clean = true;
+        foreach (var index in MaintainedIndexes)
+        {
+            try
+            {
+                clean &= index.FinishDeferredWrites(ForcesWrites);
+            }
+            catch (Exception ex)
+            {
+                failure ??= ex;
+            }
+        }
+        // The note goes only when every page is out (and on disk, when writes are forced) and no change
+        // in the batch failed partway; otherwise it stays, and stops every Thunder.Dbf writer until a rebuild.
+        if (failure is null && clean && !_indexesNeedRebuild)
+        {
+            DbfJournal.Clear(_path!);
+            return;
+        }
+        if (failure is null)
+        {
+            _indexesNeedRebuild = true;
+            return; // the failed change already reported itself
+        }
+        _indexesNeedRebuild = true; // the batch's note stays: other writers and the next open refuse too
+        throw new DbfException(DbfErrorCode.IndexDamaged, "The batch's index changes couldn't all be written.",
+            "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, failure);
+    }
 
     /// <summary>Re-reads only the header's record count and counters, for an index checking itself against the table.</summary>
     internal void ReloadHeader()
@@ -1224,6 +1343,28 @@ public sealed partial class DbfTable : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        Exception? unfinished = null;
+        try
+        {
+            FinishDeferredIndexWrites(); // a table disposed before its LockTable() still writes the batch
+        }
+        catch (Exception ex)
+        {
+            unfinished = ex; // reported once everything is closed; the batch's note stays in the journal
+        }
+        try
+        {
+            DisposeFiles();
+        }
+        finally
+        {
+            if (unfinished is not null)
+                ExceptionDispatchInfo.Throw(unfinished);
+        }
+    }
+
+    private void DisposeFiles()
+    {
         _folderWatcher?.Dispose();
         _memo?.Dispose();
         _index?.Dispose();
@@ -1604,6 +1745,8 @@ public sealed partial class DbfTable : IDisposable
         {
             if (value && _path is null)
                 throw new InvalidOperationException("Only a table opened by path can keep a journal next to it.");
+            if (value)
+                FinishDeferredIndexWrites(); // a batch's pages go out before journaled writes, which need the index on disk
             _useJournal = value;
         }
     }
@@ -1630,8 +1773,8 @@ public sealed partial class DbfTable : IDisposable
     // record has are added and forced to disk before stale ones go, so none goes missing on the way.
     private void ReplayJournal(bool lookForNote = true)
     {
-        if (_path is null || !_stream.CanWrite)
-            return;
+        if (_path is null || !_stream.CanWrite || _deferring)
+            return; // during a batch the note is this table's own
         if (!lookForNote || !DbfJournal.IsPending(_path))
         {
             RecheckAfterReplay();
@@ -1655,6 +1798,10 @@ public sealed partial class DbfTable : IDisposable
             RecheckAfterReplay();
             return;
         }
+        if (entry.IsBatch)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "A batch of deferred index writes (DeferIndexWrites) was cut off before it finished, so the table's indexes may not match its records.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears the note (or REINDEX in FoxPro, then delete TABLE.DBF.journal).", _path);
         if (entry.IsAppend)
         {
             ReplayAppend(entry);
@@ -2200,6 +2347,7 @@ public sealed partial class DbfTable : IDisposable
 
     private ForcedWrites ForceEveryWrite()
     {
+        FinishDeferredIndexWrites(); // a batch's pages go out first: these steps rely on the index on disk
         _forcedOperations++;
         return new ForcedWrites(this);
     }

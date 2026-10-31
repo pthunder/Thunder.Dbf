@@ -181,6 +181,15 @@ public sealed partial class CdxIndex : IDisposable
             _knownLength = -1; // another program shortened the file
             throw new InvalidDataException($"Offset {offset} is outside the .cdx file or not on a page boundary.");
         }
+        if (_deferred is { Count: > 0 } deferred)
+        {
+            // A batch's pages, not yet written back.
+            for (var at = 0; at < length; at += DefaultPageLength)
+            {
+                if (deferred.TryGetValue(offset + at, out var page))
+                    page.AsSpan(0, Math.Min(DefaultPageLength, length - at)).CopyTo(block.AsSpan(at));
+            }
+        }
         return block;
     }
 
