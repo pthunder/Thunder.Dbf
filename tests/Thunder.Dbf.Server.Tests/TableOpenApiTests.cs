@@ -193,4 +193,13 @@ public sealed class TableOpenApiTests : IDisposable
         Assert.Equal("Table_a_b_2", TableOpenApi.ComponentName("a_b", used));
         Assert.Equal("Table_A_B_3", TableOpenApi.ComponentName("A_B", used)); // names differing only in case clash too
     }
+
+    [Fact]
+    public async Task Personal_documents_tell_caches_not_to_keep_them()
+    {
+        var response = await _harness.Client(ServerHarness.AdminKey).GetAsync("/openapi/tables.json");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("no-store", response.Headers.CacheControl!.ToString());
+        Assert.True(response.Headers.CacheControl.Private);
+    }
 }

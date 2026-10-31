@@ -53,6 +53,7 @@ A token's roles, groups or claims pick a named **profile**, which has the same s
 | `OpenIdConnect:Audience` | (required) | The audience tokens must carry: this API's client id or identifier. |
 | `OpenIdConnect:RequireHttpsMetadata` | `true` | Keys are fetched over HTTPS only. |
 | `OpenIdConnect:SubjectClaim` | `sub` | Names the user as `oidc:<value>` in logs, the journal and rate limits. |
+| `OpenIdConnect:AccessTokenTypes` | `["at+jwt", "application/at+jwt"]` | Only access tokens get in. Entra ID and Keycloak mark theirs `JWT`; add that only when the API has its own audience. |
 | `OpenIdConnect:Profiles:{name}` | (none) | `CanListTables`, `Read`, `Write`, `Fields`, as on an API key. |
 | `OpenIdConnect:Map:n` | (none) | `Role`, `Group`, or `Claim` + `Value`, and the `Profile` it grants. |
 

@@ -128,6 +128,13 @@ public sealed class OidcOptions
     /// <summary>The claim that names the user in logs, the journal and rate limits, as <c>oidc:&lt;value&gt;</c>.</summary>
     public string SubjectClaim { get; set; } = "sub";
 
+    /// <summary>
+    /// The token types (the JWT <c>typ</c> header) accepted as access tokens. The default is RFC 9068's
+    /// <c>at+jwt</c>, which ID tokens never carry. Some providers (Entra ID, Keycloak) mark access tokens
+    /// plain <c>JWT</c>: list that only when the API has its own audience that no app's ID token uses.
+    /// </summary>
+    public List<string> AccessTokenTypes { get; set; } = ["at+jwt", "application/at+jwt"];
+
     /// <summary>Named sets of permissions, each shaped like an API key's.</summary>
     public Dictionary<string, AccessOptions> Profiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -255,6 +262,8 @@ internal sealed class ThunderOptionsValidator : IValidateOptions<ThunderOptions>
             errors.Add($"{where}:Authority must use https, or the signing keys could be swapped in transit. Only a local test provider may set RequireHttpsMetadata to false.");
         if (string.IsNullOrWhiteSpace(oidc.Audience))
             errors.Add($"{where}:Audience is required (this API's client id or app ID URI), so tokens issued for other apps aren't accepted.");
+        if (oidc.AccessTokenTypes.Count == 0 || oidc.AccessTokenTypes.Any(string.IsNullOrWhiteSpace))
+            errors.Add($"{where}:AccessTokenTypes can't be empty: list the typ values your provider puts on access tokens, such as at+jwt.");
         if (string.IsNullOrWhiteSpace(oidc.SubjectClaim))
             errors.Add($"{where}:SubjectClaim can't be empty; it names the user in logs and the journal.");
 

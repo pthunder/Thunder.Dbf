@@ -106,6 +106,8 @@ A PATCH starts from the stored record and changes only the fields you send. Ever
 `/openapi/v1.json` is served to anyone, so it describes records generically and never names a table. A caller who signs in can ask for a copy of the document that adds one component schema per table, `Table_<NAME>`, read from the DBF header at that moment, so code generators get real types:
 
 - `GET /tables/{name}/openapi` for one table the caller may read. A table it can't read answers 404, the same as one that doesn't exist.
+
+Both answer with `Cache-Control: private, no-store`, because each copy is personal to the caller. `/openapi/tables.json` describes at most 500 tables, and only two are built at a time across the server, since each one opens every table.
 - `GET /openapi/tables.json` for every table the caller may read. It names them all, so like `GET /tables` it needs `CanListTables`.
 
 Each schema lists `_recno`, `_deleted` and every field the caller may see. Fields hidden by an allow-list aren't mentioned. A table name with characters a component name can't hold becomes `_`, and the schema's `title` keeps the real name.
@@ -149,6 +151,7 @@ Everything lives under `Thunder` in `appsettings.json`, which has a commented ex
 | `OpenIdConnect:Audience` | (required with Authority) | The audience tokens must be issued for: this API's client id or app ID URI. |
 | `OpenIdConnect:RequireHttpsMetadata` | `true` | Fetch the provider's metadata and keys over HTTPS only. Turn off only for a local test provider. |
 | `OpenIdConnect:SubjectClaim` | `sub` | The claim that names the user, as `oidc:<value>`, in logs, the journal and rate limits. |
+| `OpenIdConnect:AccessTokenTypes` | `["at+jwt", "application/at+jwt"]` | The `typ` values accepted, so only access tokens get in, never an ID token. Entra ID and Keycloak mark access tokens plain `JWT`: add it only when the API has its own audience that no app's ID token uses. Tokens carrying a `nonce` (always ID tokens) are refused regardless. |
 | `OpenIdConnect:Profiles:{name}` | (none) | A named set of permissions: `CanListTables`, `Read`, `Write` and `Fields`, exactly as on an API key. |
 | `OpenIdConnect:Map:n` | (none) | One rule: `Role`, `Group`, or `Claim` with `Value`, and the `Profile` it grants. The first rule that matches wins. |
 | `Paging:DefaultTake` / `MaxTake` | `50` / `500` | Page sizes. |
@@ -190,9 +193,9 @@ Users get permissions through **profiles**, which have the same shape as an API 
 
 | Provider | Authority | Audience | Roles and groups |
 |---|---|---|---|
-| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | the API's application (client) id; set `accessTokenAcceptedVersion` to 2 in its manifest, so tokens come from the v2.0 issuer | App roles arrive in `roles`; security groups in `groups` (as object ids) once the app registration emits them. Consider `"SubjectClaim": "oid"` for a stable user id. |
+| Microsoft Entra ID | `https://login.microsoftonline.com/<tenant id>/v2.0` | the API's application (client) id; set `accessTokenAcceptedVersion` to 2 in its manifest, so tokens come from the v2.0 issuer | App roles arrive in `roles`; security groups in `groups` (as object ids) once the app registration emits them. Consider `"SubjectClaim": "oid"` for a stable user id. Entra marks access tokens `typ: JWT`, so set `"AccessTokenTypes": ["JWT"]`, with a separate app registration for the API so no app's ID token has its audience. |
 | Auth0 | `https://<tenant>.auth0.com/` (with the trailing slash) | the API's identifier | Add roles with an Action under a namespaced claim, then map it with `"Claim": "https://example.com/roles"`. API permissions arrive in `permissions`. |
-| Keycloak | `https://<host>/realms/<realm>` | the client id, added to `aud` with an audience mapper | Add a "User Realm Role" or "Group Membership" mapper that writes a flat `roles` or `groups` claim (Keycloak's own `realm_access` is nested and isn't read). |
+| Keycloak | `https://<host>/realms/<realm>` | the client id, added to `aud` with an audience mapper | Add a "User Realm Role" or "Group Membership" mapper that writes a flat `roles` or `groups` claim (Keycloak's own `realm_access` is nested and isn't read). Keycloak access tokens have `typ: JWT`: set `"AccessTokenTypes": ["JWT"]` and give the API its own client. |
 
 Scopes come as one space-separated claim (`scope` or `scp`), so a `Claim` rule on either matches one scope within it. Every other comparison is exact, case included.
 

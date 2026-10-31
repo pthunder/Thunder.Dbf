@@ -54,8 +54,31 @@ public static partial class TableOpenApi
             throw ApiProblem.Forbidden("This key isn't allowed to list tables, so it can't have a document that names them all.",
                 "Use GET /tables/{name}/openapi for each table you were given.");
 
+        var tables = store.TableNames.Where(key.CanRead).ToList();
+        if (tables.Count > MaxTablesPerDocument)
+            throw ApiProblem.BadRequest($"This key can read {tables.Count} tables, more than one document describes ({MaxTablesPerDocument}).",
+                "Use GET /tables/{name}/openapi for the tables you need.");
+
+        // Building this document opens every table, so only a couple are built at a time, server-wide.
+        if (!await AllTablesGate.WaitAsync(TimeSpan.FromSeconds(10), http.RequestAborted))
+            throw new TableBusyProblem();
+        try
+        {
+            return await AllTablesDocument(http, key, store, logger, tables);
+        }
+        finally
+        {
+            AllTablesGate.Release();
+        }
+    }
+
+    private const int MaxTablesPerDocument = 500;
+    private static readonly SemaphoreSlim AllTablesGate = new(2, 2);
+
+    private static async Task<IResult> AllTablesDocument(HttpContext http, KeyAccess key, TableStore store, ILogger logger, List<string> tables)
+    {
         var schemas = new List<(string Table, OpenApiSchema Schema)>();
-        foreach (var table in store.TableNames.Where(key.CanRead))
+        foreach (var table in tables)
         {
             try
             {
@@ -95,6 +118,11 @@ public static partial class TableOpenApi
 
         using var writer = new StringWriter(CultureInfo.InvariantCulture);
         document.SerializeAs(OpenApiSpecVersion.OpenApi3_1, new OpenApiJsonWriter(writer));
+
+        // The document depends on who's asking, and X-Api-Key isn't a header shared caches know to
+        // respect, so say outright that no cache may keep it.
+        http.Response.Headers.CacheControl = "private, no-store";
+        http.Response.Headers.Vary = "Authorization, X-Api-Key";
         return Results.Text(writer.ToString(), "application/json; charset=utf-8");
     }
 

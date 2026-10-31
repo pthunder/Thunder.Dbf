@@ -101,6 +101,11 @@ public static class OidcAuthentication
             ValidateIssuer = true,
             ValidateAudience = true,
             ValidAudience = oidc.Audience,
+            // "https://example/api" and "https://example/api/" can be different resources at the provider.
+            IgnoreTrailingSlashWhenValidatingAudience = false,
+            // Only access tokens: an ID token signed by the same provider for an app that shares this
+            // audience must not open the API (RFC 8725 section 3.12).
+            ValidTypes = oidc.AccessTokenTypes,
             ValidateLifetime = true,
             RequireExpirationTime = true,
             RequireSignedTokens = true,
@@ -123,6 +128,13 @@ public static class OidcAuthentication
     // claims there) can't hand themselves an API key's identity by putting thunder:key_id in a token.
     private static Task TokenValidated(TokenValidatedContext context, OidcOptions oidc)
     {
+        // A nonce only ever appears in ID tokens, whatever typ the provider wrote.
+        if (context.Principal?.FindFirst("nonce") is not null)
+        {
+            context.Fail("The token is an ID token, not an access token.");
+            return Task.CompletedTask;
+        }
+
         var subject = context.Principal?.FindFirst(oidc.SubjectClaim)?.Value;
         if (string.IsNullOrEmpty(subject) || subject.Length > MaxSubjectLength || subject.Any(char.IsControl))
         {

@@ -77,7 +77,7 @@ public sealed class TestIdentityProvider : IDisposable
         });
 
     public string Token(string? subject = "alice", string[]? roles = null, string[]? groups = null, string? audience = Audience,
-        TimeSpan? expiresIn = null, SecurityKey? signingKey = null, IDictionary<string, object>? extra = null)
+        TimeSpan? expiresIn = null, SecurityKey? signingKey = null, IDictionary<string, object>? extra = null, string tokenType = "at+jwt")
     {
         var claims = new Dictionary<string, object>(extra ?? new Dictionary<string, object>());
         if (subject is not null)
@@ -98,6 +98,7 @@ public sealed class TestIdentityProvider : IDisposable
             NotBefore = issued,
             Expires = expires,
             SigningCredentials = new SigningCredentials(signingKey ?? Key, SecurityAlgorithms.RsaSha256),
+            TokenType = tokenType,
         };
         return new JwtSecurityTokenHandler { SetDefaultTimesOnTokenCreation = false }.CreateEncodedJwt(descriptor);
     }
@@ -145,6 +146,26 @@ public sealed class OpenIdConnectTests : IDisposable
         var problem = await response.Problem(403, _harness);
         Assert.Equal("Forbidden", problem.GetProperty("code").GetString());
         Assert.Contains("access profile", problem.GetProperty("detail").GetString());
+    }
+
+    // ---- from the Codex security review ------------------------------------------------------
+
+    [Fact]
+    public async Task An_ID_token_is_refused_even_when_its_audience_and_role_would_pass()
+    {
+        // ID tokens carry typ JWT and a nonce; both are refused on their own.
+        var plainType = _provider.Token(roles: ["Thunder.Admin"], tokenType: "JWT");
+        await (await Client(plainType).GetAsync("/tables/people")).Problem(401, _harness);
+
+        var withNonce = _provider.Token(roles: ["Thunder.Admin"], extra: new Dictionary<string, object> { ["nonce"] = "abc" });
+        await (await Client(withNonce).GetAsync("/tables/people")).Problem(401, _harness);
+    }
+
+    [Fact]
+    public async Task An_audience_that_differs_only_by_a_trailing_slash_is_refused()
+    {
+        var token = _provider.Token(roles: ["Thunder.Admin"], audience: TestIdentityProvider.Audience + "/");
+        await (await Client(token).GetAsync("/tables/people")).Problem(401, _harness);
     }
 
     [Fact]
