@@ -21,6 +21,13 @@ The first public release.
 - **Expressions:** a dBASE evaluator for key and `FOR` expressions (`UPPER`, `SUBSTR`, `DTOS`, `STR`, `VAL`, `IIF`, `DELETED()` and more), with three-valued `.NULL.` logic.
 - **Locking:** record, header, append and table locks at dBASE, Clipper or Visual FoxPro offsets (`LockScheme`), shared across every table opened in one process; `LockRecord`/`LockTable`; `Refresh()` to see other programs' changes.
 - **`UpdateFields`:** changes only the named fields, re-reading the record under its lock, so concurrent edits to other fields survive.
+- **Typed records and LINQ:**
+  - `ReadAll<T>`, `Read<T>`, `AppendRecord` and `UpdateRecord` map records to plain C# classes.
+  - `AsQueryable<T>()` turns an equality on an indexed field into a seek, but only when the seek must give the same answer as a scan.
+  - `Explain()` shows which plan a query uses.
+- **`INDEX ON` and `PACK`:**
+  - `CreateIndexTag` adds `.mdx` tags, creating the file when needed, laid out as dBASE software writes them.
+  - `Pack` removes deleted records and rebuilds every index, keeping a safety copy until it's done.
 - **Connecting:** one-line `DbfDatabase.Open` from a folder or a connection string, read-only by default; a `Check()` handshake; links and path tricks refused.
 - **Errors:** `DbfException` with codes, safe messages, hints, HTTP statuses, and diagnostics kept separate for logs.
 - **CSV:** import with the column shape worked out from the data, streamed in two passes; spreadsheet-safe export.
