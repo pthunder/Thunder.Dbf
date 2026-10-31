@@ -153,6 +153,8 @@ public sealed partial class DbfTable : IDisposable
                     if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
                         table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
                     table._journalPending = DbfJournal.IsPending(path);
+                    if (OperatingSystem.IsWindows())
+                        table.WatchFolder(); // before the first listing, so nothing made meanwhile is missed
                     table.AttachOtherIndexes(path, table.Header);
                     table.RepairUnfinishedAppends();
                 }
@@ -402,6 +404,49 @@ public sealed partial class DbfTable : IDisposable
         DbfJournal.Write(_path!, entry);
     }
 
+    // On Windows the folder is watched instead: a file created, deleted or renamed in it (Windows file
+    // shares pass that on from other machines too) makes the next write look, and so does a second
+    // gone by. A watcher elsewhere only hears of this machine's changes, so other systems use the
+    // folder's last-write time. A watcher that reports an error (its buffer overflowed, the share went
+    // away) is given up for that too. Its events come a moment after the change, the same kind of
+    // window as a file made between a write's checks and the write itself.
+    private FileSystemWatcher? _folderWatcher;
+    private int _folderChanged = 1; // 1: the next write looks in the folder
+    private bool _watcherFailed;
+
+    internal void WatchFolder()
+    {
+        if (_path is null || !_stream.CanWrite || _folderWatcher is not null)
+            return;
+        try
+        {
+            var watcher = new FileSystemWatcher(Path.GetDirectoryName(Path.GetFullPath(_path))!)
+            {
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                IncludeSubdirectories = false,
+                InternalBufferSize = 64 * 1024,
+            };
+            watcher.Created += (_, _) => Volatile.Write(ref _folderChanged, 1);
+            watcher.Deleted += (_, _) => Volatile.Write(ref _folderChanged, 1);
+            watcher.Renamed += (_, _) => Volatile.Write(ref _folderChanged, 1);
+            watcher.Error += (_, _) =>
+            {
+                Volatile.Write(ref _watcherFailed, true);
+                Volatile.Write(ref _folderChanged, 1);
+            };
+            watcher.EnableRaisingEvents = true;
+            _folderWatcher = watcher;
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            // Can't watch it: the folder's last-write time is used instead.
+        }
+    }
+
+    /// <summary>For the tests: whether the folder is watched, and whether the next write will look in it.</summary>
+    internal bool WatchesFolder => _folderWatcher is not null && !Volatile.Read(ref _watcherFailed);
+    internal bool FolderLookPending => Volatile.Read(ref _folderChanged) == 1;
+
     private DateTime? FolderStamp()
     {
         if (_path is null || !_stream.CanWrite)
@@ -624,26 +669,39 @@ public sealed partial class DbfTable : IDisposable
     private void PrepareWrite(bool appending)
     {
         Refresh();
-        var folder = FolderStamp();
-        var lookInFolder = _useJournal || folder is not { } stamp || stamp != _folderSeen
-            || Environment.TickCount64 - _folderSeenAt >= FolderRecheckMilliseconds
-            || stamp.Ticks % TimeSpan.TicksPerMillisecond == 0 && DateTime.UtcNow - stamp < CoarseFolderTime;
+        var watched = WatchesFolder;
+        var folder = watched ? null : FolderStamp();
+        // Taken before the checks, so a change reported while they run makes the next write look again.
+        var reported = watched && Interlocked.Exchange(ref _folderChanged, 0) == 1;
+        var lookInFolder = _useJournal || reported || Environment.TickCount64 - _folderSeenAt >= FolderRecheckMilliseconds
+            || (!watched && (folder is not { } stamp || stamp != _folderSeen
+                || stamp.Ticks % TimeSpan.TicksPerMillisecond == 0 && DateTime.UtcNow - stamp < CoarseFolderTime));
+        try
+        {
+            if (lookInFolder)
+                ThrowIfPackUnfinished();
+            ThrowIfIndexesNeedRebuild();
+            if (lookInFolder)
+                ThrowIfIndexAppeared();
+            ThrowIfIndexCantBeMaintained();
+            if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
+                    structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
+                throw blocker;
+            if (lookInFolder && _path is not null)
+                _journalFileSeen = File.Exists(DbfJournal.PathFor(_path));
+            ReplayJournal(lookForNote: _journalFileSeen); // a key change cut off in this or another process; every caller holds the header lock
+        }
+        catch
+        {
+            if (reported)
+                Volatile.Write(ref _folderChanged, 1); // a check that threw is made again by the next write
+            throw;
+        }
         if (lookInFolder)
-            ThrowIfPackUnfinished();
-        ThrowIfIndexesNeedRebuild();
-        if (lookInFolder)
-            ThrowIfIndexAppeared();
-        ThrowIfIndexCantBeMaintained();
-        if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
-                structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
-            throw blocker;
-        if (lookInFolder && _path is not null)
-            _journalFileSeen = File.Exists(DbfJournal.PathFor(_path));
-        ReplayJournal(lookForNote: _journalFileSeen); // a key change cut off in this or another process; every caller holds the header lock
-        if (lookInFolder && folder is { } seen)
         {
             // Only once every check above has passed: one that threw is made again by the next write.
-            _folderSeen = seen;
+            if (folder is { } seen)
+                _folderSeen = seen;
             _folderSeenAt = Environment.TickCount64;
         }
 
@@ -1166,6 +1224,7 @@ public sealed partial class DbfTable : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        _folderWatcher?.Dispose();
         _memo?.Dispose();
         _index?.Dispose();
         foreach (var index in _otherIndexes)

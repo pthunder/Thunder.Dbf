@@ -189,15 +189,14 @@ public sealed partial class CdxIndex : IMaintainedIndex
         }
     }
 
-    // After a locked change: bump the counter (so other programs drop their cached pages) and push the
-    // change out. Half a change (a damaged page met midway) is still published, but then neither the
+    // After a locked change: push the change out. The counter already moved, before its first page
+    // (see Write), so other programs drop the pages they cached from before it. Half a change (a damaged page met midway) is still published, but then neither the
     // pages nor the layout count as checked any more.
     private void Publish(bool succeeded)
     {
         try
         {
-            if (_changed)
-                BumpCounter();
+            _changed = false;
             _stream.Flush();
             if (succeeded)
             {
@@ -627,8 +626,9 @@ public sealed partial class CdxIndex : IMaintainedIndex
             throw new InvalidOperationException($"Can't write the .cdx page at offset {offset}.");
         if (!_changed)
         {
-            // The counter moves before the first page does, and again when the change is published:
-            // a writer killed in between still leaves other programs a counter that says "reload".
+            // The counter moves once per change, before its first page: a writer killed partway still
+            // leaves other programs a counter that says "reload". Visual FoxPro and Harbour read under
+            // the index lock, so none of them sees the pages until the change is done.
             BumpCounter();
             _stream.Flush();
         }

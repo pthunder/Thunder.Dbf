@@ -183,6 +183,10 @@ public sealed partial class DbfTable
                 throw new DbfException(DbfErrorCode.InvalidValue, $"The key expression can't be evaluated: {ex.Message}",
                     "Use the table's fields, with UPPER(), DTOS() or STR(), joined with +.", _path, ex);
             }
+            if (keyLength > CdxIndex.MaxKeyLength)
+                throw new DbfException(DbfErrorCode.InvalidValue,
+                    $"The key expression makes {keyLength}-byte keys, and a FoxPro .cdx tag holds keys of at most {CdxIndex.MaxKeyLength}.",
+                    "Index shorter fields, or create the tag in Visual FoxPro.", _path);
             var nullableKey = Fields.FirstOrDefault(f => f.Name.Equals(expression, StringComparison.OrdinalIgnoreCase)) is { IsNullable: true };
 
             using (var scratch = new MemoryStream())
