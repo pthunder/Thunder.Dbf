@@ -222,6 +222,45 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx); // the batch that finished is whole
     }
 
+    // A batch of updates cut off leaves the key counts matching the table, so only the batch's note
+    // in the journal tells: the next write refuses, until a rebuild clears it.
+    [Fact]
+    public void An_update_batch_cut_off_is_reported_by_its_note()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        var killed = Directory.CreateDirectory(Path.Combine(_dir.FullName, "killed")).FullName;
+        using (var table = OpenShared(dbf))
+        {
+            table.DeferIndexWrites = true;
+            var template = table.Read(0).Values.ToArray();
+            using (table.LockTable())
+            {
+                for (var i = 0; i < 16; i += 3)
+                    table.Update(i, Call(template, id: 7000 + i, contact: 9, subject: "moved in the batch"));
+                foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+                    File.WriteAllBytes(Path.Combine(killed, Path.GetFileName(file)), SharedFile.ReadAllBytes(file));
+            }
+            Assert.False(table.HasPendingJournal); // the batch that finished cleared its note
+        }
+        AssertIndexMatchesTable(dbf, cdx);
+
+        var copy = Path.Combine(killed, "calls.dbf");
+        using (var reopened = DbfTable.Open(copy, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.True(reopened.HasPendingJournal);
+            var error = Assert.Throws<DbfException>(() => reopened.UpdateFields(1, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+            Assert.Contains("batch", error.Message);
+        }
+        using (var exclusive = DbfTable.Open(copy, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+            exclusive.UpdateFields(1, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(copy, Path.Combine(killed, "calls.CDX"), rebuilt: true);
+    }
+
     // The journal promises each write's keys are finished on disk before its note goes, so a table
     // keeping one writes record by record whatever DeferIndexWrites says.
     [Fact]

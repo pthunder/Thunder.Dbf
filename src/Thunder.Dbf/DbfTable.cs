@@ -680,8 +680,13 @@ public sealed partial class DbfTable : IDisposable
 
     private bool _deferring;
 
+    // The batch is noted in the table's journal first and the note cleared only once every page is on
+    // disk, so a batch cut off (killed, or a write that failed) is reported by the next write or open,
+    // here or in another Thunder.Dbf process, even when the index's counts still match the table.
     private void BeginDeferredIndexWrites()
     {
+        ReplayJournal(); // a note already waiting is dealt with first: the batch's own would hide it
+        WriteJournal(new DbfJournalEntry(0, [], IsBatch: true));
         var begun = new List<IMaintainedIndex>();
         try
         {
@@ -693,11 +698,25 @@ public sealed partial class DbfTable : IDisposable
         }
         catch
         {
+            // Each is released, whatever happens to the others; nothing was written yet.
             foreach (var index in begun)
-                index.FinishDeferredWrites(ForcesWrites);
+            {
+                try
+                {
+                    index.FinishDeferredWrites(ForcesWrites);
+                }
+                catch (Exception ex) when (ex is IOException or InvalidDataException)
+                {
+                    _indexesNeedRebuild = true; // the note stays, and says so to any other writer
+                }
+            }
+            if (!_indexesNeedRebuild)
+                DbfJournal.Clear(_path!);
             throw;
         }
         _deferring = begun.Count > 0;
+        if (!_deferring)
+            DbfJournal.Clear(_path!); // nothing to defer (no .cdx kept): writes go as usual
     }
 
     // Writes every batch's pages and releases the index locks, even when one fails; a failure stops
@@ -719,12 +738,14 @@ public sealed partial class DbfTable : IDisposable
                 failure ??= ex;
             }
         }
-        if (failure is not null)
+        if (failure is null)
         {
-            _indexesNeedRebuild = true;
-            throw new DbfException(DbfErrorCode.IndexDamaged, "The batch's index changes couldn't all be written.",
-                "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, failure);
+            DbfJournal.Clear(_path!); // every page is out (and on disk, when writes are forced)
+            return;
         }
+        _indexesNeedRebuild = true; // the batch's note stays: other writers and the next open refuse too
+        throw new DbfException(DbfErrorCode.IndexDamaged, "The batch's index changes couldn't all be written.",
+            "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, failure);
     }
 
     /// <summary>Re-reads only the header's record count and counters, for an index checking itself against the table.</summary>
@@ -1319,7 +1340,8 @@ public sealed partial class DbfTable : IDisposable
         }
         catch (DbfException)
         {
-            // Reported on the lock's own release if it comes; the index's open-time check reports it otherwise.
+            // Disposing goes on regardless; the batch's note stays in the journal, so the next write or
+            // open (here or in another Thunder.Dbf process) reports the batch that didn't finish.
         }
         _folderWatcher?.Dispose();
         _memo?.Dispose();
@@ -1701,6 +1723,8 @@ public sealed partial class DbfTable : IDisposable
         {
             if (value && _path is null)
                 throw new InvalidOperationException("Only a table opened by path can keep a journal next to it.");
+            if (value)
+                FinishDeferredIndexWrites(); // a batch's pages go out before journaled writes, which need the index on disk
             _useJournal = value;
         }
     }
@@ -1727,8 +1751,8 @@ public sealed partial class DbfTable : IDisposable
     // record has are added and forced to disk before stale ones go, so none goes missing on the way.
     private void ReplayJournal(bool lookForNote = true)
     {
-        if (_path is null || !_stream.CanWrite)
-            return;
+        if (_path is null || !_stream.CanWrite || _deferring)
+            return; // during a batch the note is this table's own
         if (!lookForNote || !DbfJournal.IsPending(_path))
         {
             RecheckAfterReplay();
@@ -1752,6 +1776,10 @@ public sealed partial class DbfTable : IDisposable
             RecheckAfterReplay();
             return;
         }
+        if (entry.IsBatch)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale,
+                "A batch of deferred index writes (DeferIndexWrites) was cut off before it finished, so the table's indexes may not match its records.",
+                "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears the note (or REINDEX in FoxPro, then delete TABLE.DBF.journal).", _path);
         if (entry.IsAppend)
         {
             ReplayAppend(entry);

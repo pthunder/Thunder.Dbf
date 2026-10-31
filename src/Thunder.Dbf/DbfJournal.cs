@@ -21,7 +21,8 @@ using System.Text;
 namespace Thunder.Dbf;
 
 /// <summary>One record's key changes, noted before they're made.</summary>
-internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<DbfJournalChange> Changes, bool IsAppend = false);
+/// <remarks>A batch note (DbfTable.DeferIndexWrites) holds no changes: it says the index may not match the table until it's cleared.</remarks>
+internal sealed record DbfJournalEntry(int RecordNumber, IReadOnlyList<DbfJournalChange> Changes, bool IsAppend = false, bool IsBatch = false);
 
 /// <summary>One tag's part of a key change. The index file's name and the key length pin down which tag.</summary>
 internal sealed record DbfJournalChange(string IndexFile, string Tag, byte[]? OldKey, byte[]? NewKey);
@@ -44,7 +45,7 @@ internal static class DbfJournal
     {
         using var body = new MemoryStream();
         body.Write(Magic);
-        body.WriteByte(entry.IsAppend ? (byte)'A' : (byte)'U');
+        body.WriteByte(entry.IsBatch ? (byte)'B' : entry.IsAppend ? (byte)'A' : (byte)'U');
         WriteInt(body, entry.RecordNumber);
         WriteInt(body, entry.Changes.Count);
         foreach (var change in entry.Changes)
@@ -94,7 +95,7 @@ internal static class DbfJournal
         var body = bytes.AsSpan(0, bytes.Length - HashLength);
         var at = Magic.Length;
         var kind = body[at++];
-        if (kind is not ((byte)'A' or (byte)'U'))
+        if (kind is not ((byte)'A' or (byte)'U' or (byte)'B'))
             throw Malformed("its kind");
         var record = BinaryPrimitives.ReadInt32LittleEndian(body[at..]);
         var count = BinaryPrimitives.ReadInt32LittleEndian(body[(at + 4)..]);
@@ -112,7 +113,7 @@ internal static class DbfJournal
         }
         if (at != body.Length)
             throw Malformed("its length");
-        return new DbfJournalEntry(record, changes, kind == (byte)'A');
+        return new DbfJournalEntry(record, changes, kind == (byte)'A', kind == (byte)'B');
     }
 
     /// <summary>True when a note is waiting (a write was cut off, or one is in flight in another program).</summary>

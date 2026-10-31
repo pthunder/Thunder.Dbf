@@ -37,7 +37,7 @@ PACK forces its writes whatever this says, and so does every write while the jou
 
 ### Batches: deferring index writes
 
-For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (table.LockTable()) { ... }` keeps the FoxPro `.cdx` changes in memory while the lock is held and writes each changed page once, when it's disposed, instead of after every record. Meanwhile the index lock is held too, so Visual FoxPro users wait for the batch, readers included. A process killed during the batch leaves the records written and the index without their keys; the next writable open reports that the index is short of the table (`IndexWouldGoStale`), and a rebuild (`MaintainIndex(path, rebuild: true)` or REINDEX) puts it right. It's ignored while `UseJournal` is on.
+For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (table.LockTable()) { ... }` keeps the FoxPro `.cdx` changes in memory while the lock is held and writes each changed page once, when it's disposed, instead of after every record. Meanwhile the index lock is held too, so Visual FoxPro users wait for the batch, readers included. The batch is noted in the table's journal file (`TABLE.DBF.journal`) before it starts, and the note is cleared once every page is written. A process killed during the batch leaves the records written, the index without the batch's changes, and the note: the next write, in any Thunder.Dbf process, refuses with `IndexWouldGoStale` (and `Check()` reports it) until `RebuildIndex()` on an exclusive open rebuilds the index and clears it. Visual FoxPro doesn't read the note: until that rebuild (or a REINDEX), VFP can find stale keys. It's ignored while `UseJournal` is on.
 
 ### Choosing
 
@@ -46,7 +46,7 @@ For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (tabl
 | Default (`FlushWritesToDisk` on) | Never leaves a key missing (UNIQUE tags aside); a cut-off write is caught on open | Only the write in progress can be lost | Share the table record by record | Slowest: every step forced to disk |
 | + `UseJournal` | A cut-off write is finished exactly by the next one | The same | The same | Two more forced writes per key change |
 | `FlushWritesToDisk = false` | The same as the default | The latest writes can be lost, and the index left out of step (`Check()`, then a rebuild) | The same | Several times faster |
-| + `DeferIndexWrites` under `LockTable()` | The batch's keys can be missing; reported on the next open | The same as flushes off | Wait for the batch to finish | Fastest: each index page written once per batch |
+| + `DeferIndexWrites` under `LockTable()` | The batch's index changes can be missing; its journal note stops Thunder.Dbf writes until a rebuild, and VFP can find stale keys until then | The same as flushes off | Wait for the batch to finish | Fastest: each index page written once per batch |
 
 Visual FoxPro and its OLE DB driver, for comparison, never force writes to disk, and keep no write order a killed process could rely on.
 

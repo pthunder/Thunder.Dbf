@@ -81,6 +81,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // each when it ends. Reads see them. A process killed during a batch leaves the index without the
     // batch's changes, which the open-time count check reports.
     private Dictionary<long, byte[]>? _deferred;
+    private long _deferredFrom; // the file's length when the batch began: pages past it are new
 
     bool IMaintainedIndex.BeginDeferredWrites()
     {
@@ -89,21 +90,19 @@ public sealed partial class CdxIndex : IMaintainedIndex
         var held = TakeIndexLock();
         try
         {
-            var state = BeginLockedChange();
-            if (!Unchanged)
+            // Another program may have changed the file since this process last wrote: the tags are
+            // reloaded first, and the pages checked against those, as the batch's first write would.
+            var state = CurrentState();
+            _lockedCounter = state.Counter;
+            ReloadTagsUnderLock(state);
+            if (MaintainRefusal is not null)
             {
-                // Not yet loaded and checked as of this state (the first write since opening, or another
-                // program wrote): do it now, as the first write of the batch would have.
-                ReloadTagsUnderLock(state);
-                if (MaintainRefusal is not null)
-                {
-                    Unchanged = false;
-                    _lockedCounter = null;
-                    held.Dispose();
-                    return false; // the batch's first write refuses, with the reason, as usual
-                }
-                Unchanged = _ourState == state;
+                _lockedCounter = null;
+                held.Dispose();
+                return false; // the batch's first write refuses, with the reason, as usual
             }
+            Unchanged = _ourState == state;
+            _deferredFrom = FileLength();
         }
         catch
         {
@@ -119,6 +118,23 @@ public sealed partial class CdxIndex : IMaintainedIndex
         return true;
     }
 
+    private void WriteRuns(Dictionary<long, byte[]> pages, IEnumerable<long> which)
+    {
+        var offsets = which.Order().ToList();
+        for (var start = 0; start < offsets.Count;)
+        {
+            var end = start + 1;
+            while (end < offsets.Count && offsets[end] == offsets[end - 1] + DefaultPageLength)
+                end++;
+            var run = new byte[(end - start) * DefaultPageLength];
+            for (var i = start; i < end; i++)
+                pages[offsets[i]].CopyTo(run, (i - start) * DefaultPageLength);
+            _stream.Position = offsets[start];
+            _stream.Write(run);
+            start = end;
+        }
+    }
+
     void IMaintainedIndex.FinishDeferredWrites(bool toDisk)
     {
         if (_deferred is not { } pages)
@@ -128,21 +144,15 @@ public sealed partial class CdxIndex : IMaintainedIndex
         _held = null;
         try
         {
-            // In offset order, contiguous pages in one write: nobody can read the file until the lock
-            // goes, so the order a crash could expose no longer matters.
-            var offsets = pages.Keys.Order().ToList();
-            for (var start = 0; start < offsets.Count;)
-            {
-                var end = start + 1;
-                while (end < offsets.Count && offsets[end] == offsets[end - 1] + DefaultPageLength)
-                    end++;
-                var run = new byte[(end - start) * DefaultPageLength];
-                for (var i = start; i < end; i++)
-                    pages[offsets[i]].CopyTo(run, (i - start) * DefaultPageLength);
-                _stream.Position = offsets[start];
-                _stream.Write(run);
-                start = end;
-            }
+            // New pages first (nothing on disk points at them yet), then, once they're out, the pages
+            // that existed (some now pointing at new ones), and the file header (the free list) last.
+            // Contiguous pages go in one write. A batch cut off in the middle is still reported by
+            // its note in the table's journal; this order keeps what's on disk a tree meanwhile.
+            WriteRuns(pages, pages.Keys.Where(o => o >= _deferredFrom));
+            if (pages.Keys.Any(o => o >= _deferredFrom))
+                DbfTable.FlushToDisk(_stream, toDisk);
+            WriteRuns(pages, pages.Keys.Where(o => o < _deferredFrom && o >= DefaultPageLength * 2));
+            WriteRuns(pages, pages.Keys.Where(o => o < DefaultPageLength * 2));
             Publish(succeeded: !_holdFailed);
             DbfTable.FlushToDisk(_stream, toDisk);
         }
