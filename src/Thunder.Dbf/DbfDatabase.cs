@@ -289,8 +289,23 @@ public sealed class DbfDatabase : IDisposable
                     indexDamaged = true;
                 }
             }
+            var cdxMaintained = false;
             if (table.Header.HasStructuralCdx)
-                warnings.Add("The table has a FoxPro .cdx index. It can be read, but not yet kept up to date, so writes are refused unless AllowUnmaintainedIndexes is set.");
+            {
+                try
+                {
+                    if (CdxIndex.FindFor(path) is not { } cdxPath)
+                        warnings.Add("The header says there's a structural .cdx index, but no .cdx file is next to the table.");
+                    else if (CdxIndex.WhyNotMaintainable(cdxPath, table) is { } refusal)
+                        warnings.Add($"The table's FoxPro .cdx index can be read but not kept up to date: {refusal}");
+                    else
+                        cdxMaintained = true;
+                }
+                catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+                {
+                    warnings.Add("The table's FoxPro .cdx index can't be read, so writes would leave it out of date.");
+                }
+            }
 
             if (!Options.ReadOnly)
             {
@@ -298,7 +313,8 @@ public sealed class DbfDatabase : IDisposable
                 // unfinished-transaction refusal, and the memo and index files are writable too.
                 var mdx = table.Header.HasProductionMdx ? MdxIndex.FindFor(path) : null;
                 var blocker = DbfTable.WriteBlocker(table.Header, Options.AllowUnmaintainedIndexes,
-                    indexMaintained: mdx is not null && !indexDamaged, path, DbfTable.FindUnmaintainedIndexes(path, table.Header));
+                    indexMaintained: mdx is not null && !indexDamaged, path, DbfTable.FindUnmaintainedIndexes(path, table.Header),
+                    structuralCdxMaintained: cdxMaintained);
                 if (blocker is not null)
                     warnings.Add($"Writes will be refused: {blocker.Message}");
                 canWrite = blocker is null && !indexDamaged && ProbeWrite(path, problems)

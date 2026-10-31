@@ -150,21 +150,26 @@ public class CdxIndexTests
         Assert.Equal([1, 2, 3, 4, 5], tag.Entries().Select(e => e.RecordNumber));
     }
 
+    // FoxPro and Harbour keep a DESCENDING tag's tree in ascending order and read it backwards.
     [Fact]
-    public void Descending_tags_seek_downwards()
+    public void Descending_tags_read_their_ascending_tree_backwards()
     {
         var tag = CdxIndex.Open(new CdxBuilder()
             .Tag("K", headerOffset: 1024, root: 2048, keyLength: 1, descending: true)
-            .Interior(2048, 1, (C("d"), 2, 2560), (C("a"), 5, 3072))
-            .Leaf(2560, 1, (C("e"), 1), (C("d"), 2))
-            .Leaf(3072, 1, (C("c"), 3), (C("b"), 4), (C("a"), 5))
+            .Interior(2048, 1, (C("c"), 3, 2560), (C("e"), 6, 3072))
+            .Leaf(2560, 1, (C("a"), 1), (C("b"), 2), (C("c"), 3))
+            .Leaf(3072, 1, (C("c"), 4), (C("d"), 5), (C("e"), 6))
             .Build())["K"];
 
         Assert.True(tag.IsDescending);
-        Assert.Equal(["e", "d", "c", "b", "a"], tag.Entries().Select(e => e.Key));
-        Assert.Equal(["c", "b", "a"], tag.Seek("cz").Select(e => e.Key));
-        Assert.Equal([2], tag.SeekExact("d").Select(e => e.RecordNumber));
+        Assert.Equal(["e", "d", "c", "c", "b", "a"], tag.Entries().Select(e => e.Key));
+        Assert.Equal([6, 5, 4, 3, 2, 1], tag.Entries().Select(e => e.RecordNumber));
+        Assert.Equal(["c", "c", "b", "a"], tag.Seek("cz").Select(e => e.Key));
+        Assert.Equal([4, 3], tag.SeekExact("c").Select(e => e.RecordNumber));
+        Assert.Equal([5], tag.SeekExact("d").Select(e => e.RecordNumber));
+        Assert.Equal(6, tag.Seek("f").Count());
         Assert.Empty(tag.SeekExact("f"));
+        Assert.Empty(tag.Seek("0"));
     }
 
     [Fact]
