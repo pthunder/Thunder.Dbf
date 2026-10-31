@@ -78,3 +78,61 @@ public sealed partial class CdxIndex : IDbfIndex
 }
 
 public sealed partial class CdxTag : IDbfIndexTag;
+
+// ---- keeping indexes up to date ----------------------------------------------------------------
+
+/// <summary>
+/// An open index file a table keeps in step with its writes. A format gets write support by
+/// implementing this; until then a table refuses writes while such a file sits next to it.
+/// </summary>
+internal interface IMaintainedIndex : IDisposable
+{
+    IEnumerable<IMaintainedTag> MaintainedTags { get; }
+
+    /// <summary>Re-reads the tag list, in case another program changed the file.</summary>
+    void ReloadTags();
+
+    /// <summary>Flushes every change to disk.</summary>
+    void Commit();
+}
+
+/// <summary>One tag of an <see cref="IMaintainedIndex"/>, with keys in the format's own stored bytes.</summary>
+internal interface IMaintainedTag
+{
+    string Name { get; }
+    bool IsUnique { get; }
+
+    /// <summary>True when the tag's FOR filter (if any) lets <paramref name="record"/> in.</summary>
+    bool Includes(DbfRecord record);
+
+    /// <summary>The stored key bytes for <paramref name="record"/>.</summary>
+    byte[] KeyFor(DbfRecord record);
+
+    void Insert(byte[] key, int recordNumber);
+
+    /// <summary>Removes the entry for exactly this key and record; false when there wasn't one.</summary>
+    bool Remove(byte[] key, int recordNumber);
+
+    /// <summary>The record number stored under <paramref name="key"/>, or null. Used for unique tags.</summary>
+    int? FirstRecordFor(byte[] key);
+
+    /// <summary>Removes every key (for a rebuild).</summary>
+    void Clear();
+}
+
+public sealed partial class MdxIndex : IMaintainedIndex
+{
+    IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
+    void IMaintainedIndex.ReloadTags() => ReloadTags();
+    void IMaintainedIndex.Commit() => Commit();
+}
+
+public sealed partial class MdxTag : IMaintainedTag
+{
+    bool IMaintainedTag.Includes(DbfRecord record) => Includes(record);
+    byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
+    void IMaintainedTag.Insert(byte[] key, int recordNumber) => Insert(key, recordNumber);
+    bool IMaintainedTag.Remove(byte[] key, int recordNumber) => Remove(key, recordNumber);
+    int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
+    void IMaintainedTag.Clear() => Clear();
+}
