@@ -36,6 +36,8 @@ The first public release.
 ### Web service (Thunder.Dbf.Server)
 
 - A JSON API with hashed API keys, per-table and per-field permissions, schema validation, a two-line (intent, then done) write journal, consistent backups taken under the table lock, per-address and per-key rate limits, response-size budgets and OpenAPI.
+- OpenID Connect sign-in beside API keys: bearer tokens from Entra ID, Auth0, Keycloak or any provider, checked by JwtBearer against the provider's keys and the configured audience. Roles, groups or any claim map, first match wins, to access profiles shaped like an API key's permissions; a token that maps to none gets 403. Users show up as `oidc:<sub>` in the journal, logs and rate limits. Sending a key and a token together is a 400.
+- An OpenAPI schema per table: `GET /tables/{name}/openapi` and `GET /openapi/tables.json` add a `Table_<NAME>` component schema, typed from the DBF header, for each table the caller may read, without hidden fields. `/openapi/v1.json` stays generic and names no tables.
 
 ### Tools
 
