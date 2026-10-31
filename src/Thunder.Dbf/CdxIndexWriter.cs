@@ -504,7 +504,7 @@ public sealed partial class CdxTag : IMaintainedTag
     private const int MaxWritableKeyLength = 240; // FoxPro's limit, and what keeps the count fields in 8 bits
     private const int SampleSize = 32;
 
-    private enum KeyKind { Character, Double, Date, Logical, Integer }
+    private enum KeyKind { Character, Double, Date, Logical, Integer, Currency, DateTime }
 
     // What a character key is made of: bare character fields, UPPER() of one, DTOS() of a date field
     // and STR() of a whole-number field, joined with +. Each is built from the record's stored bytes,
@@ -579,12 +579,14 @@ public sealed partial class CdxTag : IMaintainedTag
                 var field = table.Fields.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));
                 if (field is null)
                     return $"its expression uses '{name}', which isn't a field of the table (a long name from a database container?)";
-                // Visual FoxPro adds a null marker byte to keys over nullable fields, and keys datetime and
-                // currency values in layouts no real file here shows; guessing would mislead FoxPro.
-                if (field.IsNullable)
-                    return $"its expression uses the nullable field {field.Name}, whose keys carry a null marker that isn't reproduced here";
-                if (field.Type is 'T' or 'Y')
-                    return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name}, whose key layout isn't reproduced here";
+                // Visual FoxPro's keys over a currency or datetime field, and the null marker byte in front of
+                // a key over a nullable field, are reproduced for a bare field (checked against tables VFP 9
+                // wrote); in anything more, guessing would mislead FoxPro.
+                var bare = BareField(table) is { } only && only.Name.Equals(field.Name, StringComparison.OrdinalIgnoreCase);
+                if (field.IsNullable && !(bare && field.Type == 'C'))
+                    return $"its expression uses the nullable field {field.Name} in a way whose key (with its null marker) isn't reproduced here; only a bare nullable character field is";
+                if (field.Type is 'T' or 'Y' && !bare)
+                    return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name} in more than a bare field, whose key isn't reproduced here";
             }
 
             // In a double-byte code page FoxPro's string functions count bytes, and .NET's count
@@ -600,8 +602,11 @@ public sealed partial class CdxTag : IMaintainedTag
             return $"its expression can't be evaluated here ({ex.Message})";
         }
 
+        var bareType = BareField(table)?.Type;
         KeyKind? kind = blank switch
         {
+            _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,
+            _ when bareType == 'T' && KeyLength == 8 => KeyKind.DateTime,
             string when KeyType == 'C' => KeyKind.Character,
             decimal or double when KeyLength == 8 => KeyKind.Double,
             decimal or double when KeyLength == 4 && BareField(table) is { Type: 'I' } => KeyKind.Integer,
@@ -615,7 +620,7 @@ public sealed partial class CdxTag : IMaintainedTag
         // FoxPro works numeric expressions out in binary floating point and this library in decimal,
         // so anything past reading one field (a sum, a VAL(), a ROUND()) can come out a different
         // double. A bare field is read from its text once, correctly rounded, by both.
-        if (kind is KeyKind.Double or KeyKind.Integer && BareField(table) is not { Type: 'N' or 'F' or 'B' or 'I' })
+        if (kind is KeyKind.Double or KeyKind.Integer && BareField(table) is not { Type: 'N' or 'F' or 'B' or 'I' or 'Y' })
             return $"its numeric key '{Expression}' is more than a bare numeric field, and FoxPro works such expressions out in binary floating point, which isn't reproduced exactly here";
 
         _parts = null;
@@ -677,7 +682,8 @@ public sealed partial class CdxTag : IMaintainedTag
                     + (_index.Encoding.IsSingleByte ? "" : $" (the table's code page {_index.Encoding.CodePage} is double-byte)"));
             parts.Add(part.Value);
         }
-        var total = parts.Sum(p => p.Length);
+        // A key over a nullable field starts with Visual FoxPro's null marker byte.
+        var total = parts.Sum(p => p.Length) + (parts is [{ Field.IsNullable: true }] ? 1 : 0);
         if (total != KeyLength)
             return (null, $"its {KeyLength}-byte keys don't match the {total} bytes its expression gives");
         return (parts, null);
@@ -875,6 +881,31 @@ public sealed partial class CdxTag : IMaintainedTag
                     null => 0d,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a date."),
                 });
+            case KeyKind.DateTime:
+                // Julian days with the time as a fraction of the day, worked out the way Visual FoxPro 9
+                // does it: whole seconds since day 0 (the stored milliseconds rounded), times 1/86400 as a
+                // double. (Adding seconds / 86400 to the day comes out one step off for about a quarter of
+                // real values.) An empty one keys as 0.
+                return IndexKeys.WriteOrderedDouble(value switch
+                {
+                    DateTime moment => (IndexKeys.JulianDay(DateOnly.FromDateTime(moment)) * 86_400d
+                        + Math.Round(moment.TimeOfDay.Ticks / (double)TimeSpan.TicksPerSecond, MidpointRounding.AwayFromZero)) * (1d / 86_400d),
+                    null => 0d,
+                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a datetime."),
+                });
+            case KeyKind.Currency:
+            {
+                // The stored ten-thousandths, big-endian, with the sign bit flipped so negatives sort first.
+                var scaled = value switch
+                {
+                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m)),
+                    null => 0L,
+                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
+                };
+                var key = new byte[8];
+                BinaryPrimitives.WriteUInt64BigEndian(key, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
+                return key;
+            }
             default:
                 return [(byte)(value is true ? 'T' : 'F')];
         }
@@ -886,6 +917,16 @@ public sealed partial class CdxTag : IMaintainedTag
     private byte[] CharacterKey(DbfRecord record)
     {
         var key = new byte[KeyLength];
+        if (_parts is [{ Field.IsNullable: true } only])
+        {
+            // Visual FoxPro: 0x80 then the value for a value; all zeros for .NULL. (VFP 9's own keys).
+            if (record.IsNull(only.FieldIndex))
+                return key;
+            key[0] = 0x80;
+            key.AsSpan(1).Fill((byte)' ');
+            StoredBytes(record, only).CopyTo(key.AsSpan(1, only.Length));
+            return key;
+        }
         key.AsSpan().Fill((byte)' ');
         var at = 0;
         foreach (var part in _parts!)
@@ -1102,9 +1143,12 @@ public sealed partial class CdxTag : IMaintainedTag
             var duplicates = 0;
             if (i > 0)
             {
-                // A shared prefix never overlaps the dropped trailing bytes (FoxPro and Harbour agree).
+                // A shared prefix never overlaps the dropped trailing bytes, this key's or the previous
+                // one's: it's counted against the bytes the previous key keeps (Visual FoxPro 9's own
+                // leaves; a key that adds a date after blanks repeats the blanks).
                 var previous = node.Keys[i - 1];
-                while (duplicates < KeyLength - trailing && key[duplicates] == previous[duplicates])
+                var previousKept = KeyLength - (KeyLength - previous.AsSpan().TrimEnd(trail).Length);
+                while (duplicates < Math.Min(KeyLength - trailing, previousKept) && key[duplicates] == previous[duplicates])
                     duplicates++;
             }
 
