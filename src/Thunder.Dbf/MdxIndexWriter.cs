@@ -64,12 +64,12 @@ public sealed partial class MdxIndex
     }
 
     /// <summary>Stamps today's date as the last update and pushes everything to disk.</summary>
-    internal void Commit()
+    internal void Commit(bool toDisk = true)
     {
         var today = DateTime.Today;
         _stream.Position = UpdatedOffset;
         _stream.Write([(byte)(today.Year - 1900), (byte)today.Month, (byte)today.Day]);
-        DbfTable.FlushToDisk(_stream);
+        DbfTable.FlushToDisk(_stream, toDisk);
     }
 
     private int ReadHeaderInt(int offset)

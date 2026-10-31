@@ -48,6 +48,9 @@ public sealed record DbfDatabaseOptions
     /// <summary>Opt-in: keep a journal next to each table so a write cut off while changing keys is finished later (see DbfTable.UseJournal).</summary>
     public bool Journal { get; init; }
 
+    /// <summary>Force each write through to the disk before the next step (see DbfTable.FlushWritesToDisk). On by default.</summary>
+    public bool FlushWritesToDisk { get; init; } = true;
+
     /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
     public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
@@ -251,6 +254,7 @@ public sealed class DbfDatabase : IDisposable
             Options.MaintainFoxProIndexes, Options.Exclusive);
         table.RefuseLinks = true;
         table.UseJournal = Options.Journal;
+        table.FlushWritesToDisk = Options.FlushWritesToDisk;
         table.LockScheme = Options.LockScheme;
         return table;
     }
@@ -460,9 +464,12 @@ public sealed class DbfDatabase : IDisposable
                 case "journal":
                     options = options with { Journal = ParseBool(key, value) };
                     break;
+                case "flushwritestodisk":
+                    options = options with { FlushWritesToDisk = ParseBool(key, value) };
+                    break;
                 default:
                     throw new DbfException(DbfErrorCode.InvalidConnectionString, $"The connection string has an unknown setting '{key}'.",
-                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Exclusive, Journal, Lock Scheme.");
+                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Exclusive, Journal, Flush Writes To Disk, Lock Scheme.");
             }
         }
 

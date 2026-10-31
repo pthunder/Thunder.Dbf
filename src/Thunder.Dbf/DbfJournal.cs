@@ -142,7 +142,7 @@ internal static class DbfJournal
     }
 
     private const int MinChangeLength = 1 + 1 + 2 + 2; // two empty names, two absent keys
-    private const int MaxKeyLength = 240;                 // the longest key any of the index formats holds
+    private const int MaxKeyLength = 256;                 // the longest key any of the index formats holds (Clipper's .ntx)
 
     private static InvalidDataException Malformed(string what) =>
         new($"The journal note is damaged or not Thunder.Dbf's: {what} doesn't fit inside it.");
@@ -168,6 +168,8 @@ internal static class DbfJournal
 
     private static void WriteKey(Stream stream, byte[]? key)
     {
+        if (key is not null && key.Length > MaxKeyLength)
+            throw new ArgumentException($"A key of {key.Length} bytes is too long for the journal (at most {MaxKeyLength}).", nameof(key));
         Span<byte> length = stackalloc byte[2];
         BinaryPrimitives.WriteInt16LittleEndian(length, key is null ? (short)-1 : checked((short)key.Length));
         stream.Write(length);

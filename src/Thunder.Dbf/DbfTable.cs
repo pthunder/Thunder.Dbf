@@ -17,6 +17,7 @@
 //
 // After the last record comes 0x1A, the old DOS end-of-file marker.
 
+using System.Runtime.ExceptionServices;
 using System.Text;
 
 namespace Thunder.Dbf;
@@ -263,6 +264,12 @@ public sealed partial class DbfTable : IDisposable
     /// <exception cref="DbfException">The index can't be read, or its format can't be kept up to date.</exception>
     public void MaintainIndex(string path, bool rebuild = false)
     {
+        using var forced = ForceEveryWrite();
+        MaintainIndexCore(path, rebuild);
+    }
+
+    private void MaintainIndexCore(string path, bool rebuild)
+    {
         EnsureWritable();
         if (rebuild)
             RequireExclusive("Rebuilding an index");
@@ -371,6 +378,40 @@ public sealed partial class DbfTable : IDisposable
     // ---- indexes that appear after opening ------------------------------------------------
 
     private HashSet<string> _indexFilesAtOpen = new(StringComparer.OrdinalIgnoreCase);
+
+    // The files a write looks for next to the table (an index made after opening, an unfinished PACK's
+    // copy, a journal) are created by other programs, and creating a file changes the folder's
+    // last-write time. While that time is what the last write saw, the folder isn't listed again.
+    // A filesystem with coarse times (FAT's are two seconds) could hide a file made in the same
+    // tick, so a recent time with nothing below the millisecond (NTFS and APFS keep 100 ns or finer)
+    // isn't trusted for two seconds, and the folder is listed at least once a second all the same. A journal file, once there, can stay empty between notes, so while
+    // one exists it's checked on every write; a table keeping a journal looks every time.
+    private const long FolderRecheckMilliseconds = 1000;
+    private static readonly TimeSpan CoarseFolderTime = TimeSpan.FromSeconds(2);
+    private DateTime? _folderSeen;
+    private long _folderSeenAt;
+    private bool _journalFileSeen = true;
+
+    // A note this process writes is looked for by its next write, whatever the folder's time says.
+    private void WriteJournal(DbfJournalEntry entry)
+    {
+        _journalFileSeen = true;
+        DbfJournal.Write(_path!, entry);
+    }
+
+    private DateTime? FolderStamp()
+    {
+        if (_path is null || !_stream.CanWrite)
+            return null;
+        try
+        {
+            return Directory.GetLastWriteTimeUtc(Path.GetDirectoryName(Path.GetFullPath(_path))!);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null; // can't tell: look every time
+        }
+    }
     private readonly Dictionary<string, IMaintainedIndex> _attachedIndexes = new(StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string> IndexFileNames(string tablePath) =>
@@ -580,14 +621,28 @@ public sealed partial class DbfTable : IDisposable
     private void PrepareWrite(bool appending)
     {
         Refresh();
-        ThrowIfPackUnfinished();
+        var folder = FolderStamp();
+        var lookInFolder = _useJournal || folder is not { } stamp || stamp != _folderSeen
+            || Environment.TickCount64 - _folderSeenAt >= FolderRecheckMilliseconds
+            || stamp.Ticks % TimeSpan.TicksPerMillisecond == 0 && DateTime.UtcNow - stamp < CoarseFolderTime;
+        if (lookInFolder)
+            ThrowIfPackUnfinished();
         ThrowIfIndexesNeedRebuild();
-        ThrowIfIndexAppeared();
+        if (lookInFolder)
+            ThrowIfIndexAppeared();
         ThrowIfIndexCantBeMaintained();
         if (WriteBlocker(Header, _allowUnmaintainedIndexes, indexMaintained: _index is not null, _path, _unmaintainedIndexes,
                 structuralCdxMaintained: HasMaintainedStructuralCdx, structuralCdxRefusal: _maintainFoxProIndexes ? _structuralCdxRefusal : null) is { } blocker)
             throw blocker;
-        ReplayJournal(); // a key change cut off in this or another process; every caller holds the header lock
+        if (lookInFolder && _path is not null)
+            _journalFileSeen = File.Exists(DbfJournal.PathFor(_path));
+        ReplayJournal(lookForNote: _journalFileSeen); // a key change cut off in this or another process; every caller holds the header lock
+        if (lookInFolder && folder is { } seen)
+        {
+            // Only once every check above has passed: one that threw is made again by the next write.
+            _folderSeen = seen;
+            _folderSeenAt = Environment.TickCount64;
+        }
 
         var dataEnd = Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength;
         if (dataEnd > _stream.Length)
@@ -895,7 +950,7 @@ public sealed partial class DbfTable : IDisposable
         // The first row of a batch notes where the batch starts, before any of it is written.
         if (_useJournal && _path is not null && !_appendNoted)
         {
-            DbfJournal.Write(_path, new DbfJournalEntry(index + 1,
+            WriteJournal(new DbfJournalEntry(index + 1,
                 TagsWithFiles().Select(t => t.File).Distinct(StringComparer.OrdinalIgnoreCase).Select(f => new DbfJournalChange(f, "", null, null)).ToList(),
                 IsAppend: true));
             _appendNoted = true;
@@ -947,7 +1002,7 @@ public sealed partial class DbfTable : IDisposable
     private void CommitIndexes()
     {
         foreach (var index in MaintainedIndexes)
-            index.Commit();
+            index.Commit(ForcesWrites);
     }
 
     /// <summary>
@@ -1017,12 +1072,12 @@ public sealed partial class DbfTable : IDisposable
         EncodeFields(values, changed);
         var keys = PlanIndexChanges(current, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
 
-        _memo?.FlushToDisk();
+        _memo?.FlushToDisk(ForcesWrites);
         var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
         {
             Seek(index);
             _stream.Write(_buffer);
-            FlushToDisk(_stream);
+            FlushWrite(_stream);
         });
         CommitCounters(counters);
         CommitAfterKeyChange(journaled);
@@ -1319,7 +1374,7 @@ public sealed partial class DbfTable : IDisposable
         {
             Seek(index);
             _stream.WriteByte(flag);
-            FlushToDisk(_stream);
+            FlushWrite(_stream);
         });
         CommitAfterKeyChange(journaled);
     }
@@ -1411,7 +1466,7 @@ public sealed partial class DbfTable : IDisposable
     {
         var journaled = _useJournal && _path is not null && keys is { Count: > 0 };
         if (journaled)
-            DbfJournal.Write(_path!, new DbfJournalEntry(recordNumber,
+            WriteJournal(new DbfJournalEntry(recordNumber,
                 keys!.Select(k => new DbfJournalChange(IndexFileOf(k.Tag), k.Tag.Name, k.Remove, k.Insert)).ToList()));
 
         ApplyIndexChanges(keys, recordNumber, KeyPhase.NewKeys);
@@ -1491,6 +1546,16 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether each write is forced through to the disk (FlushFileBuffers, fsync) before the next step starts: on by
+    /// default. Off, writes still leave this process in the same order, so a killed process loses nothing more than
+    /// with it on; only a power cut or an operating-system crash can then lose or reorder the latest writes, as with
+    /// Visual FoxPro and its OLE DB driver, which never force them. Appends and updates run several times faster
+    /// without it. PACK always forces its writes, and so does every write while <see cref="UseJournal"/> is on (the
+    /// journal's note may only be emptied once what it covers is on disk).
+    /// </summary>
+    public bool FlushWritesToDisk { get; set; } = true;
+
     /// <summary>True when the table's journal holds a note: a write was cut off, or another Thunder.Dbf process is mid-write.</summary>
     public bool HasPendingJournal => _path is not null && DbfJournal.IsPending(_path);
 
@@ -1501,15 +1566,16 @@ public sealed partial class DbfTable : IDisposable
     // file, tag name, key length); a note this table can't match stops writes, rather than being
     // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
     // record has are added and forced to disk before stale ones go, so none goes missing on the way.
-    private void ReplayJournal()
+    private void ReplayJournal(bool lookForNote = true)
     {
         if (_path is null || !_stream.CanWrite)
             return;
-        if (!DbfJournal.IsPending(_path))
+        if (!lookForNote || !DbfJournal.IsPending(_path))
         {
             RecheckAfterReplay();
             return;
         }
+        using var forced = ForceEveryWrite(); // the note is emptied only once what it finished is on disk
 
         DbfJournalEntry? entry;
         try
@@ -1705,8 +1771,15 @@ public sealed partial class DbfTable : IDisposable
             return;
 
         var done = new List<Action>();
+        var holds = new List<IDisposable>();
+        var completed = false;
         try
         {
+            foreach (var index in MaintainedIndexes)
+            {
+                if (index.Hold() is { } hold)
+                    holds.Add(hold);
+            }
             foreach (var (tag, remove, insert) in changes)
             {
                 // NewKeys: only tags without UNIQUE add keys ahead of the record. OldKeys: those tags drop
@@ -1718,6 +1791,7 @@ public sealed partial class DbfTable : IDisposable
                 if (insert is not null && addNow)
                     InsertKey(tag, insert, recordNumber, done);
             }
+            completed = true;
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException)
         {
@@ -1740,6 +1814,34 @@ public sealed partial class DbfTable : IDisposable
                     ? $"Record {recordNumber} wasn't changed: its new index entries couldn't be added."
                     : $"Record {recordNumber} was written, but its index entries couldn't be updated.",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, ex);
+        }
+        finally
+        {
+            // Every hold is released, whatever happens to the others. One that couldn't publish its
+            // changes (the counter bump or the flush failed) leaves the index in doubt: writes stop
+            // until a rebuild, as after any failed index update.
+            Exception? unpublished = null;
+            for (var i = holds.Count - 1; i >= 0; i--)
+            {
+                try
+                {
+                    holds[i].Dispose();
+                }
+                catch (Exception ex)
+                {
+                    unpublished ??= ex;
+                }
+            }
+            if (unpublished is not null)
+            {
+                _indexesNeedRebuild = true;
+                if (completed && unpublished is not (IOException or InvalidDataException))
+                    ExceptionDispatchInfo.Throw(unpublished);
+                if (completed)
+                    throw new DbfException(DbfErrorCode.IndexDamaged,
+                        $"Record {recordNumber}'s index changes couldn't be published to other programs.",
+                        "Close the legacy app, open the table with exclusive: true and run RebuildIndex() (or REINDEX in the legacy app) before relying on the index again.", _path, unpublished);
+            }
         }
     }
 
@@ -1794,6 +1896,12 @@ public sealed partial class DbfTable : IDisposable
     /// <c>allowUnmaintainedIndexes</c>, or when an index has gone out of step.
     /// </summary>
     public void RebuildIndex()
+    {
+        using var forced = ForceEveryWrite();
+        RebuildIndexCore();
+    }
+
+    private void RebuildIndexCore()
     {
         if (!_stream.CanWrite)
             throw new DbfException(DbfErrorCode.ReadOnlyConnection, "The table was opened read-only.",
@@ -2007,17 +2115,41 @@ public sealed partial class DbfTable : IDisposable
     // docs/durability.md for what a crash can leave behind.
     private void CommitHeader()
     {
-        _memo?.FlushToDisk();
-        FlushToDisk(_stream);
+        _memo?.FlushToDisk(ForcesWrites);
+        FlushWrite(_stream);
         CommitIndexes();
         Header.LastUpdate = DateOnly.FromDateTime(DateTime.Today);
         Header.WriteFixed(_stream);
-        FlushToDisk(_stream);
+        FlushWrite(_stream);
     }
 
-    internal static void FlushToDisk(Stream stream)
+    // An ordinary write's flush: forced to the disk unless FlushWritesToDisk is off, and always out of
+    // this process's buffers, so other programs (and a later reader after a kill) see writes in order.
+    private void FlushWrite(Stream stream) => FlushToDisk(stream, ForcesWrites);
+
+    // The journal's note is emptied once what it covers is on disk, so with the journal on every step
+    // is forced: otherwise a power cut could keep the emptied note and lose the changes it covered.
+    internal bool ForcesWrites => FlushWritesToDisk || _useJournal || _appendNoted || _forcedOperations > 0;
+
+    // PACK, rebuilds, INDEX ON and finishing a journal note force every write whatever FlushWritesToDisk
+    // says: each ends by deleting or emptying what a power cut would need to recover from (PACK's
+    // copy, the journal's note), or replaces a whole index at once.
+    private int _forcedOperations;
+
+    private ForcedWrites ForceEveryWrite()
     {
-        if (stream is FileStream file)
+        _forcedOperations++;
+        return new ForcedWrites(this);
+    }
+
+    private readonly struct ForcedWrites(DbfTable table) : IDisposable
+    {
+        public void Dispose() => table._forcedOperations--;
+    }
+
+    internal static void FlushToDisk(Stream stream, bool toDisk = true)
+    {
+        if (stream is FileStream file && toDisk)
             file.Flush(flushToDisk: true);
         else
             stream.Flush();

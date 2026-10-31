@@ -35,6 +35,12 @@ public sealed partial class DbfTable
     /// </summary>
     public void CreateIndexTag(string name, string expression, string? forExpression, bool unique, bool descending, bool candidate)
     {
+        using var forced = ForceEveryWrite();
+        CreateIndexTagCore(name, expression, forExpression, unique, descending, candidate);
+    }
+
+    private void CreateIndexTagCore(string name, string expression, string? forExpression, bool unique, bool descending, bool candidate)
+    {
         EnsureWritable();
         var tagName = ValidTagName(name);
         if (Header.IsFoxPro || Header.IsFoxProByCompanion)
@@ -364,6 +370,12 @@ public sealed partial class DbfTable
     /// back: replace the .dbf with that copy, delete the copy, and call <see cref="RebuildIndex"/>.
     /// </remarks>
     public int Pack()
+    {
+        using var forced = ForceEveryWrite();
+        return PackCore();
+    }
+
+    private int PackCore()
     {
         EnsureWritable();
         if (_path is null)
