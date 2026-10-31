@@ -44,6 +44,7 @@
 
 - [Editorial guidelines](maintainers/editorial-guidelines.md): what every change must meet before it's published.
 - [Maintaining](maintainers/maintaining.md): the weekly routine, releases, and GitHub settings.
+- [Running the Visual FoxPro round-trip test](maintainers/visual-foxpro-test.md): the Windows checklist that takes `.cdx` writing out of preview.
 
 ---
 
