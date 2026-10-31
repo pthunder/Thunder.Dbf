@@ -1,0 +1,64 @@
+#        .-----.
+#       /     /      ProjectThunder :: Thunder.Dbf
+#      /     /__     Every push and pull request: build and test on all three
+#     /__      /     operating systems, then the editorial and security gates.
+#       /    /
+#      /   /
+#     /  /
+#    //
+#   '
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore Thunder.Dbf.slnx
+      - run: dotnet build Thunder.Dbf.slnx -c Release --no-restore
+      - run: dotnet test Thunder.Dbf.slnx -c Release --no-build --logger "trx" --results-directory test-results
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results
+
+  editorial:
+    name: Editorial and security gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Editorial check (secrets, personal paths, banners, fixtures, stray data)
+        run: scripts/editorial-check.sh
+      - name: No known-vulnerable packages
+        run: |
+          dotnet restore Thunder.Dbf.slnx
+          dotnet list Thunder.Dbf.slnx package --vulnerable --include-transitive | tee vulnerable.txt
+          ! grep -q "has the following vulnerable packages" vulnerable.txt

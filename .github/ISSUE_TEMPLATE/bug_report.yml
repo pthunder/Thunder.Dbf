@@ -1,0 +1,28 @@
+name: Bug report
+description: Something reads, writes or behaves wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! **Please don't attach real data files** (they can hold customers' names and addresses).
+        For a security problem, use [private reporting](../../security/advisories/new) instead of an issue.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include the DbfException code and message if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: About the file
+      description: |
+        Which app wrote it (dBASE IV, FoxPro, Clipper, GoldMine, ...)? Paste the output of
+        `thunder-dbf info <table>`, which shows the structure but no data.
+  - type: input
+    id: version
+    attributes:
+      label: Thunder.Dbf version and OS
+      placeholder: 0.1.0 on Windows 11

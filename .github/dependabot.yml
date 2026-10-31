@@ -1,0 +1,21 @@
+#    ProjectThunder :: Thunder.Dbf
+#    Weekly pull requests for NuGet and GitHub Actions updates. Each one goes through CI,
+#    the editorial gate and a maintainer's review like any other change.
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      microsoft:
+        patterns: ["Microsoft.*", "System.*"]
+      test-tools:
+        patterns: ["xunit*", "coverlet*", "Microsoft.NET.Test.Sdk", "BenchmarkDotNet"]
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

@@ -1,0 +1,11 @@
+name: Feature request
+description: A format, field type, function or tool you need
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What you're trying to do
+      description: The legacy system involved and the job you need done. "Read Clipper .ntx indexes from our 1996 inventory app" beats "add NTX".
+    validations:
+      required: true

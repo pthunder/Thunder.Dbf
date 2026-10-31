@@ -1,0 +1,58 @@
+#     _______
+#    | MON   |    ProjectThunder :: Thunder.Dbf
+#    |  ___  |    Every Monday: rerun the tests on the latest SDK and rescan for packages
+#    | |_x_| |    that became vulnerable since they were added. Anything wrong opens (or
+#    |_______|    updates) one issue labelled "maintenance", so nothing slips past quietly.
+name: Weekly maintenance
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  checkup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - name: Tests on the latest SDK
+        id: tests
+        continue-on-error: true
+        run: dotnet test Thunder.Dbf.slnx -c Release
+      - name: Vulnerable packages
+        id: vulnerable
+        continue-on-error: true
+        run: |
+          dotnet list Thunder.Dbf.slnx package --vulnerable --include-transitive | tee vulnerable.txt
+          ! grep -q "has the following vulnerable packages" vulnerable.txt
+      - name: Editorial check
+        id: editorial
+        continue-on-error: true
+        run: scripts/editorial-check.sh
+      - name: Report problems as an issue
+        if: steps.tests.outcome == 'failure' || steps.vulnerable.outcome == 'failure' || steps.editorial.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body="Weekly maintenance found problems on $(date -u +%Y-%m-%d):
+          - Tests on the latest SDK: ${{ steps.tests.outcome }}
+          - Vulnerable packages: ${{ steps.vulnerable.outcome }}
+          - Editorial check: ${{ steps.editorial.outcome }}
+
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --label maintenance --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh label create maintenance --color FBCA04 --description "Found by weekly maintenance" 2>/dev/null || true
+            gh issue create --title "Weekly maintenance found problems" --label maintenance --body "$body"
+          fi

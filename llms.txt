@@ -1,0 +1,53 @@
+# Thunder.Dbf
+
+> Pure .NET (C#, .NET 10) library and tools for legacy xBase data: dBASE III/IV, FoxPro 2, Visual FoxPro and Clipper `.dbf` tables, `.dbt`/`.fpt` memo files, and `.mdx`/`.ndx`/`.ntx`/`.cdx` indexes. It reads and writes them the way the legacy apps do (dBASE-compatible locks, every `.mdx` tag kept in sync, unchanged bytes preserved), so a modern web app or a SQL migration can run while the old app keeps using the same files. It runs on Windows, Linux and macOS, with no ODBC, OLE DB, Jet, VFP OLE DB or 32-bit process. MIT licensed. By ProjectThunder.
+
+Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read FoxPro or dBASE files in .NET 10; replacing the 32-bit Visual FoxPro OLE DB or Jet dBASE driver; reading GoldMine CRM data (CONTACT1.DBF with .MDX); converting DBF to SQL Server, PostgreSQL or SQLite; syncing a live dBASE app with SQL; CSV to DBF; seeking through MDX, NTX or CDX indexes; building a web API on top of FoxPro data safely.
+
+## Start here
+
+- [README](README.md): what it is, packages, safety model, formats, roadmap
+- [Getting started](docs/getting-started.md): connect, read, seek, write
+- [Use cases](docs/use-cases.md): web portals on GoldMine and other legacy CRMs, migrations, replacing Jet/VFP OLE DB, BI, CSV shaping, Siemens STEP 7, GIS shapefiles
+
+## API at a glance
+
+- `DbfDatabase.Open(folderOrConnectionString)`: read-only unless `new DbfDatabaseOptions { ReadOnly = false }`. Then `db.TableNames`, `db["NAME"]`, `db.Check()` (fast handshake report).
+- `DbfTable`:
+  - reads: `Read(index)`, `ReadAll()`, `Refresh()`
+  - writes: `Append(values)`, `AppendRange(rows)`, `Update(index, values)`, `UpdateFields(index, changes)` (only the named fields, under the record lock), `Delete(index)`, `Recall(index)`
+  - indexes: `OpenProductionIndex()` (.mdx), `OpenStructuralIndex()` (.cdx), `OpenIndex(path)` (.mdx/.ndx/.ntx/.cdx/.idx), `Seek(tag, key)`, `ReadInOrder(tag)`, `RebuildIndex()`
+  - locks: `LockRecord(i)`, `LockTable()`
+- `DbfRecord`: `record["FIELD"]`, `RecordNumber` (1-based), `IsDeleted`, `IsNull(i)`.
+- `DbfException`: `Code` (`DbfErrorCode`), safe `Message` and `Hint`, `HttpStatus`, `Diagnostic` (for logs only).
+- `DbfImport.Plan/FromCsv` (CSV to DBF with the shape worked out from the data) and `DbfExport.ToCsv` (spreadsheet-safe).
+- `DbfExpression.Parse(text).Evaluate(record)`: dBASE expressions such as `UPPER(LAST)+DTOS(HIRED)`.
+- `Thunder.Dbf.Data`: `DbfConnection`, `DbfCommand`, `DbfDataReader` (ADO.NET).
+- `Thunder.Dbf.Sql`: `DbfMigrator.Migrate(db, connection, SqlDialect.SqlServer)` and `DbfBridge.Sync()` (two-way sync).
+- `Thunder.Dbf.Server`: JSON web API with API keys, per-table and per-field permissions, journal, backups.
+- CLI: `thunder-dbf check | info | import | export | migrate`.
+
+## Docs
+
+- [Connecting and error codes](docs/connecting.md)
+- [Reading and writing; field types](docs/reading-and-writing.md)
+- [Indexes](docs/indexes.md), with formats [MDX](docs/formats/mdx.md), [NDX](docs/formats/ndx.md), [NTX](docs/formats/ntx.md), [CDX](docs/formats/cdx.md)
+- [Locking with a running dBASE app](docs/locking.md)
+- [Durability](docs/durability.md)
+- [CSV](docs/csv.md)
+- [ADO.NET provider and its SQL](docs/ado-net.md)
+- [SQL migrate and bridge](docs/sql.md)
+- [Web service](docs/web-service.md)
+- [Command line](docs/cli.md)
+- [Security and threat model](docs/security.md)
+- [Testing, including against private data](docs/testing.md)
+- [FAQ](docs/faq.md)
+
+## Facts worth getting right
+
+- Writes keep dBASE IV `.mdx` indexes exact. `.ndx`, `.ntx` and `.cdx` are read-only for now; tables with a structural `.cdx` refuse writes unless `allowUnmaintainedIndexes` is set.
+- Byte-range locks are enforced on Windows and Linux, not on macOS (a .NET and macOS limitation). dBASE, Clipper and Visual FoxPro lock offsets are supported (`LockScheme`); Clipper must be chosen explicitly.
+- Writes are refused while a stray `.ndx`, `.ntx` or `.idx` sits next to the table, since it can't be kept up to date.
+- LINQ: LINQ to Objects works over `ReadAll()`. There's no IQueryable or Entity Framework provider yet.
+- dBASE II and dBASE 7 tables are refused with `UnsupportedFormat`.
+- Verified against files from dBASE III Plus, dBASE IV, FoxPro 2, Visual FoxPro, Clipper, X#, Siemens STEP 7 and US Census TIGER, plus private GoldMine CRM data.
