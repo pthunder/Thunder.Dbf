@@ -274,6 +274,9 @@ public sealed partial class MdxTag
     private enum Search { Found, KeepLooking, Stop }
 
     /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
+    internal bool Contains(byte[] key, int recordNumber) =>
+        Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found;
+
     internal bool Remove(byte[] key, int recordNumber)
     {
         var path = new List<(int Page, int Slot)>();

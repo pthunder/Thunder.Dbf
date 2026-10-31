@@ -194,6 +194,8 @@ public sealed partial class NtxTag : IMaintainedTag
     byte[] IMaintainedTag.KeyFor(DbfRecord record) => KeyFor(record);
     void IMaintainedTag.Insert(byte[] key, int recordNumber) => _index.Update(this, () => { Insert(key, recordNumber); return true; });
     bool IMaintainedTag.Remove(byte[] key, int recordNumber) => _index.Update(this, () => Remove(key, recordNumber));
+    bool IMaintainedTag.Contains(byte[] key, int recordNumber) =>
+        _index.Update(this, () => Find(CurrentRoot(), key, recordNumber, [], depth: 0, visited: []) == Search.Found);
     int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
     void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
 

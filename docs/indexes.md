@@ -103,6 +103,8 @@ Thunder.Dbf keeps an index only when it can write exactly what the legacy progra
 - **An index created next to the table after it was opened:** reopen the table.
 - **A `.cdx` out of step with the table:** a tag holding a different number of keys than the table has records (when it has no FOR filter and no UNIQUE), the last records missing from a tag that should hold them, or stored keys that aren't the ones the table's records give. A write cut off between the record and its keys leaves this. Open the table with `writable: true, exclusive: true, maintainFoxProIndexes: true` and call `MaintainIndex(path, rebuild: true)`, which rebuilds it from the table.
 
+Harbour 3.0's `.cdx` driver doesn't maintain Visual FoxPro CANDIDATE tags (it reads their option bit as "custom index, the program keeps it"), so on a table a Harbour or Clipper program also writes, those tags go out of date, and Thunder.Dbf then refuses the index as out of step with the table. REINDEX in Visual FoxPro repairs it.
+
 Microsoft's Jet and ACE drivers (Access, and ADO with `Extended Properties=dBASE IV`) keep a `.mdx`'s plain tags but not its FOR tags: a FOR tag on a table that an Access or Jet program writes to goes out of date, and Jet can't create one either. Keep FOR tags off such tables, or rebuild them after Jet has written.
 
 If an index update fails partway, every later write to that table stops until `RebuildIndex()` succeeds. A half-applied change is never built on.

@@ -45,6 +45,9 @@ public sealed record DbfDatabaseOptions
     /// </summary>
     public bool Exclusive { get; init; }
 
+    /// <summary>Opt-in: keep a journal next to each table so a write cut off while changing keys is finished later (see DbfTable.UseJournal).</summary>
+    public bool Journal { get; init; }
+
     /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
     public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
@@ -247,6 +250,7 @@ public sealed class DbfDatabase : IDisposable
         var table = DbfTable.Open(path, writable: !Options.ReadOnly, Options.Encoding, Options.IgnoreMissingMemo, Options.AllowUnmaintainedIndexes,
             Options.MaintainFoxProIndexes, Options.Exclusive);
         table.RefuseLinks = true;
+        table.UseJournal = Options.Journal;
         table.LockScheme = Options.LockScheme;
         return table;
     }
@@ -293,6 +297,8 @@ public sealed class DbfDatabase : IDisposable
             }
             if (!Options.ReadOnly && !DbfLocks.PlatformSupportsLocks)
                 warnings.Add("This platform can't take byte-range locks, so writes here aren't coordinated with other programs using the table. Run on Windows or Linux to share the files safely.");
+            if (table.HasPendingJournal)
+                warnings.Add("The table's .journal holds a key change a write didn't finish (or one in flight). The next writable open or write, with the same indexes kept, finishes it.");
             if (table.RecordsPastCount() is > 0 and var past)
                 warnings.Add($"{past:N0} record(s) sit past the header's count: an append in progress, or one that was cut off. If it was cut off, Visual FoxPro reports the table as corrupted (error 2091); opening it here with exclusive: true (and writable) takes them off and rebuilds its indexes.");
             if (table.Header.HasIncompleteTransaction)
@@ -451,9 +457,12 @@ public sealed class DbfDatabase : IDisposable
                 case "exclusive":
                     options = options with { Exclusive = ParseBool(key, value) };
                     break;
+                case "journal":
+                    options = options with { Journal = ParseBool(key, value) };
+                    break;
                 default:
                     throw new DbfException(DbfErrorCode.InvalidConnectionString, $"The connection string has an unknown setting '{key}'.",
-                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Exclusive, Lock Scheme.");
+                        "Known settings: Data Source, Read Only, Mode, Code Page, Ignore Missing Memo, Allow Unmaintained Indexes, Maintain FoxPro Indexes, Exclusive, Journal, Lock Scheme.");
             }
         }
 
