@@ -174,6 +174,10 @@ public sealed class CdxCreateTests : IDisposable
         Assert.Equal(DbfErrorCode.InvalidValue, error.Code);
         Assert.Contains("240", error.Message);
         Assert.Null(CdxIndex.FindFor(path));
+
+        table.CreateIndexTag("LONGEST", string.Join("+", Enumerable.Repeat("name", 8))); // 240 bytes: the most FoxPro allows
+        using var made = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(CdxIndex.FindFor(path)!)));
+        Assert.Equal(240, made["LONGEST"].KeyLength);
     }
 
     [Fact]
