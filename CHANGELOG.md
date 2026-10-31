@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **Records an interrupted append left past the count are kept, not just removed:** before a writable exclusive open takes them off, their bytes go to `TABLE.DBF.cutoff-<UTC time>` beside the table (a new name each time; delete it once nothing in it is wanted), and `CutOffRecordsRemoved` and `CutOffBackupPath` report it (review of #13).
+- **The journal reader checks every count and length** against the note it reads; a whole note that doesn't make sense (damaged, or not written by Thunder.Dbf) stops writes with an explanation until a rebuild, instead of failing with an out-of-range error. Index and tag names a note holds go in the error's `Diagnostic`, not its message (review of #14).
+- Lock calls that need a shorter wait (the open-time `.cdx` check, finishing a journal note) pass it per call instead of changing the table's `LockTimeout` for a moment.
+- **Behavior change:** `DbfTable.Create` holds the new `.dbf` unshared while the table is open (other programs can't open it until it's closed), so `INDEX ON` and `PACK` can follow straight away.
 - `Check()`'s summary says "No problems; N note(s) below." when tables only have notes (such as a missing code page), instead of "All good." above a warning.
 
 ### Engine (Thunder.Dbf)

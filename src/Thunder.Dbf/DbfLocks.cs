@@ -156,15 +156,16 @@ internal sealed class DbfLocks
 
     // ---- the kinds of lock --------------------------------------------------------------
 
-    public DbfLock Record(int recordNumber, string purpose) =>
+    // timeout: how long this one call waits, instead of Timeout; nothing shared is changed for it.
+    public DbfLock Record(int recordNumber, string purpose, TimeSpan? timeout = null) =>
         Take(RecordRange(recordNumber), DbfErrorCode.RecordLocked,
-            $"Record {recordNumber} is locked by another program, so it can't be {purpose} right now.");
+            $"Record {recordNumber} is locked by another program, so it can't be {purpose} right now.", timeout);
 
-    public DbfLock Header() =>
-        Take(HeaderRange, DbfErrorCode.TableLocked, "Another program is changing this table's header (adding records or locking the whole table).");
+    public DbfLock Header(TimeSpan? timeout = null) =>
+        Take(HeaderRange, DbfErrorCode.TableLocked, "Another program is changing this table's header (adding records or locking the whole table).", timeout);
 
-    public DbfLock Append() =>
-        Take(AppendRange, DbfErrorCode.TableLocked, "Another program is adding records to this table.");
+    public DbfLock Append(TimeSpan? timeout = null) =>
+        Take(AppendRange, DbfErrorCode.TableLocked, "Another program is adding records to this table.", timeout);
 
     /// <summary>Every record lock plus the header and append locks: nobody else can change the table.</summary>
     public DbfLock Table()
@@ -190,12 +191,14 @@ internal sealed class DbfLocks
     }
 
     /// <summary>An exclusive lock on any range of the file, for formats with their own lock positions.</summary>
-    public DbfLock Range((long Offset, long Length) range, DbfErrorCode code, string message) => Take(range, code, message);
+    public DbfLock Range((long Offset, long Length) range, DbfErrorCode code, string message, TimeSpan? timeout = null) =>
+        Take(range, code, message, timeout);
 
     // ---- taking and releasing -----------------------------------------------------------
 
-    private DbfLock Take((long Offset, long Length) range, DbfErrorCode code, string message)
+    private DbfLock Take((long Offset, long Length) range, DbfErrorCode code, string message, TimeSpan? timeout = null)
     {
+        var wait = timeout ?? Timeout;
         if (_file is null || _registry is null)
             return new DbfLock(() => { });
         if (RequireLocks && !Enforced)
@@ -218,9 +221,9 @@ internal sealed class DbfLocks
                 _registry.Release(this, range);
             }
 
-            if (timer.Elapsed >= Timeout)
+            if (timer.Elapsed >= wait)
                 throw new DbfException(code, message,
-                    $"Waited {Timeout.TotalSeconds:0.#} s. Try again in a moment, or raise LockTimeout if the other program holds locks for long.",
+                    $"Waited {wait.TotalSeconds:0.#} s. Try again in a moment, or raise LockTimeout if the other program holds locks for long.",
                     _path);
             Thread.Sleep(RetryDelay);
         }

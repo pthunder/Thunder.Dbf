@@ -115,23 +115,13 @@ public sealed partial class CdxIndex : IMaintainedIndex
             MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
             return;
         }
-        // The check can do without a lock it can't get quickly (the first write checks again), so it
-        // doesn't wait the table's full lock timeout for one.
-        var savedTimeout = _table?.Locks.Timeout;
-        if (_table is not null && _table.Locks.Timeout > CheckLockWait)
-            _table.Locks.Timeout = CheckLockWait;
-        try
-        {
-            Check();
-        }
-        finally
-        {
-            if (_table is not null && savedTimeout is { } timeout)
-                _table.Locks.Timeout = timeout;
-        }
+        Check();
     }
 
-    private static readonly TimeSpan CheckLockWait = TimeSpan.FromMilliseconds(250);
+    // The check can do without a lock it can't get quickly (the first write checks again), so it
+    // waits at most this long for each, whatever the table's lock timeout.
+    private TimeSpan CheckLockWait => _table is { } table && table.Locks.Timeout < MaxCheckLockWait ? table.Locks.Timeout : MaxCheckLockWait;
+    private static readonly TimeSpan MaxCheckLockWait = TimeSpan.FromMilliseconds(250);
 
     // The whole tree is first walked without holding Visual FoxPro's index lock, which would stop
     // every VFP user for as long as a big index takes to read. Then, briefly under the table's
@@ -230,7 +220,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
             return null;
         try
         {
-            return _table.Locks.Header();
+            return _table.Locks.Header(CheckLockWait);
         }
         catch (DbfException ex) when (ex.Code is DbfErrorCode.TableLocked)
         {
@@ -249,7 +239,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         try
         {
-            return TakeIndexLock();
+            return TakeIndexLock(CheckLockWait);
         }
         catch (Exception ex) when (!OpenedForWriting && ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException or DbfException { Code: DbfErrorCode.LockingUnsupported })
         {
@@ -340,7 +330,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 _table?.FilePath);
     }
 
-    private DbfLock TakeIndexLock()
+    private DbfLock TakeIndexLock(TimeSpan? timeout = null)
     {
         var locks = _fileLocks ??= new DbfLocks(_stream as FileStream, (_stream as FileStream)?.Name);
         if (_table is not null)
@@ -348,7 +338,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
             locks.Timeout = _table.Locks.Timeout;
             locks.RequireLocks = _table.Locks.RequireLocks;
         }
-        return locks.Range(FoxProLock, DbfErrorCode.TableLocked, "Another program is updating this table's FoxPro index.");
+        return locks.Range(FoxProLock, DbfErrorCode.TableLocked, "Another program is updating this table's FoxPro index.", timeout);
     }
 
     /// <summary>

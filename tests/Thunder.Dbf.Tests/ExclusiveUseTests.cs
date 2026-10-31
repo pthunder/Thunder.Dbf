@@ -135,17 +135,54 @@ public sealed class UnfinishedAppendTests : IDisposable
         Assert.Equal(cutOff, new FileInfo(path).Length);
 
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
             Assert.Equal(2, table.RecordCount);
+            // Reported, and kept: the removed record's bytes are beside the table.
+            Assert.Equal(1, table.CutOffRecordsRemoved);
+            Assert.NotNull(table.CutOffBackupPath);
+            Assert.Equal([(byte)' ', .. "Cut off   "u8, 0x1A], File.ReadAllBytes(table.CutOffBackupPath!));
+        }
         Assert.Equal(committed + 1, new FileInfo(path).Length);
         Assert.Equal(0x1A, SharedFile.ReadAllBytes(path)[^1]);
         using var reopened = DbfTable.Open(path);
         Assert.Equal(["Ada L", "Grace"], reopened.ReadAll().Select(r => (string)r["NAME"]!));
     }
 
+    // Each removal keeps its own backup, however quickly they follow each other (review of #17).
+    [Fact]
+    public void Cut_off_records_taken_off_twice_in_a_row_get_a_backup_each()
+    {
+        var (path, length, committed) = TwoRecords();
+        var backups = new List<string>();
+        var stopped = new DateTime(2026, 10, 31, 12, 0, 0, DateTimeKind.Utc);
+        DbfTable.CutOffClock = () => stopped; // all three in the same millisecond
+        try
+        {
+            for (var round = 0; round < 3; round++)
+            {
+                using (var file = SharedFile.OpenWrite(path))
+                {
+                    file.SetLength(committed);
+                    file.Position = committed;
+                    file.Write([(byte)' ', .. "Cut off   "u8, 0x1A]);
+                }
+                using var table = DbfTable.Open(path, writable: true, exclusive: true);
+                Assert.Equal(1, table.CutOffRecordsRemoved);
+                backups.Add(table.CutOffBackupPath!);
+            }
+        }
+        finally
+        {
+            DbfTable.CutOffClock = () => DateTime.UtcNow;
+        }
+        Assert.Equal(3, backups.Distinct().Count());
+        Assert.All(backups, b => Assert.Equal(length + 1, new FileInfo(b).Length));
+    }
+
     [Fact]
     public void Many_records_past_the_count_are_all_found()
     {
-        var (path, length, committed) = TwoRecords();
+        var (path, _, committed) = TwoRecords();
         using (var file = SharedFile.OpenWrite(path))
         {
             file.SetLength(committed);
@@ -162,7 +199,7 @@ public sealed class UnfinishedAppendTests : IDisposable
     [Fact]
     public void A_repair_rebuilds_the_index_a_cut_off_writer_had_already_reached()
     {
-        var (path, length, committed) = TwoRecords();
+        var (path, _, committed) = TwoRecords();
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
             table.CreateIndexTag("NAME", "NAME");
         using (var file = SharedFile.OpenWrite(path))

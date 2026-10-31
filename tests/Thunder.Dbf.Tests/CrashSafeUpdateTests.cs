@@ -317,4 +317,36 @@ public sealed class CrashSafeUpdateTests : IDisposable
         using var check = DbfTable.Open(path);
         Assert.Equal(0, check.RecordsPastCount());
     }
+
+    // A note's hash only says it's whole. One that's whole but makes no sense (damaged, or not
+    // written by Thunder.Dbf) is refused with an explanation, never read past its end.
+    public static TheoryData<string, byte[]> HostileNotes()
+    {
+        static byte[] Note(byte kind, int record, int count, params byte[] rest) =>
+            [.. "TDJ3"u8, kind, .. BitConverter.GetBytes(record), .. BitConverter.GetBytes(count), .. rest];
+        return new()
+        {
+            { "a count far past the note", Note((byte)'U', 2, int.MaxValue) },
+            { "a negative count", Note((byte)'U', 2, -1) },
+            { "a negative record", Note((byte)'U', -5, 0) },
+            { "an unknown kind", Note((byte)'X', 2, 0) },
+            { "a name running past the end", Note((byte)'U', 2, 1, 200, (byte)'A') },
+            { "a key running past the end", Note((byte)'U', 2, 1, 0, 0, 0x10, 0x00, 1, 2) },
+            { "a key longer than any index holds", Note((byte)'U', 2, 1, [0, 0, 0x00, 0x7F, .. new byte[0x7F00]]) },
+            { "bytes left over", Note((byte)'U', 2, 0, 1, 2, 3) },
+        };
+    }
+
+    [Theory]
+    [MemberData(nameof(HostileNotes))]
+    public void A_whole_note_that_makes_no_sense_is_refused_with_an_explanation(string what, byte[] body)
+    {
+        _ = what;
+        var path = Table();
+        File.WriteAllBytes(path + ".journal", [.. body, .. System.Security.Cryptography.SHA256.HashData(body)]);
+        using var table = DbfTable.Open(path, writable: true);
+        var error = Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 37m }));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        Assert.IsType<InvalidDataException>(error.InnerException);
+    }
 }

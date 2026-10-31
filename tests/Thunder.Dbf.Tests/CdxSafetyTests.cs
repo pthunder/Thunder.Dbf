@@ -21,26 +21,27 @@ public sealed partial class CdxWriteTests
     {
         Assert.Equal((0x7FFF_FFFEL, 1L), CdxIndex.FoxProLock);
         var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
-        var table = OpenWritable(dbf);
-        table.LockTimeout = TimeSpan.FromMilliseconds(200);
-        var template = table.Read(0).Values.ToArray();
-        var before = SharedFile.ReadAllBytes(cdx);
-
-        using (var other = new FileStream(cdx, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+        using (var table = OpenWritable(dbf))
         {
-            var locks = new DbfLocks(other, cdx);
-            using (locks.Range((0x7FFF_FFFE, 1), DbfErrorCode.TableLocked, "test"))
-            {
-                var error = Assert.Throws<DbfException>(() => table.Append(Call(template, id: 5000, contact: 1, subject: "held")));
-                Assert.Equal(DbfErrorCode.TableLocked, error.Code);
-                Assert.Equal(16, table.RecordCount); // refused before the record was written
-            }
-            DbfLocks.CloseWhenSafe(other);
-        }
-        Assert.Equal(before, SharedFile.ReadAllBytes(cdx));
+            table.LockTimeout = TimeSpan.FromMilliseconds(200);
+            var template = table.Read(0).Values.ToArray();
+            var before = SharedFile.ReadAllBytes(cdx);
 
-        table.Append(Call(template, id: 5001, contact: 1, subject: "free"));
-        table.Dispose();
+            using (var other = new FileStream(cdx, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+            {
+                var locks = new DbfLocks(other, cdx);
+                using (locks.Range((0x7FFF_FFFE, 1), DbfErrorCode.TableLocked, "test"))
+                {
+                    var error = Assert.Throws<DbfException>(() => table.Append(Call(template, id: 5000, contact: 1, subject: "held")));
+                    Assert.Equal(DbfErrorCode.TableLocked, error.Code);
+                    Assert.Equal(16, table.RecordCount); // refused before the record was written
+                }
+                DbfLocks.CloseWhenSafe(other);
+            }
+            Assert.Equal(before, SharedFile.ReadAllBytes(cdx));
+
+            table.Append(Call(template, id: 5001, contact: 1, subject: "free"));
+        }
         AssertIndexMatchesTable(dbf, cdx);
     }
 

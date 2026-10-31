@@ -65,7 +65,8 @@ internal static class DbfJournal
 
     /// <summary>
     /// The note, or null when there's none (no file, an empty one, or one torn before any index change).
-    /// Throws <see cref="InvalidDataException"/> for a whole note in another version of the format.
+    /// Throws <see cref="InvalidDataException"/> for a whole note in another version of the format, or
+    /// one whose counts and lengths don't fit inside it (damaged, or not written by Thunder.Dbf).
     /// </summary>
     public static DbfJournalEntry? Read(string tablePath)
     {
@@ -88,21 +89,30 @@ internal static class DbfJournal
         if (!hashed || !bytes.AsSpan(0, Magic.Length).SequenceEqual(Magic))
             return null;
 
+        // Every count and length is held to the bytes the note really has: a hash says the note is
+        // whole, not that what's in it is sane.
+        var body = bytes.AsSpan(0, bytes.Length - HashLength);
         var at = Magic.Length;
-        var isAppend = bytes[at++] == (byte)'A';
-        var record = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at));
-        var count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(at + 4));
+        var kind = body[at++];
+        if (kind is not ((byte)'A' or (byte)'U'))
+            throw Malformed("its kind");
+        var record = BinaryPrimitives.ReadInt32LittleEndian(body[at..]);
+        var count = BinaryPrimitives.ReadInt32LittleEndian(body[(at + 4)..]);
         at += 8;
-        var changes = new List<DbfJournalChange>();
+        if (record < 0 || count < 0 || count > (body.Length - at) / MinChangeLength)
+            throw Malformed("its record number or count");
+        var changes = new List<DbfJournalChange>(count);
         for (var i = 0; i < count; i++)
         {
-            var file = ReadName(bytes, ref at);
-            var tag = ReadName(bytes, ref at);
-            var oldKey = ReadKey(bytes, ref at);
-            var newKey = ReadKey(bytes, ref at);
+            var file = ReadName(body, ref at);
+            var tag = ReadName(body, ref at);
+            var oldKey = ReadKey(body, ref at);
+            var newKey = ReadKey(body, ref at);
             changes.Add(new DbfJournalChange(file, tag, oldKey, newKey));
         }
-        return new DbfJournalEntry(record, changes, isAppend);
+        if (at != body.Length)
+            throw Malformed("its length");
+        return new DbfJournalEntry(record, changes, kind == (byte)'A');
     }
 
     /// <summary>True when a note is waiting (a write was cut off, or one is in flight in another program).</summary>
@@ -131,17 +141,27 @@ internal static class DbfJournal
         stream.Write(bytes);
     }
 
+    private const int MinChangeLength = 1 + 1 + 2 + 2; // two empty names, two absent keys
+    private const int MaxKeyLength = 240;                 // the longest key any of the index formats holds
+
+    private static InvalidDataException Malformed(string what) =>
+        new($"The journal note is damaged or not Thunder.Dbf's: {what} doesn't fit inside it.");
+
     private static void WriteName(Stream stream, string name)
     {
         var bytes = Encoding.UTF8.GetBytes(name);
-        stream.WriteByte(checked((byte)bytes.Length));
+        if (bytes.Length > byte.MaxValue)
+            throw new ArgumentException($"An index or tag name of {bytes.Length} bytes is too long for the journal (at most {byte.MaxValue}).", nameof(name));
+        stream.WriteByte((byte)bytes.Length);
         stream.Write(bytes);
     }
 
-    private static string ReadName(byte[] bytes, ref int at)
+    private static string ReadName(ReadOnlySpan<byte> body, ref int at)
     {
-        int length = bytes[at++];
-        var name = Encoding.UTF8.GetString(bytes, at, length);
+        if (at >= body.Length || body[at] > body.Length - at - 1)
+            throw Malformed("a name");
+        int length = body[at++];
+        var name = Encoding.UTF8.GetString(body.Slice(at, length));
         at += length;
         return name;
     }
@@ -155,13 +175,17 @@ internal static class DbfJournal
             stream.Write(key);
     }
 
-    private static byte[]? ReadKey(byte[] bytes, ref int at)
+    private static byte[]? ReadKey(ReadOnlySpan<byte> body, ref int at)
     {
-        var length = BinaryPrimitives.ReadInt16LittleEndian(bytes.AsSpan(at));
+        if (at > body.Length - 2)
+            throw Malformed("a key's length");
+        var length = BinaryPrimitives.ReadInt16LittleEndian(body[at..]);
         at += 2;
-        if (length < 0)
+        if (length == -1)
             return null;
-        var key = bytes.AsSpan(at, length).ToArray();
+        if (length < 0 || length > MaxKeyLength || length > body.Length - at)
+            throw Malformed("a key");
+        var key = body.Slice(at, length).ToArray();
         at += length;
         return key;
     }
