@@ -8,6 +8,21 @@
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Engine (Thunder.Dbf)
+
+FoxPro `.cdx`/`.idx` maintenance (still the opt-in `MaintainFoxProIndexes` preview) is safer:
+
+- **Visual FoxPro's index lock:** every change, and every reload of the tag list, runs under the lock Visual FoxPro takes on the index file itself (one byte at 0x7FFFFFFE), following `LockTimeout` and `RequireLocks`; pages are re-read under it and the update counter is bumped before it's released.
+- **Crash-safe page order:** splits write the new page before the page that links it in, emptied pages go on the free list only once nothing points at them, and a rebuild builds a whole new tree and switches to it in one header write. A crash can leave keys listed twice or unused pages, never a key missing.
+- **Visual FoxPro's UNIQUE tags** change the way Visual FoxPro changes them between rebuilds: the first record with a key keeps it, and nothing is promoted when it leaves. A rebuild still picks the lowest record.
+- **Candidate keys** are checked against every key an `AppendRange` batch has planned, so two equal keys in one batch are refused; a rebuild checks its keys among themselves.
+- **Keys built byte for byte:** character keys come from the stored field bytes (a field holding `A\0` keys as FoxPro keys it), and leaves pack record numbers past 67,108,863 the way Harbour and FoxPro do, for both reading and writing.
+- **Refused rather than guessed:** `.cdx` files whose pages have two owners or one-way sibling links (as damaged); numeric keys over more than a bare field; character keys built with functions other than `UPPER`, `DTOS` and `STR` of fields; `UPPER` and text FOR filters in double-byte code pages.
+- **Takeovers:** `MaintainIndex(path, rebuild: true)` takes over a tag out of byte order anywhere (the root included), rebuilds an index that's already kept, and lets the index go again if the rebuild fails.
+- **FoxPro 2 detection:** a version-0x03 table with the index flag, no `.mdx` and a same-named `.cdx` is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields; otherwise it stays dBASE IV and the missing `.mdx` keeps blocking writes.
+
 ## [0.1.0] - 2026-10-31
 
 The first public release.

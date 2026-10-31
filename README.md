@@ -155,7 +155,7 @@ Done:
 
 Next:
 
-- FoxPro `.cdx` writing out of preview: the `.cdx` index lock, very large tables, candidate keys within one batch, crash-safe page splits, and a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself)
+- FoxPro `.cdx` writing out of preview: a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself) (the index lock, large record numbers, batch candidate keys and crash-safe page order are in)
 - Creating `.ndx`, `.ntx` and `.cdx` tags (today `INDEX ON` writes `.mdx` tags)
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
 - NuGet packages, coming with 0.1.0: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool on nuget.org, and self-contained web service downloads for Windows, Linux and macOS on each GitHub release. The packaging and release workflow are ready.

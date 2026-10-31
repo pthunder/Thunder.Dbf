@@ -9,7 +9,7 @@ using static Thunder.Dbf.Tests.IndexTestSupport;
 
 namespace Thunder.Dbf.Tests;
 
-public sealed class CdxWriteTests : IDisposable
+public sealed partial class CdxWriteTests : IDisposable
 {
     private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-cdx-");
 
@@ -231,10 +231,16 @@ public sealed class CdxWriteTests : IDisposable
         using var index = CdxIndex.Open(cdx, table: reopened);
         Assert.True(index["AGE"].IsDescending);
         Assert.Equal(reopened.ReadAll().Max(r => (decimal)r["AGE"]!), index["AGE"].Entries().First().Key);
-        Assert.Equal(reopened.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), index["STATE"].Entries().Count());
         Assert.Equal(reopened.ReadAll().Count(r => !r.IsDeleted), index["SALARY"].Entries().Count());
         Assert.DoesNotContain(1, index["SALARY"].Entries().Select(e => e.RecordNumber));   // deleted
         Assert.Contains(15, index["SALARY"].Entries().Select(e => e.RecordNumber));        // recalled
+
+        // Between rebuilds a Visual FoxPro UNIQUE tag can lose a key whose holder left; a rebuild
+        // gives every key back to its lowest record.
+        using (var table = IndexedTables.OpenWithIndexes(dbf))
+            table.RebuildIndex();
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+        Assert.Equal(reopened.ReadAll().Select(r => (string)r["STATE"]!).Distinct().Count(), index["STATE"].Entries().Count());
     }
 
     [Fact]
@@ -394,10 +400,25 @@ public sealed class CdxWriteTests : IDisposable
     /// <summary>
     /// The tag holds exactly the keys a rebuild from the table would: every record its FOR filter
     /// lets in (one per key for unique tags), with the key built from the record, in byte order
-    /// then record order.
+    /// then record order. With <paramref name="firstCome"/>, a unique tag is held to what Visual FoxPro
+    /// keeps between rebuilds instead: at most one entry per key, each for a record that has that key.
     /// </summary>
-    private static void AssertExactKeys(CdxTag tag, DbfTable table, bool byteOrdered = true)
+    private static void AssertExactKeys(CdxTag tag, DbfTable table, bool byteOrdered = true, bool firstCome = false)
     {
+        if (firstCome && tag.IsUnique)
+        {
+            var entries = tag.RawEntries();
+            var rows = table.ReadAll().ToDictionary(r => r.RecordNumber);
+            Assert.Equal(entries.Count, entries.Select(e => Convert.ToHexString(e.Key)).Distinct().Count());
+            for (var i = 0; i < entries.Count; i++)
+            {
+                Assert.True(i == 0 || entries[i - 1].Key.AsSpan().SequenceCompareTo(entries[i].Key) < 0, $"Tag {tag.Name}, entry {i} is out of order");
+                Assert.True(tag.Includes(rows[entries[i].Record]) && tag.KeyBytes(rows[entries[i].Record]).AsSpan().SequenceEqual(entries[i].Key),
+                    $"Tag {tag.Name}, entry {i}: record {entries[i].Record} doesn't have key {Convert.ToHexString(entries[i].Key)}");
+            }
+            return;
+        }
+
         var expected = new List<(byte[] Key, int Record)>();
         var seen = new HashSet<string>();
         foreach (var record in table.ReadAll())
@@ -427,7 +448,7 @@ public sealed class CdxWriteTests : IDisposable
     // Everything a maintained .cdx must satisfy: the reader reads every tag back in order and in step
     // with the table; the raw keys equal a rebuild; leaves link to their neighbours both ways; and
     // every leaf is packed exactly as FoxPro would pack it.
-    private static void AssertIndexMatchesTable(string dbf, string cdx)
+    private static void AssertIndexMatchesTable(string dbf, string cdx, bool rebuilt = false)
     {
         using var table = DbfTable.Open(dbf);
         using var index = CdxIndex.Open(cdx, table: table);
@@ -435,8 +456,8 @@ public sealed class CdxWriteTests : IDisposable
         Assert.Equal(0, file.Length % 512);
         foreach (var tag in index.Tags)
         {
-            AssertTagMatchesTable(TagView.Of(tag), table);
-            AssertExactKeys(tag, table);
+            AssertTagMatchesTable(TagView.Of(tag), table, uniqueFirstCome: !rebuilt);
+            AssertExactKeys(tag, table, firstCome: !rebuilt);
 
             var leaves = tag.LeafOffsets();
             for (var i = 0; i < leaves.Count; i++)

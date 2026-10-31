@@ -267,6 +267,7 @@ public sealed partial class DbfTable
                     keysByTag[tag].Add((tag.KeyFor(record), kept));
             }
         }
+        ThrowIfRebuiltKeysRepeat(keysByTag); // before a record moves
 
         var length = Header.RecordLength;
         var start = Header.HeaderLength;

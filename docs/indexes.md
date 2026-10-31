@@ -93,10 +93,13 @@ Use it after writing with `allowUnmaintainedIndexes`, or when an index has gone 
 
 Thunder.Dbf keeps an index only when it can write exactly what the legacy program would. Otherwise writes stop with `IndexWouldGoStale`, and the reason is in the exception's `Diagnostic`. It refuses:
 
-- **Keys not in byte order:** an index built with a national or case-blind sort order. `MaintainIndex(path, rebuild: true)` takes it over and rebuilds it in byte order, like REINDEX with `SET COLLATE TO "MACHINE"`.
+- **Keys not in byte order:** an index built with a national or case-blind sort order. `MaintainIndex(path, rebuild: true)` takes it over and rebuilds it in byte order, like REINDEX with `SET COLLATE TO "MACHINE"`, wherever in the tree the disorder is. If that rebuild fails, the index is let go and keeps blocking writes. On an index that's already kept, `rebuild: true` still rebuilds it.
 - **Clipper's custom, changes-only, template and multi-key indexes,** whose keys the program sets itself.
 - **Numeric `.ntx` keys wider than 15 significant digits,** which Clipper formats differently.
 - **`.cdx` tags over nullable, datetime or currency fields,** or with a collation other than MACHINE.
+- **`.cdx` keys this library can't build byte for byte:** a numeric key that's more than a bare field (FoxPro computes `AGE+0` or `VAL(ZIP)` in binary floating point, this library in decimal), and a character key built with anything but fields, `UPPER()`, `DTOS()` and `STR()` of a whole-number field joined with `+` (no `SUBSTR`, `ALLTRIM`, `PADR` or literals). In a double-byte code page (Japanese, Chinese, Korean) `UPPER()` and FOR filters over text are refused too, because FoxPro's string functions count bytes there.
+- **A damaged `.cdx`:** pages shared by two tags, a free page still in a tree, or sibling links that don't point back. Reported as damage, not as a sort order, so `rebuild: true` doesn't take it over: REINDEX it in FoxPro.
+- **A stray `.cdx` next to a dBASE IV table** whose `.mdx` is missing: the table is only taken for FoxPro 2 when the `.cdx` opens and its tags name only the table's fields. Otherwise the missing `.mdx` keeps blocking writes.
 - **An index created next to the table after it was opened:** reopen the table.
 
 If an index update fails partway, every later write to that table stops until `RebuildIndex()` succeeds. A half-applied change is never built on.

@@ -273,6 +273,7 @@ public sealed partial class CdxTag
             Expression = expression,
             ForExpression = forExpression.Length > 0 ? forExpression : null,
             IgnoreCase = header[15] is 0x01 or 0x21 && header[IgnoreCaseOffset] == 1,
+            Layout = LayoutOf(header),
         };
     }
 
@@ -404,7 +405,7 @@ public sealed partial class CdxTag
     private (byte[][] Keys, int[] Records) DecodeLeaf(byte[] page, int count, long offset)
     {
         int recordBits = page[20], duplicateBits = page[21], trailBits = page[22], entryLength = page[23];
-        if (entryLength is 0 or > 8 || recordBits > 32 || duplicateBits > 16 || trailBits > 16
+        if (entryLength is 0 or > 8 || recordBits == 0 || duplicateBits > 16 || trailBits > 16
             || recordBits + duplicateBits + trailBits > entryLength * 8)
             throw new InvalidDataException($"The leaf at offset {offset} has an impossible entry layout ({recordBits}/{duplicateBits}/{trailBits} bits in {entryLength} bytes).");
 
@@ -412,9 +413,15 @@ public sealed partial class CdxTag
         if (entriesEnd > PageLength)
             throw new InvalidDataException($"The leaf at offset {offset} claims {count} keys, more than fit in a page.");
 
-        var recordMask = (1UL << recordBits) - 1;
+        // As Harbour's dbfcdx1.c reads them: the trailing count sits in the entry's top bits and the
+        // duplicate count just below it, wherever the record number ends, and the record number is
+        // masked to at most 32 bits. Past 4-byte record numbers (record 67,108,864 with 4-byte keys
+        // takes 5-byte entries) the record field is wider than its mask.
+        var recordMask = recordBits >= 32 ? uint.MaxValue : (1UL << recordBits) - 1;
         var duplicateMask = (1UL << duplicateBits) - 1;
         var trailMask = (1UL << trailBits) - 1;
+        var trailShift = entryLength * 8 - trailBits;
+        var duplicateShift = trailShift - duplicateBits;
 
         var keys = new byte[count][];
         var records = new int[count];
@@ -426,8 +433,8 @@ public sealed partial class CdxTag
             for (var b = entryLength - 1; b >= 0; b--)
                 packed = packed << 8 | page[LeafHeaderLength + i * entryLength + b];
 
-            var duplicates = i == 0 ? 0 : (int)(packed >> recordBits & duplicateMask);
-            var trailing = (int)(packed >> (recordBits + duplicateBits) & trailMask);
+            var duplicates = i == 0 ? 0 : (int)(packed >> duplicateShift & duplicateMask);
+            var trailing = (int)(packed >> trailShift & trailMask);
             var stored = KeyLength - duplicates - trailing;
             dataStart -= stored;
             if (stored < 0 || dataStart < entriesEnd)

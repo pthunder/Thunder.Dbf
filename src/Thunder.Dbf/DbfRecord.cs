@@ -24,6 +24,12 @@ public sealed class DbfRecord
     /// <summary>The table's text encoding, so expressions can measure character fields in bytes like dBASE does.</summary>
     internal System.Text.Encoding Encoding { get; }
 
+    /// <summary>
+    /// The record's bytes as stored, when it was read from a table. Index keys over character fields
+    /// are built from these, because decoding drops NULs and trailing bytes FoxPro keeps in its keys.
+    /// </summary>
+    internal byte[]? Raw { get; init; }
+
     /// <summary>Which values are Visual FoxPro .NULL. (null bit set), as opposed to blank. Null when none are.</summary>
     internal bool[]? NullFlags { get; init; }
 

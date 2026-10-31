@@ -112,6 +112,11 @@ internal interface IMaintainedIndex : IDisposable
     {
     }
 
+    /// <summary>Told when that rebuild failed and the index is being let go: order refusals apply again.</summary>
+    void RebuildAbandoned()
+    {
+    }
+
     /// <summary>Why <see cref="CanMaintain"/> is false, for logs (it may name the tag); null when it isn't.</summary>
     string? CannotMaintainReason => null;
 
@@ -144,6 +149,37 @@ internal interface IMaintainedTag
 
     /// <summary>Removes every key (for a rebuild).</summary>
     void Clear();
+
+    /// <summary>
+    /// True when no two records may share a key and a write that would give one a taken key must be
+    /// refused (Visual FoxPro's CANDIDATE and PRIMARY KEY tags), rather than left out of the tag as a
+    /// UNIQUE tag leaves it. The table checks it against the keys a batch has planned but not yet
+    /// applied, comparing key bytes, so this is only for formats whose keys compare as bytes.
+    /// </summary>
+    bool RefusesDuplicates => false;
+
+    /// <summary>
+    /// For a unique tag: true when, as in Visual FoxPro, the record indexed under a key keeps it until
+    /// it leaves, nothing takes its place when it does, and an earlier record never evicts it. False
+    /// (dBASE, Clipper) when the lowest record number with the key always holds it, as a rebuild picks.
+    /// </summary>
+    bool UniqueKeepsFirstIndexed => false;
+
+    /// <summary>
+    /// Replaces every key with <paramref name="keys"/> (in record order), for a rebuild. A unique tag
+    /// keeps the lowest record number per key. The default empties the tag and refills it; a format
+    /// can instead build the new tree beside the old one and switch over at the end.
+    /// </summary>
+    void ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys)
+    {
+        Clear();
+        foreach (var (key, record) in keys)
+        {
+            // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
+            if (!IsUnique || FirstRecordFor(key) is null)
+                Insert(key, record);
+        }
+    }
 }
 
 public sealed partial class MdxIndex : IMaintainedIndex
