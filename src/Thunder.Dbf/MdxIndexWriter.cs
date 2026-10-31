@@ -11,6 +11,7 @@
 // routes searches correctly, so nothing else needs touching.
 
 using System.Buffers.Binary;
+using System.Text;
 
 namespace Thunder.Dbf;
 
@@ -107,16 +108,24 @@ public sealed partial class MdxTag
     internal byte[] KeyFor(DbfRecord record)
     {
         ParseExpressions();
-        var value = _keyExpression!.Evaluate(record);
-        switch (KeyType)
+        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression);
+    }
+
+    /// <summary>
+    /// The stored bytes for one key value. Shared with INDEX ON, which encodes every key before a new
+    /// tag exists, so a value that can't be stored stops the command before the file changes.
+    /// </summary>
+    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression)
+    {
+        switch (keyType)
         {
             case 'C':
             {
-                var text = value as string ?? throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce text.");
-                var key = new byte[KeyLength];
+                var text = value as string ?? throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce text.");
+                var key = new byte[keyLength];
                 key.AsSpan().Fill((byte)' ');
-                var encoded = _index.Encoding.GetBytes(text);
-                encoded.AsSpan(0, Math.Min(encoded.Length, KeyLength)).CopyTo(key);
+                var encoded = encoding.GetBytes(text);
+                encoded.AsSpan(0, Math.Min(encoded.Length, keyLength)).CopyTo(key);
                 return key;
             }
             case 'N':
@@ -124,13 +133,17 @@ public sealed partial class MdxTag
                 {
                     decimal d => MdxKeys.EncodeNumeric(d),
                     double d => MdxKeys.EncodeNumeric(d),
+                    int or long => MdxKeys.EncodeNumeric(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
                     null => MdxKeys.EncodeNumeric(0m),
-                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
+                    _ => throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a number."),
                 };
             default:
             {
+                if (value is not (DateOnly or DateTime or null))
+                    throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a date.");
                 var key = new byte[8];
-                BinaryPrimitives.WriteDoubleLittleEndian(key, value is DateOnly date ? MdxKeys.JulianDay(date) : 0d);
+                var date = value switch { DateOnly d => d, DateTime t => DateOnly.FromDateTime(t), _ => (DateOnly?)null };
+                BinaryPrimitives.WriteDoubleLittleEndian(key, date is { } day ? MdxKeys.JulianDay(day) : 0d);
                 return key;
             }
         }

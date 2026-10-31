@@ -16,17 +16,23 @@ namespace Thunder.Dbf.Sql;
 /// </summary>
 public abstract class SqlDialect
 {
+    /// <summary>SQLite.</summary>
     public static readonly SqlDialect Sqlite = new SqliteDialect();
+    /// <summary>Microsoft SQL Server and Azure SQL.</summary>
     public static readonly SqlDialect SqlServer = new SqlServerDialect();
+    /// <summary>PostgreSQL.</summary>
     public static readonly SqlDialect PostgreSql = new PostgreSqlDialect();
 
+    /// <summary>The database's name, for messages.</summary>
     public abstract string Name { get; }
 
+    /// <summary>A table or column name, quoted so it can't be read as SQL.</summary>
     public abstract string Quote(string identifier);
 
     /// <summary>The column definition for an auto-numbered primary key.</summary>
     public abstract string IdentityColumn(string name);
 
+    /// <summary>The SQL type for a logical (L) field.</summary>
     public abstract string BooleanType { get; }
 
     /// <summary>Whether a UNIQUE column may hold many NULLs (true everywhere but SQL Server).</summary>
@@ -49,7 +55,9 @@ public abstract class SqlDialect
         _ => BinaryType,
     };
 
+    /// <summary>The SQL type for a text memo field.</summary>
     public virtual string TextType => "text";
+    /// <summary>The SQL type for binary memo, general and picture fields.</summary>
     public virtual string BinaryType => "bytea";
 
     /// <summary>A value as the database driver wants it.</summary>

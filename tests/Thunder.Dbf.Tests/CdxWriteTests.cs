@@ -290,7 +290,22 @@ public sealed class CdxWriteTests : IDisposable
 
         using var stream = new FileStream(cdx, FileMode.Open, FileAccess.ReadWrite);
         using var reader = DbfTable.Open(dbf);
-        Assert.Contains("GENERAL", Assert.Throws<NotSupportedException>(() => CdxIndex.Open(stream, table: reader)).Message);
+        using var index = CdxIndex.Open(stream, table: reader);
+        Assert.Contains("GENERAL", index.MaintainRefusal);
+    }
+
+    // The handshake promises exactly what writes do: a maintainable .cdx allows writes, a refused one doesn't.
+    [Fact]
+    public void The_check_report_agrees_with_what_writes_do()
+    {
+        Copy("infused-dbf/foxprodb", "calls");
+        Copy("infused-dbf/foxprodb", "contacts");
+        using var db = DbfDatabase.Open(_dir.FullName, new DbfDatabaseOptions { ReadOnly = false });
+        var report = db.Check().Tables.ToDictionary(t => t.Name, StringComparer.OrdinalIgnoreCase);
+
+        Assert.True(report["calls"].CanWrite);
+        Assert.False(report["contacts"].CanWrite);
+        Assert.Contains(report["contacts"].Warnings, w => w.Contains("TYPE_ID"));
     }
 
     // Visual FoxPro tables in a database container index by long field names the .dbf doesn't hold.
@@ -455,7 +470,8 @@ public sealed class CdxWriteTests : IDisposable
 
     private DbfTable OpenWritable(string dbf)
     {
-        var table = DbfTable.Open(dbf, writable: true);
+        // The renamed X# index isn't named after its table, so it's named here, as USE ... INDEX would.
+        var table = IndexedTables.OpenWithIndexes(dbf);
         Assert.True(table.MaintainsIndex);
         return table;
     }

@@ -18,6 +18,7 @@ namespace Thunder.Dbf;
 [AttributeUsage(AttributeTargets.Property)]
 public sealed class DbfFieldAttribute(string name) : Attribute
 {
+    /// <summary>The field's name in the table, in any case.</summary>
     public string Name { get; } = name;
 }
 

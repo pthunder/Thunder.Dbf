@@ -63,3 +63,20 @@ Every key is text, so every comparison is a byte comparison (`memcmp`). The file
 ## Collation
 
 Clipper sorts character keys with the active nation module and Harbour with its code page's collation. For plain ASCII and the default (binary) setting that's byte order, which is what seeks assume. A file built with a language collation still reads back in its own order.
+
+## Writing
+
+A table opened writable by path opens every `.ntx` next to it whose key expression names only its fields, and keeps each one up to date on append, update, delete and recall (`NtxIndexWriter.cs`). `RebuildIndex()` rebuilds them from the table, like Clipper's `REINDEX`. The page layout, split rule and free list follow Harbour's `src/rdd/dbfntx/dbfntx1.c` (read, not copied), and the results are checked byte for byte against the X# files in `tests/fixtures/xsharp`.
+
+- **Keys** are built the way Clipper builds them (see [Keys](#keys)): `KeyFor` reproduces every key in the X# fixtures exactly. A FOR expression in the header decides which records are indexed.
+- **Order:** keys compare as bytes, the whole tree reversed when the descending flag is set. Equal keys are kept in record-number order, the order `INDEX ON` leaves them in, so single inserts and a rebuild produce the same sequence. Removal still finds an entry wherever equal keys sit, since a file Clipper maintained may hold them in another order.
+- **Unique** indexes keep the lowest record number for each key; when that record leaves, the next lowest takes its place.
+- **Pages** are written the way Harbour lays out a fresh one: count, then the offset table with an entry for every slot up to max keys (the unused ones too, each pointing at its own item area, because Clipper writes the next key wherever a free slot points), then the items in slot order. Unused bytes are zero.
+- **Inserting** goes into a leaf. A page that overflows (max keys + 1) splits around its middle item, which moves up into the parent; each half keeps about the header's half-page count. A root that splits gets a new root above it.
+- **Removing** a key from an inner page replaces it with its predecessor (the last key of the rightmost leaf below its left child), so only leaves lose keys. Pages may fall below half full, which Clipper reads fine, but never empty: an emptied page borrows an item through its parent from a sibling that has two or more, or merges with that sibling, which can empty the parent in turn. An inner root left without keys hands the root role to its one child.
+- **Free pages** go on the header's free list the way Harbour keeps it: a page with no keys whose slot 0 child pointer links to the next free page (0 ends the list). New pages are always added at the end of the file instead of taken from the list, because following a damaged link would overwrite a live page; Clipper and Harbour still reuse the list.
+- **Header:** the root (offset 4) and free list (offset 8) change as the tree does. The update counter at offset 2 goes up by one each time a write's changes are flushed, which is how Clipper and Harbour notice that pages they cached are stale. The signature, key layout, expressions, flags and tag name are never touched.
+- **Rebuilds** cut the file back to its header and start again from one empty leaf, so a rebuilt index has no free pages.
+- **Large files** (Harbour's 0x0200 flag) store page numbers instead of offsets, and are written that way. Plain files stop growing at 4 GB, the limit of a 32-bit offset.
+- **Damage:** every page read is bounded (count against max keys, offsets inside the page, pointers on page boundaries inside the file, leaf and inner pages not mixed); descents are limited to 32 levels and searches never visit a page twice. A damaged index fails the write with `IndexDamaged`, the record's index changes are undone where possible, and `RebuildIndex()` repairs it.
+- A header that allows fewer than two keys per page leaves nothing to split, so writes through it fail with an explanation; no Clipper-family writer produces one.

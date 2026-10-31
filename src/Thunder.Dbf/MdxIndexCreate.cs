@@ -52,25 +52,23 @@ public sealed partial class MdxIndex
     }
 
     /// <summary>
-    /// Adds an empty tag: a tag header block, an empty root node, and an entry in the tag table.
-    /// The caller fills it with keys and commits.
+    /// Writes a new tag's header block and empty root, without listing it in the tag table yet: until
+    /// <see cref="PublishTag"/> runs, no reader (dBASE or this one) can see it, so a crash while it's
+    /// being filled leaves only unused pages behind.
     /// </summary>
-    internal MdxTag AddTag(string name, string expression, string? forExpression, char keyType, int keyLength, bool unique, bool descending)
+    internal MdxTag PrepareTag(string name, string expression, string? forExpression, char keyType, int keyLength, bool unique, bool descending)
     {
         if (Tags.Count >= MaxTags)
             throw new InvalidOperationException($"An .mdx holds at most {MaxTags} tags.");
         if (Tags.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
             throw new InvalidOperationException($"The index already has a tag named {name}.");
 
-        var headerArea = ReadHeaderArea(_stream);
-        var entryLength = headerArea[26] == 0 ? 32 : headerArea[26];
-        var count = Tags.Count;
+        // Encode the text first: a character the code page can't hold must stop this before any page is written.
+        var expressionBytes = TextBytes(expression, 221);
+        var forBytes = forExpression is null ? null : TextBytes(forExpression, 220);
 
         var itemLength = (keyLength + 4 + 3) / 4 * 4;
         var maxKeys = (BlockSize - 12) / itemLength;
-
-        // Allocate the root first and the header second, so the header can point at the root and
-        // no half-made tag is ever listed: the tag table entry is written last.
         var root = AllocatePage();
         var headerPage = AllocatePage();
 
@@ -80,35 +78,49 @@ public sealed partial class MdxIndex
         block[9] = (byte)keyType;
         BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(12), (ushort)keyLength);
         BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(14), (ushort)maxKeys);
+        // The secondary key type: 1 for date keys, which dBASE IV checks when it seeks a date tag.
+        BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(16), (ushort)(keyType == 'D' ? 1 : 0));
         BinaryPrimitives.WriteUInt16LittleEndian(block.AsSpan(18), (ushort)itemLength);
         block[20] = 0x01; // change counter; dBASE bumps it, nothing reads it
         block[23] = unique ? KeyFormatUnique : (byte)0;
-        WriteText(block.AsSpan(24, 221), expression);
-        if (forExpression is not null)
+        expressionBytes.CopyTo(block.AsSpan(24));
+        if (forBytes is not null)
         {
             block[245] = 0x01;
-            WriteText(block.AsSpan(762, 220), forExpression);
+            forBytes.CopyTo(block.AsSpan(762));
         }
         WriteBlock(headerPage, block);
+        return MdxTag.Load(this, name, headerPage, Encoding);
+    }
 
-        // The entry: header page, name, key format 0x10, threads (filled in below), 0x02, key type.
+    /// <summary>
+    /// Lists a filled tag in the tag table. The entry goes in first (past the count, so still unseen),
+    /// then the count that makes it visible, then the name tree, which only ever points at listed tags.
+    /// </summary>
+    internal void PublishTag(MdxTag tag)
+    {
+        var headerArea = ReadHeaderArea(_stream);
+        var entryLength = headerArea[26] == 0 ? 32 : headerArea[26];
+        var count = Tags.Count;
+
         var entry = new byte[entryLength];
-        BinaryPrimitives.WriteInt32LittleEndian(entry, headerPage);
-        Encoding.ASCII.GetBytes(name).AsSpan(0, Math.Min(name.Length, 10)).CopyTo(entry.AsSpan(4, 11));
+        BinaryPrimitives.WriteInt32LittleEndian(entry, tag.HeaderPage);
+        Encoding.ASCII.GetBytes(tag.Name).AsSpan(0, Math.Min(tag.Name.Length, 10)).CopyTo(entry.AsSpan(4, 11));
         entry[15] = KeyFormatBase;
         entry[19] = 0x02;
-        entry[20] = (byte)keyType;
+        entry[20] = (byte)tag.KeyType;
         _stream.Position = TagTableOffset + (long)entryLength * count;
         _stream.Write(entry);
+        DbfTable.FlushToDisk(_stream);
 
-        WriteNameTree([.. Tags.Select(t => t.Name), name], entryLength);
         _stream.Position = 28;
         Span<byte> tagCount = stackalloc byte[2];
         BinaryPrimitives.WriteUInt16LittleEndian(tagCount, (ushort)(count + 1));
         _stream.Write(tagCount);
+        DbfTable.FlushToDisk(_stream);
 
+        WriteNameTree([.. Tags.Select(t => t.Name), tag.Name], entryLength);
         ReloadTags();
-        return Tags[^1];
     }
 
     // Rebuilds the left / right / parent slots (1-based, 0 = none) as a binary search tree over the
@@ -140,13 +152,28 @@ public sealed partial class MdxIndex
             _stream.Position = TagTableOffset + (long)entryLength * i + 16;
             _stream.Write([left[i], right[i], parent[i]]);
         }
+
+        // The tree's anchor: the reserved slot just before the table points at the first tag as its
+        // right child (byte 529), as in every .mdx dBASE software writes.
+        _stream.Position = TagTableOffset - entryLength + 17;
+        _stream.WriteByte(names.Count > 0 ? (byte)1 : (byte)0);
     }
 
-    private void WriteText(Span<byte> target, string text)
+    // Expressions are stored in the table's code page, as dBASE stores them, so "Québec" in a FOR
+    // filter survives. A character the code page can't hold is refused rather than turned into '?'.
+    private byte[] TextBytes(string text, int room)
     {
-        var bytes = Encoding.ASCII.GetBytes(text);
-        if (bytes.Length >= target.Length)
-            throw new ArgumentException($"The expression is {bytes.Length} characters; an .mdx tag holds at most {target.Length - 1}.");
-        bytes.CopyTo(target);
+        byte[] bytes;
+        try
+        {
+            bytes = DbfEncoding.Strict(Encoding).GetBytes(text);
+        }
+        catch (EncoderFallbackException)
+        {
+            throw new ArgumentException($"The expression '{text}' has a character the table's code page can't hold.");
+        }
+        if (bytes.Length >= room)
+            throw new ArgumentException($"The expression is {bytes.Length} bytes; an .mdx tag holds at most {room - 1}.");
+        return bytes;
     }
 }

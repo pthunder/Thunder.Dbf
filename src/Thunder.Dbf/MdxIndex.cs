@@ -35,13 +35,18 @@ public sealed partial class MdxIndex : IDisposable
         Encoding = encoding;
     }
 
+    /// <summary>Bytes per block, from the file header.</summary>
     public int BlockSize { get; }
+    /// <summary>The encoding character keys are decoded with.</summary>
     public Encoding Encoding { get; }
+    /// <summary>The tags, in the order they appear in the file.</summary>
     public IReadOnlyList<MdxTag> Tags { get; private set; } = [];
 
     /// <summary>True when dBASE opens this index automatically with its table.</summary>
     public bool IsProduction { get; private set; }
 
+    /// <summary>The tag called <paramref name="tagName"/>, in any case.</summary>
+    /// <exception cref="KeyNotFoundException">The index has no such tag.</exception>
     public MdxTag this[string tagName] =>
         Tags.FirstOrDefault(t => string.Equals(t.Name, tagName, StringComparison.OrdinalIgnoreCase))
         ?? throw new KeyNotFoundException($"The index has no tag named '{tagName}'.");
@@ -67,6 +72,10 @@ public sealed partial class MdxIndex : IDisposable
         }
     }
 
+    /// <summary>Reads an .mdx index from a seekable stream.</summary>
+    /// <param name="stream">The index file's contents.</param>
+    /// <param name="encoding">How character keys decode; Windows-1252 when null.</param>
+    /// <param name="leaveOpen">Keep <paramref name="stream"/> open when the index is disposed.</param>
     public static MdxIndex Open(Stream stream, Encoding? encoding = null, bool leaveOpen = false)
     {
         if (!stream.CanSeek)
@@ -140,6 +149,7 @@ public sealed partial class MdxIndex : IDisposable
             .FirstOrDefault(p => string.Equals(Path.GetFileName(p), wanted, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         if (!_leaveOpen)
@@ -176,14 +186,23 @@ public sealed partial class MdxTag
         Name = name;
     }
 
+    /// <inheritdoc />
     public string Name { get; }
+
+    /// <summary>The page holding this tag's header block.</summary>
+    internal int HeaderPage => _headerPage;
 
     /// <summary>'C' (character), 'N' (numeric) or 'D' (date).</summary>
     public char KeyType { get; private init; }
+    /// <inheritdoc />
     public int KeyLength { get; private init; }
+    /// <inheritdoc />
     public bool IsDescending { get; private init; }
+    /// <inheritdoc />
     public bool IsUnique { get; private init; }
+    /// <inheritdoc />
     public string Expression { get; private init; } = "";
+    /// <inheritdoc />
     public string? ForExpression { get; private init; }
 
     internal int ItemLength { get; private init; }

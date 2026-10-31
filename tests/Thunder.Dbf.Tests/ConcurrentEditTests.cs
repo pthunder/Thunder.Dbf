@@ -109,11 +109,19 @@ public sealed class ConcurrentEditTests : IDisposable
     }
 
     [Fact]
-    public void A_stray_index_next_to_the_table_blocks_writes_until_it_is_gone()
+    public void A_stray_index_that_cannot_be_kept_up_to_date_blocks_writes_until_it_is_gone()
     {
         var folder = Directory.CreateDirectory(Path.Combine(_dir.FullName, "retro")).FullName;
         foreach (var file in new[] { "NUM2000.DBF", "NUM2000.NDX" })
             File.Copy(Path.Combine(Fixtures.Root, "retroinv", file), Path.Combine(folder, file));
+
+        // A healthy .ndx is kept up to date now; a damaged one (no key length) can't be, and nobody
+        // can tell it doesn't belong to the table.
+        using (var damage = File.OpenWrite(Path.Combine(folder, "NUM2000.NDX")))
+        {
+            damage.Position = 12;
+            damage.Write([0, 0]);
+        }
 
         using (var table = DbfTable.Open(Path.Combine(folder, "NUM2000.DBF"), writable: true))
         {
@@ -130,6 +138,82 @@ public sealed class ConcurrentEditTests : IDisposable
     }
 }
 
+public sealed class IndexSafetyTests : IDisposable
+{
+    private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-idxsafe-");
+
+    public void Dispose() => _dir.Delete(recursive: true);
+
+    private string Copy(string fixture, string? name = null)
+    {
+        var target = Path.Combine(_dir.FullName, name ?? Path.GetFileName(fixture));
+        File.Copy(Path.Combine(Fixtures.Root, fixture), target);
+        return target;
+    }
+
+    [Fact]
+    public void Another_tables_index_with_the_same_field_names_is_never_written()
+    {
+        // COPY.DBF has BIG.DBF's fields, so BIG1.NDX (STR(ID,8)) looks like it could be COPY's index.
+        var index = Copy("retroinv/BIG1.NDX");
+        Copy("retroinv/BIG.DBF");
+        var copy = Copy("retroinv/BIG.DBF", "COPY.DBF");
+        var before = File.ReadAllBytes(index);
+
+        using (var table = DbfTable.Open(copy, writable: true))
+        {
+            var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        }
+        Assert.Equal(before, File.ReadAllBytes(index));
+
+        // Named explicitly, it's kept up to date.
+        using var owner = DbfTable.Open(Path.Combine(_dir.FullName, "BIG.DBF"), writable: true);
+        owner.MaintainIndex(index);
+        owner.Append(owner.Read(0).Values.ToArray());
+        Assert.NotEqual(before, File.ReadAllBytes(index));
+    }
+
+    [Fact]
+    public void An_index_created_after_the_table_was_opened_blocks_writes()
+    {
+        var path = Copy("retroinv/NUM2000.DBF");
+        using var table = DbfTable.Open(path, writable: true);
+        table.Append(table.Read(0).Values.ToArray()); // no index yet: fine
+
+        Copy("retroinv/NUM2000.NDX"); // the legacy app runs INDEX ON meanwhile
+        var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+    }
+
+    [Fact]
+    public void After_a_failed_index_update_every_write_waits_for_a_rebuild()
+    {
+        foreach (var file in new[] { "CHANGELOG.DBF", "CHANGELOG.DBT", "CHANGELOG.MDX" })
+            Copy(Path.Combine("siemens-step7/siprom", file));
+        var path = Path.Combine(_dir.FullName, "CHANGELOG.DBF");
+        using var table = DbfTable.Open(path, writable: true);
+
+        // Another program loses record 2's USER_TAG entry: the index is now out of step.
+        using (var mdx = MdxIndex.Open(DbfException.OpenFile(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
+        {
+            var tag = mdx["USER_TAG"];
+            Assert.True(tag.Remove(tag.KeyFor(table.Read(1)), 2));
+            mdx.Commit();
+        }
+
+        var values = table.Read(1).Values.ToArray();
+        values[3] = "changed";
+        Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => table.Update(1, values)).Code);
+        Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => table.Delete(0)).Code);
+
+        table.RebuildIndex();
+        table.Delete(0); // writes work again
+        using var check = table.OpenProductionIndex()!;
+        Assert.Equal(2, table.Seek(check["USER_TAG"], "changed")!.RecordNumber);
+    }
+}
+
 internal static class Fixtures
 {
     public static readonly string Root = Find();
@@ -143,5 +227,20 @@ internal static class Fixtures
                 return candidate;
         }
         throw new DirectoryNotFoundException("Couldn't find tests/fixtures above the test output folder.");
+    }
+}
+
+internal static class IndexedTables
+{
+    /// <summary>
+    /// Opens a table writable and keeps every index next to it that belongs to it, the way a legacy
+    /// app's <c>USE TABLE INDEX A, B, C</c> would. Index files named after other tables need naming.
+    /// </summary>
+    public static DbfTable OpenWithIndexes(string path)
+    {
+        var table = DbfTable.Open(path, writable: true);
+        foreach (var index in DbfTable.FindCompanionIndexes(path, table.Header))
+            table.MaintainIndex(index);
+        return table;
     }
 }

@@ -1,0 +1,18 @@
+<!--
+     ___
+    |pkg|      ProjectThunder :: Thunder.Dbf
+    |___|      What every NuGet package gets: the icon, and the README that sits next to its
+               project file, shown on its nuget.org page. Read after each project, so
+               IsPackable is known by now.
+-->
+<Project>
+  <PropertyGroup Condition="'$(IsPackable)' == 'true'">
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup Condition="'$(IsPackable)' == 'true'">
+    <None Include="$(MSBuildThisFileDirectory)docs/images/package-icon.png" Pack="true" PackagePath="icon.png" Visible="false" />
+    <None Include="$(MSBuildProjectDirectory)/README.md" Pack="true" PackagePath="README.md" />
+  </ItemGroup>
+</Project>

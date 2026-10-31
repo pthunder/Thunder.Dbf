@@ -57,3 +57,24 @@ There is no FOR expression, no descending flag and no tag name: the file name is
 ## Seeking
 
 Descend into the first child whose key is ≥ the search key, then step forward through the leaves. A run of equal keys can span pages (`WIDE1.NDX` has eight), so a seek has to keep walking past a page boundary.
+
+## Writing
+
+A table opened writable with `DbfTable.Open(path, writable: true)` finds every `.ndx` next to it whose key expression names only its fields, opens it read-write and keeps it in step with each append, update, delete and recall. `RebuildIndex()` rebuilds it like dBASE's `REINDEX`. (Thunder.Dbf can't create a new `.ndx`; make it in dBASE with `INDEX ON`.)
+
+What gets written:
+
+- **Keys** exactly as dBASE III stores them: character keys in the table's code page, cut or space padded to the key length; numbers as IEEE doubles; dates as Julian-day doubles, a blank date as 0. Every key in the eight dBASE III Plus fixtures is rebuilt byte for byte from its table.
+- **Every record** gets a key: there's no FOR filter, and deleted records stay in the index, as in dBASE III. A delete or recall leaves the keys alone.
+- **Unique indexes** (byte 23 set) keep one entry per key, for the lowest-numbered record that has it, which is what `INDEX ON ... UNIQUE` would choose. When that record changes key, the next lowest takes its place.
+- **Equal keys** go after the ones already there. dBASE doesn't define an order among equal keys.
+
+Pages:
+
+- **Splits:** a page that overflows its keys-per-page splits in half and the new right half goes at the end of the file. The parent gains the left half's last key as the separator for the left half, and the old separator moves to the new right half. A full root splits too, and a new root grows above it. Leaves and inner pages keep the layout above: inner items have record number 0, and the rightmost child sits alone in the slot after the last key.
+- **Removing:** a key leaves its leaf; a page that empties leaves its parent, and the parent goes too if that leaves it with no children. Pages are never merged. Emptied pages stay in the file, out of the tree, as dBASE III leaves them. A separator larger than the real last key under it still routes seeks correctly, so it isn't touched. An inner root left with one child hands the root to that child.
+- **New pages** always come from the end of the file, never from emptied ones, so a damaged pointer can't make a write overwrite a live page.
+
+Header fields updated: the **root page** (offset 0) when the root splits or collapses, and the **page count** (offset 4) on every new page and every commit, set from the file's real length, since dBASE III allocates its next page from it. Everything else in the header (key length, keys per page, key type, item length, unique flag, the expression and the stray bytes after it) is left exactly as dBASE wrote it, also by a rebuild. A rebuild truncates the file to its header and starts again from one empty leaf, so the file shrinks.
+
+Damage: every page read during a write is checked (page inside the file, not the header, key count no more than keys per page, record numbers non-zero), the descent is limited to 32 levels, and a removal visits each page at most once. A damaged index stops the write with `IndexDamaged`; it never loops. An `.ndx` whose header can't be read can't be kept up to date, so it blocks writes with `IndexWouldGoStale` instead.

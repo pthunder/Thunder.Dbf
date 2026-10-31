@@ -25,7 +25,12 @@ public sealed record DbfDatabaseOptions
     /// <summary>Text encoding for every table, overriding what each table's header or .cpg says.</summary>
     public Encoding? Encoding { get; init; }
 
+    /// <summary>Read memo fields as null when a table's memo file is missing, instead of failing.</summary>
     public bool IgnoreMissingMemo { get; init; }
+    /// <summary>
+    /// Allow writes to tables with a production .mdx or structural .cdx that Thunder.Dbf can't keep
+    /// up to date. Off by default, because those indexes go stale until something rebuilds them.
+    /// </summary>
     public bool AllowUnmaintainedIndexes { get; init; }
 
     /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
@@ -45,8 +50,11 @@ public sealed class DbfDatabase : IDisposable
         Options = options;
     }
 
+    /// <summary>The full path of the folder the tables live in.</summary>
     public string Folder { get; }
+    /// <summary>The options the database was opened with.</summary>
     public DbfDatabaseOptions Options { get; }
+    /// <summary>True unless the database was opened for writing.</summary>
     public bool ReadOnly => Options.ReadOnly;
 
     /// <summary>
@@ -152,6 +160,7 @@ public sealed class DbfDatabase : IDisposable
         return new DbfCheckReport(Folder, ReadOnly, timer.Elapsed, reports);
     }
 
+    /// <inheritdoc />
     public void Dispose()
     {
         foreach (var table in _open.Values)
@@ -280,8 +289,23 @@ public sealed class DbfDatabase : IDisposable
                     indexDamaged = true;
                 }
             }
+            var cdxMaintained = false;
             if (table.Header.HasStructuralCdx)
-                warnings.Add("The table has a FoxPro .cdx index. It can be read, but not yet kept up to date, so writes are refused unless AllowUnmaintainedIndexes is set.");
+            {
+                try
+                {
+                    if (CdxIndex.FindFor(path) is not { } cdxPath)
+                        warnings.Add("The header says there's a structural .cdx index, but no .cdx file is next to the table.");
+                    else if (CdxIndex.WhyNotMaintainable(cdxPath, table) is { } refusal)
+                        warnings.Add($"The table's FoxPro .cdx index can be read but not kept up to date: {refusal}");
+                    else
+                        cdxMaintained = true;
+                }
+                catch (Exception ex) when (ex is InvalidDataException or NotSupportedException or IOException)
+                {
+                    warnings.Add("The table's FoxPro .cdx index can't be read, so writes would leave it out of date.");
+                }
+            }
 
             if (!Options.ReadOnly)
             {
@@ -289,7 +313,8 @@ public sealed class DbfDatabase : IDisposable
                 // unfinished-transaction refusal, and the memo and index files are writable too.
                 var mdx = table.Header.HasProductionMdx ? MdxIndex.FindFor(path) : null;
                 var blocker = DbfTable.WriteBlocker(table.Header, Options.AllowUnmaintainedIndexes,
-                    indexMaintained: mdx is not null && !indexDamaged, path, DbfTable.FindUnmaintainedIndexes(path, table.Header));
+                    indexMaintained: mdx is not null && !indexDamaged, path, DbfTable.FindUnmaintainedIndexes(path, table.Header),
+                    structuralCdxMaintained: cdxMaintained);
                 if (blocker is not null)
                     warnings.Add($"Writes will be refused: {blocker.Message}");
                 canWrite = blocker is null && !indexDamaged && ProbeWrite(path, problems)
@@ -441,8 +466,10 @@ public sealed record DbfTableReport(
 /// <summary>The result of <see cref="DbfDatabase.Check"/>.</summary>
 public sealed record DbfCheckReport(string Folder, bool ReadOnly, TimeSpan Elapsed, IReadOnlyList<DbfTableReport> Tables)
 {
+    /// <summary>True when every table opened without a problem.</summary>
     public bool Ok => Tables.All(t => t.Problems.Count == 0);
 
+    /// <summary>Every problem found, across all tables.</summary>
     public IEnumerable<DbfException> Problems => Tables.SelectMany(t => t.Problems);
 
     /// <summary>A plain-text summary for logs or a "Test connection" dialog.</summary>

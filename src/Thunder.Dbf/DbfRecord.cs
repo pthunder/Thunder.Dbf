@@ -39,10 +39,14 @@ public sealed class DbfRecord
     /// <summary>True when the record is marked deleted ('*') but not yet packed away.</summary>
     public bool IsDeleted { get; }
 
+    /// <summary>The field values, in field order.</summary>
     public IReadOnlyList<object?> Values => _values;
 
+    /// <summary>The value of the field at <paramref name="fieldIndex"/>.</summary>
     public object? this[int fieldIndex] => _values[fieldIndex];
 
+    /// <summary>The value of the field called <paramref name="fieldName"/>, in any case.</summary>
+    /// <exception cref="KeyNotFoundException">The table has no such field.</exception>
     public object? this[string fieldName]
     {
         get

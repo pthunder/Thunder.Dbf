@@ -47,19 +47,35 @@ public sealed partial class CdxIndex : IMaintainedIndex
     private bool OpenedForWriting => _stream is FileStream { CanWrite: true } && _table?.FilePath is not null;
 
     IEnumerable<IMaintainedTag> IMaintainedIndex.MaintainedTags => Tags;
+    bool IMaintainedIndex.CanMaintain => MaintainRefusal is null;
     void IMaintainedIndex.ReloadTags() => ReloadTags();
     void IMaintainedIndex.Commit() => Commit();
+
+    /// <summary>
+    /// Why this index can't be kept exactly as FoxPro would keep it, or null when it can (or wasn't
+    /// opened for writing). The table then refuses writes rather than attach it.
+    /// </summary>
+    internal string? MaintainRefusal { get; private set; }
+
+    /// <summary>
+    /// Opens the index read-only and works out whether a writable table could keep it up to date:
+    /// the reason it couldn't, or null. For <see cref="DbfDatabase.Check"/>, which mustn't promise
+    /// what writes would refuse.
+    /// </summary>
+    internal static string? WhyNotMaintainable(string path, DbfTable table)
+    {
+        using var index = Open(path, table.Encoding, table);
+        index.PrepareForWriting();
+        return index.MaintainRefusal;
+    }
 
     // Opening for writing: an index that can't be kept exactly as FoxPro would keep it is refused as
     // a whole, so the table treats it like any other index it can't maintain (writes are blocked,
     // unless the caller allowed unmaintained indexes and will REINDEX in FoxPro).
-    private void PrepareForWriting()
-    {
-        if (OwnedByAnotherTable())
-            throw new NotSupportedException("This index is named after another table next to it, so it isn't this table's to update.");
-        if (FirstRefusal() is { } reason)
-            throw new NotSupportedException(reason);
-    }
+    private void PrepareForWriting() =>
+        MaintainRefusal = OwnedByAnotherTable()
+            ? "This index is named after another table next to it, so it isn't this table's to update."
+            : FirstRefusal();
 
     // A .cdx or .idx that shares its name with a different .dbf belongs to that table, even when its
     // expressions happen to name fields this table also has. Updating it from this table's rows
@@ -98,7 +114,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         if (FirstRefusal() is { } reason)
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"{reason} Writing would leave the FoxPro index out of date.",
                 "Rebuild the tag in FoxPro with MACHINE collation, or open with allowUnmaintainedIndexes: true only if it will be rebuilt (REINDEX) before it's used.",
-                _table.FilePath);
+                _table?.FilePath);
     }
 
     /// <summary>Bumps the update counter (so other programs drop their cached pages) and pushes everything to disk.</summary>
@@ -107,7 +123,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         if (_changed)
         {
             // Harbour keeps this big-endian counter in the file's first header and compares it to
-            // spot changes made by other processes; FoxPro leaves it alone.
+            // spot changes made by other processes; FoxPro's documentation calls it reserved.
             Span<byte> counter = stackalloc byte[4];
             _stream.Position = CounterOffset;
             _stream.ReadExactly(counter);

@@ -1,6 +1,8 @@
 <!--
   ProjectThunder :: Thunder.Dbf
   Settings and package metadata shared by every project in the repository.
+  Packaging that only applies to packable projects lives in Directory.Build.targets,
+  because IsPackable is set by each project after this file is read.
 -->
 <Project>
   <PropertyGroup>
@@ -18,5 +20,21 @@
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
     <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    Reproducible, debuggable packages. Source Link ships in the .NET SDK (8 and later) and maps
+    the PDBs to this commit on GitHub, so no Microsoft.SourceLink.GitHub reference is needed.
+  -->
+  <PropertyGroup>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- On CI, paths in PDBs are normalized so the same commit always builds the same bytes. -->
+  <PropertyGroup Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ContinuousIntegrationBuild>true</ContinuousIntegrationBuild>
   </PropertyGroup>
 </Project>

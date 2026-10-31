@@ -294,7 +294,7 @@ public static partial class TableEndpoints
 
     // A table the key can't read answers exactly like one that doesn't exist, so a key can't probe
     // for table names. Only keys allowed to list tables get the list as a hint.
-    private static (KeyAccess Key, string Table) Resolve(HttpContext http, string name, AccessRegistry registry, TableStore store)
+    internal static (KeyAccess Key, string Table) Resolve(HttpContext http, string name, AccessRegistry registry, TableStore store)
     {
         var key = registry.For(http.User);
         var table = store.Find(name);
