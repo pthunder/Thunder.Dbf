@@ -115,44 +115,89 @@ public sealed partial class CdxIndex : IMaintainedIndex
             MaintainRefusal = "This index is named after another table next to it, so it isn't this table's to update.";
             return;
         }
-        // The whole tree is walked without holding Visual FoxPro's index lock, which would stop every
-        // VFP user for as long as a big index takes to read. Then, briefly under the lock, the update
-        // counter (bumped under that lock by VFP and Thunder.Dbf alike) and the record count must be
-        // what they were before the walk; otherwise another program changed something meanwhile and
-        // the walk is repeated. Keys out of step with the table can also be another program between
-        // writing a record and adding its keys, so that result gets a moment to settle too.
+        // The check can do without a lock it can't get quickly (the first write checks again), so it
+        // doesn't wait the table's full lock timeout for one.
+        var savedTimeout = _table?.Locks.Timeout;
+        if (_table is not null && _table.Locks.Timeout > CheckLockWait)
+            _table.Locks.Timeout = CheckLockWait;
+        try
+        {
+            Check();
+        }
+        finally
+        {
+            if (_table is not null && savedTimeout is { } timeout)
+                _table.Locks.Timeout = timeout;
+        }
+    }
+
+    private static readonly TimeSpan CheckLockWait = TimeSpan.FromMilliseconds(250);
+
+    // The whole tree is first walked without holding Visual FoxPro's index lock, which would stop
+    // every VFP user for as long as a big index takes to read. Then, briefly under the table's
+    // header lock (VFP appends under it, record, count and keys together) and the index lock, the
+    // update counter and the record count must be what they were before the walk; otherwise
+    // another program changed something meanwhile. On a table that's never quiet that could go on
+    // for ever, so after two such tries the walk itself runs under both locks: other users wait
+    // for it, as they wait for any write. Keys out of step with the table get a moment to settle.
+    private void Check()
+    {
         for (var attempt = 1; ; attempt++)
         {
             _outOfStep = false;
-            var before = CurrentState();
-            var records = ReloadRecordCount();
+            var underLock = attempt > OptimisticAttempts && OpenedForWriting;
             string? refusal = null;
             ExceptionDispatchInfo? damage = null;
-            try
+            bool settled, locked;
+
+            void Walk()
             {
-                CheckPageOwnership();
-                refusal = FirstRefusal();
-            }
-            catch (InvalidDataException ex)
-            {
-                damage = ExceptionDispatchInfo.Capture(ex);
+                try
+                {
+                    CheckPageOwnership();
+                    refusal = FirstRefusal();
+                }
+                catch (InvalidDataException ex)
+                {
+                    damage = ExceptionDispatchInfo.Capture(ex);
+                }
             }
 
-            // Visual FoxPro appends under the table's header lock, record, count and keys together, so
-            // with that lock held (before the index lock, as writes take them) no append is half done.
-            bool settled, locked;
-            using (var header = TryTakeTableHeaderLock(out var headerBusy))
-            using (var held = headerBusy ? null : TryTakeIndexLock())
+            if (underLock)
             {
+                using var header = TryTakeTableHeaderLock(out var headerBusy);
+                using var held = headerBusy ? null : TryTakeIndexLock();
+                settled = !headerBusy && held is not null;
+                locked = settled;
+                if (settled)
+                {
+                    ReloadRecordCount();
+                    Walk();
+                }
+            }
+            else
+            {
+                var before = CurrentState();
+                var records = ReloadRecordCount();
+                Walk();
+                using var header = TryTakeTableHeaderLock(out var headerBusy);
+                using var held = headerBusy ? null : TryTakeIndexLock();
                 locked = held is not null && (header is not null || !OpenedForWriting);
                 settled = !headerBusy && CurrentState() == before && ReloadRecordCount() == records;
             }
+
             if (!settled)
             {
                 _verifiedTags.Clear();
                 if (attempt < OutOfStepAttempts)
                     continue;
-                MaintainRefusal = "the index kept changing while it was being checked (another program is busy writing to the table); reopen the table to try again.";
+                // Never quiet, and the locks never free for long enough: other users keep them busy.
+                // A table opened for writing is taken on trust for now; its first write, which must
+                // hold the header and index locks anyway, checks every tag in full first (nothing is
+                // in _verifiedTags), and refuses then if anything's wrong.
+                MaintainRefusal = OpenedForWriting
+                    ? null
+                    : "the index kept changing while it was being checked (another program is busy writing to the table); check again when it's quieter.";
                 return;
             }
             damage?.Throw();
@@ -166,6 +211,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
             Thread.Sleep(OutOfStepPause);
         }
     }
+
+    private const int OptimisticAttempts = 2;
 
     private int ReloadRecordCount()
     {
