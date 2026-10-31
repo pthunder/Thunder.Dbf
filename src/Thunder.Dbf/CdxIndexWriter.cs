@@ -76,6 +76,43 @@ public sealed partial class CdxIndex : IMaintainedIndex
     private DbfLock? _held;
     private bool _holdFailed;
 
+    // Tree nodes as this process last read or wrote them, by page offset, with the tag they belong to.
+    // Used only while Unchanged: inside a locked change that began with the file exactly as this
+    // process left it, so no other program has written a page since they were cached. Every page
+    // write here drops the copy of that page (WriteNode then caches what it wrote); anything else
+    // (another program's change, a failed change, a reload, a change outside a locked one) empties it.
+    private readonly Dictionary<long, (CdxTag Owner, object Node)> _nodes = [];
+    private const int MaxCachedNodes = 2048;
+
+    internal object? CachedNode(long offset, CdxTag owner) =>
+        Unchanged && _nodes.TryGetValue(offset, out var hit) && hit.Owner == owner ? hit.Node : null;
+
+    internal void CacheNode(long offset, CdxTag owner, object node)
+    {
+        if (!Unchanged)
+            return;
+        if (_nodes.Count >= MaxCachedNodes)
+            _nodes.Clear();
+        _nodes[offset] = (owner, node);
+    }
+
+    // The update counter while this process holds the index lock: nobody else can change it then,
+    // so it's bumped from here rather than read back first.
+    private uint? _lockedCounter;
+
+    // Taking the index lock: the file's state, and whether it's exactly as this process left it.
+    private (long Length, uint Counter) BeginLockedChange()
+    {
+        var state = CurrentState();
+        _lockedCounter = state.Counter;
+        if (_checkedState != state)
+            CheckPageOwnership();
+        Unchanged = _ourState == state;
+        if (!Unchanged)
+            _nodes.Clear();
+        return state;
+    }
+
     /// <summary>The table the index was opened with, whose records its keys are built from.</summary>
     internal DbfTable? Table => _table;
 
@@ -110,14 +147,13 @@ public sealed partial class CdxIndex : IMaintainedIndex
         var held = TakeIndexLock();
         try
         {
-            var state = CurrentState();
-            if (_checkedState != state)
-                CheckPageOwnership();
-            Unchanged = _ourState == state;
+            BeginLockedChange();
         }
         catch
         {
             Unchanged = false;
+            _lockedCounter = null;
+            _nodes.Clear();
             held.Dispose();
             throw;
         }
@@ -165,22 +201,26 @@ public sealed partial class CdxIndex : IMaintainedIndex
             _stream.Flush();
             if (succeeded)
             {
-                _checkedState = CurrentState(); // this change left every page with one owner
+                // Under the lock the length and counter are this process's own: no need to read them back.
+                _checkedState = _lockedCounter is { } counter ? (FileLength(), counter) : CurrentState(); // this change left every page with one owner
                 _ourState = Unchanged ? _checkedState : null;
             }
             else
             {
                 _ourState = null;
+                _nodes.Clear();
             }
         }
         catch
         {
             _ourState = null;
+            _nodes.Clear();
             throw;
         }
         finally
         {
             Unchanged = false;
+            _lockedCounter = null;
         }
     }
 
@@ -412,6 +452,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
             if (_ourState == state && MaintainRefusal is null)
                 return;
             _ourState = null;
+            _nodes.Clear();
             try
             {
                 Tags = LoadTags();
@@ -476,10 +517,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         var succeeded = false;
         try
         {
-            var state = CurrentState();
-            if (_checkedState != state)
-                CheckPageOwnership();
-            Unchanged = _ourState == state;
+            BeginLockedChange();
             if (!Unchanged)
                 tag.CheckLayoutUnchanged();
             var result = change();
@@ -500,6 +538,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         {
             // Changes made outside a locked change (creating a tag): the tags are reloaded and checked before the next write.
             _ourState = null;
+            _nodes.Clear();
             BumpCounter();
         }
         DbfTable.FlushToDisk(_stream, toDisk);
@@ -510,10 +549,21 @@ public sealed partial class CdxIndex : IMaintainedIndex
     private void BumpCounter()
     {
         Span<byte> counter = stackalloc byte[4];
-        DbfTable.DiscardReadBuffer(_stream);
-        _stream.Position = CounterOffset;
-        _stream.ReadExactly(counter);
-        BinaryPrimitives.WriteUInt32BigEndian(counter, unchecked(BinaryPrimitives.ReadUInt32BigEndian(counter) + 1));
+        uint next;
+        if (_lockedCounter is { } known)
+        {
+            next = unchecked(known + 1);
+        }
+        else
+        {
+            DbfTable.DiscardReadBuffer(_stream);
+            _stream.Position = CounterOffset;
+            _stream.ReadExactly(counter);
+            next = unchecked(BinaryPrimitives.ReadUInt32BigEndian(counter) + 1);
+        }
+        if (_lockedCounter is not null)
+            _lockedCounter = next;
+        BinaryPrimitives.WriteUInt32BigEndian(counter, next);
         _stream.Position = CounterOffset;
         _stream.Write(counter);
         _changed = false;
@@ -582,6 +632,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
             BumpCounter();
             _stream.Flush();
         }
+        for (var page = offset - offset % DefaultPageLength; page < offset + bytes.Length; page += DefaultPageLength)
+            _nodes.Remove(page);
         _stream.Position = offset;
         _stream.Write(bytes);
         _changed = true;
@@ -1136,9 +1188,24 @@ public sealed partial class CdxTag : IMaintainedTag
         public List<byte[]> Keys = [];
         public List<int> Records = [];
         public List<uint>? Children; // null for a leaf
+        public bool InByteOrder;     // its keys were checked to be in byte order, or written here in it
 
         public bool IsLeaf => Children is null;
         public int Count => Keys.Count;
+
+        // Callers change a node's lists in place, so the cache hands out and keeps copies. The key
+        // arrays themselves are never changed, only replaced, so they're shared.
+        public Node Copy() => new()
+        {
+            Offset = Offset,
+            Attributes = Attributes,
+            Left = Left,
+            Right = Right,
+            Keys = new List<byte[]>(Keys),
+            Records = new List<int>(Records),
+            Children = Children is null ? null : new List<uint>(Children),
+            InByteOrder = InByteOrder,
+        };
     }
 
     private const ushort RootAttribute = 0x01;
@@ -1146,6 +1213,28 @@ public sealed partial class CdxTag : IMaintainedTag
     private int MaxInteriorKeys => (PageLength - InteriorHeaderLength) / (KeyLength + 8);
 
     private Node ReadNode(long offset, bool inByteOrder = false)
+    {
+        if (_index.CachedNode(offset, this) is Node cached)
+        {
+            if (inByteOrder && !cached.InByteOrder)
+            {
+                CheckByteOrder(cached);
+                cached.InByteOrder = true;
+            }
+            return cached.Copy();
+        }
+
+        var node = DecodeNode(offset);
+        if (inByteOrder)
+        {
+            CheckByteOrder(node);
+            node.InByteOrder = true;
+        }
+        _index.CacheNode(offset, this, node.Copy());
+        return node;
+    }
+
+    private Node DecodeNode(long offset)
     {
         var page = _index.Read(offset, PageLength);
         var attributes = BinaryPrimitives.ReadUInt16LittleEndian(page);
@@ -1184,14 +1273,28 @@ public sealed partial class CdxTag : IMaintainedTag
             }
         }
 
-        // Changes are placed by byte order, so changing a node in any other order (X# sorts some tags
-        // case-blind without saying so) would scramble it. Reading for a rebuild needs no order.
-        for (var i = 1; inByteOrder && i < node.Count; i++)
+        return node;
+    }
+
+    private static bool IsInByteOrder(Node node)
+    {
+        for (var i = 1; i < node.Count; i++)
         {
             if (node.Keys[i - 1].AsSpan().SequenceCompareTo(node.Keys[i]) > 0)
-                throw new InvalidDataException($"Tag {Name}'s keys at offset {offset} aren't in byte order; it was sorted by a collation this code doesn't reproduce. Rebuild it with RebuildIndex (or REINDEX with MACHINE collation in FoxPro).");
+                return false;
         }
-        return node;
+        return true;
+    }
+
+    // Changes are placed by byte order, so changing a node in any other order (X# sorts some tags
+    // case-blind without saying so) would scramble it. Reading for a rebuild needs no order.
+    private void CheckByteOrder(Node node)
+    {
+        for (var i = 1; i < node.Count; i++)
+        {
+            if (node.Keys[i - 1].AsSpan().SequenceCompareTo(node.Keys[i]) > 0)
+                throw new InvalidDataException($"Tag {Name}'s keys at offset {node.Offset} aren't in byte order; it was sorted by a collation this code doesn't reproduce. Rebuild it with RebuildIndex (or REINDEX with MACHINE collation in FoxPro).");
+        }
     }
 
     private Node ReadChild(uint offset, HashSet<long> visited)
@@ -1208,6 +1311,11 @@ public sealed partial class CdxTag : IMaintainedTag
     {
         var page = encoded ?? (node.IsLeaf ? EncodeLeaf(node) : EncodeInterior(node));
         _index.Write(node.Offset, page ?? throw new InvalidOperationException($"Tag {Name}'s page at offset {node.Offset} doesn't fit."));
+        // What was just written, as a reader would decode it. Byte order is only vouched for when it
+        // was checked (or the change began from checked nodes): a rebuild's reads skip the check.
+        var written = node.Copy();
+        written.InByteOrder = IsInByteOrder(written);
+        _index.CacheNode(node.Offset, this, written);
     }
 
     private byte[]? EncodeInterior(Node node)

@@ -334,7 +334,10 @@ public sealed partial class DbfTable : IDisposable
             IDbfIndex? index = null;
             try
             {
-                stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                // A .cdx is read and written a page at a time, and every read must see what other programs
+                // wrote: unbuffered, a read doesn't first push this process's buffered writes out.
+                var pagedIndex = Path.GetExtension(file).ToLowerInvariant() is ".cdx" or ".idx";
+                stream = DbfException.OpenFile(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, bufferSize: pagedIndex ? 0 : 4096);
                 index = OpenAnyIndex(file, stream, Encoding, this);
                 if (index is IMaintainedIndex maintained
                     && (maintained.CanMaintain || ((acceptAfterRebuild || forJournal) && maintained.CanMaintainAfterRebuild)))

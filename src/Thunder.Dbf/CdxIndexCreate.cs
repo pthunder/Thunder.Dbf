@@ -155,6 +155,7 @@ public sealed partial class CdxIndex
             {
                 _stream.SetLength(originalLength);
                 _knownLength = originalLength;
+                _nodes.Clear();
                 DbfTable.FlushToDisk(_stream);
             }
             throw;
