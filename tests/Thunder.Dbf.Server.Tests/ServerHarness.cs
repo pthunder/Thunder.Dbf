@@ -9,7 +9,9 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Thunder.Dbf.Server.Tests;
 
@@ -91,7 +93,8 @@ public sealed class ServerHarness : IDisposable
     };
 
     /// <summary>A client for a server built from <see cref="BaseSettings"/>, adjusted by <paramref name="adjust"/>.</summary>
-    public HttpClient Client(string? apiKey = null, Action<Dictionary<string, string?>>? adjust = null, bool readOnly = false)
+    public HttpClient Client(string? apiKey = null, Action<Dictionary<string, string?>>? adjust = null, bool readOnly = false,
+        Action<IServiceCollection>? services = null)
     {
         var settings = BaseSettings(readOnly);
         adjust?.Invoke(settings);
@@ -103,6 +106,8 @@ public sealed class ServerHarness : IDisposable
         {
             host.UseEnvironment("Development");
             host.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(settings));
+            if (services is not null)
+                host.ConfigureTestServices(services);
         });
 
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });

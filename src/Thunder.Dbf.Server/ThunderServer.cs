@@ -1,15 +1,15 @@
 //    request ──> [ exceptions -> ProblemDetails ]      ProjectThunder :: Thunder.Dbf
 //                [ HTTPS (in production)        ]      The pipeline, outside in. A request
 //                [ rate limit, per address      ]      gets a ProblemDetails back from any
-//                [ who are you? (X-Api-Key)     ]      layer that turns it away, and only
-//                [ rate limit, per key          ]      reaches a table once it's through
-//                [ may you? (authenticated)     ]      every one of them.
+//                [ one credential, not two      ]      layer that turns it away, and only
+//                [ who are you? (key or token)  ]      reaches a table once it's through
+//                [ rate limit, per key or user  ]      every one of them.
+//                [ may you? (authenticated)     ]
 //                [ /tables/... ──> TableStore   ]
 
 using System.Text.Encodings.Web;
 using System.Text.Unicode;
 using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Options;
@@ -47,6 +47,7 @@ public static class ThunderServer
             app.UseHttpsRedirection();
         }
         app.UseRateLimiter(); // per address first (before any key is hashed), then per key after authentication
+        app.Use(OidcAuthentication.RefuseTwoCredentials);
         app.UseAuthentication();
         app.UseMiddleware<PerKeyRateLimit>();
         app.UseAuthorization();
@@ -80,10 +81,9 @@ public static class ThunderServer
         });
         services.AddExceptionHandler<ProblemExceptionHandler>();
 
-        // API keys today. An OpenID Connect scheme can be added beside this one later; permissions
-        // come from AccessRegistry by key id, so endpoints won't need to change.
-        services.AddAuthentication(ApiKeyAuthentication.SchemeName)
-            .AddScheme<AuthenticationSchemeOptions, ApiKeyAuthentication>(ApiKeyAuthentication.SchemeName, null);
+        // API keys, and OpenID Connect bearer tokens when configured. Permissions come from
+        // AccessRegistry by caller, so endpoints don't care which one was used.
+        services.AddThunderAuthentication();
         services.AddAuthorization(options =>
             options.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build());
 
@@ -113,7 +113,8 @@ public static class ThunderServer
         });
     }
 
-    // Fixed one-minute windows: per key once authenticated, per address before (which slows down key guessing).
+    // Fixed one-minute windows: per key (or per signed-in user, as oidc:<sub>) once authenticated,
+    // per address before (which slows down key guessing).
     internal static RateLimitPartition<string> PartitionFor(HttpContext http)
     {
         var limits = http.RequestServices.GetRequiredService<IOptions<ThunderOptions>>().Value.RateLimit;
@@ -146,11 +147,14 @@ public static class ThunderServer
             store.Folder, store.TableNames.Count,
             writable.Count == 0 ? "read-only" : $"writes allowed to {string.Join(", ", writable)}",
             options.ApiKeys.Count);
+        if (options.OpenIdConnect.Enabled)
+            logger.LogInformation("OpenID Connect sign-in from {Authority} for audience {Audience}: {Profiles} profile(s), {Rules} mapping rule(s).",
+                options.OpenIdConnect.Authority, options.OpenIdConnect.Audience, options.OpenIdConnect.Profiles.Count, options.OpenIdConnect.Map.Count);
         logger.LogInformation("Write journal: {Journal}. Backups: {Backups}.", journal.Path, store.BackupFolder);
 
         if (IsInside(journal.Path, store.Folder) || IsInside(store.BackupFolder, store.Folder))
             logger.LogWarning("The journal or backup folder is inside the data folder. Keep them outside it, so the legacy app's own backups and cleanups don't touch them.");
-        if (options.ApiKeys.Count == 0)
+        if (options.ApiKeys.Count == 0 && !options.OpenIdConnect.Enabled)
             logger.LogWarning("No API keys are configured, so every request to /tables will get 401. Run 'thunder-dbf-server hash-key' to make one.");
     }
 
@@ -170,7 +174,7 @@ internal sealed class PerKeyRateLimit(RequestDelegate next, PartitionedRateLimit
         if (!lease.IsAcquired)
         {
             var keyed = http.User.FindFirst(ApiKeyAuthentication.KeyIdClaim) is not null;
-            await RejectAsync(http, lease, keyed ? "This key has used its requests for the minute." : "Too many requests without a valid key from this address.");
+            await RejectAsync(http, lease, keyed ? "This key or user has used its requests for the minute." : "Too many requests without a valid key from this address.");
             return;
         }
         await next(http);
