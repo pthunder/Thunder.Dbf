@@ -22,9 +22,9 @@
   <rect width="1280" height="640" fill="url(#grid)"/>
   <!-- a dBASE BROWSE header row, faded -->
   <g font-family="Menlo, Consolas, monospace" font-size="18" fill="#7f9cf5" fill-opacity=".35">
-    <text x="16" y="27">CONTACT</text><text x="176" y="27">COMPANY</text><text x="336" y="27">CITY</text>
-    <text x="496" y="27">PHONE1</text><text x="656" y="27">LASTDATE</text><text x="816" y="27">KEY1</text>
-    <text x="976" y="27">RECNO()</text><text x="1136" y="27">DELETED()</text>
+    <text x="56" y="56">CONTACT</text><text x="216" y="56">COMPANY</text><text x="376" y="56">CITY</text>
+    <text x="536" y="56">PHONE1</text><text x="696" y="56">LASTDATE</text><text x="856" y="56">KEY1</text>
+    <text x="1016" y="56">RECNO()</text>
   </g>
   <circle cx="300" cy="330" r="190" fill="#ffd23f" fill-opacity=".07"/>
   <circle cx="300" cy="330" r="150" fill="none" stroke="#ffd23f" stroke-opacity=".35" stroke-width="3"/>
@@ -35,12 +35,12 @@
     <text x="544" y="350" font-size="31" fill="#c9d6ff">Safe, modern apps on legacy dBASE and</text>
     <text x="544" y="390" font-size="31" fill="#c9d6ff">FoxPro data, while the old app keeps running.</text>
   </g>
-  <g font-family="Menlo, Consolas, monospace" font-size="19">
-    <rect x="544" y="430" width="316" height="44" rx="22" fill="#ffd23f" fill-opacity=".14" stroke="#ffd23f" stroke-opacity=".6"/>
-    <text x="702" y="458" text-anchor="middle" fill="#ffe680">dBASE · FoxPro · Clipper</text>
-    <rect x="874" y="430" width="350" height="44" rx="22" fill="#7f9cf5" fill-opacity=".14" stroke="#7f9cf5" stroke-opacity=".6"/>
-    <text x="1049" y="458" text-anchor="middle" fill="#c9d6ff">.NET 10 · Win · Linux · Mac</text>
+  <g font-family="Menlo, Consolas, monospace" font-size="18">
+    <rect x="544" y="430" width="304" height="44" rx="22" fill="#ffd23f" fill-opacity=".14" stroke="#ffd23f" stroke-opacity=".6"/>
+    <text x="696" y="458" text-anchor="middle" fill="#ffe680">dBASE · FoxPro · Clipper</text>
+    <rect x="864" y="430" width="324" height="44" rx="22" fill="#7f9cf5" fill-opacity=".14" stroke="#7f9cf5" stroke-opacity=".6"/>
+    <text x="1026" y="458" text-anchor="middle" fill="#c9d6ff">.NET 10 · Win · Linux · Mac</text>
   </g>
-  <text x="1240" y="606" text-anchor="end" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="22"
+  <text x="1188" y="584" text-anchor="end" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="22"
         fill="#8fa3d9">a <tspan font-weight="700" fill="#ffffff">ProjectThunder</tspan> joint</text>
 </svg>
