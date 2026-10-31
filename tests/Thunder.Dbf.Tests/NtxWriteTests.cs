@@ -149,6 +149,44 @@ public sealed class NtxWriteTests : IDisposable
         Assert.Contains(lastRecord.RecordNumber, hired.Tag.SeekExact(lastRecord["HIREDATE"]).Select(e => e.RecordNumber));
     }
 
+    // Real files hold dozens of keys a page, so a test-sized table never empties an inner page. With
+    // the header's max keys cut to 2 and 4 (the format allows it; the page layout follows the header),
+    // a few hundred keys make trees five or more levels deep, and random moves borrow and merge at
+    // every level.
+    [Fact]
+    public void Tiny_pages_exercise_every_split_borrow_and_merge()
+    {
+        var path = CopyCustomers();
+        foreach (var (name, maxKeys) in new[] { ("Custname.ntx", 2), ("Custnum.ntx", 4) })
+        {
+            EditHeader(name, header =>
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(18), (ushort)maxKeys);
+                BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(20), (ushort)(maxKeys / 2));
+            });
+        }
+
+        var random = new Random(2024);
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.RebuildIndex();
+            table.AppendRange(Enumerable.Range(0, 250).Select(i => Customer(table, random.Next(1, 2000), $"F{random.Next(40):D2}", $"L{random.Next(40):D2}")));
+            Assert.True(RawTree.Read(File.ReadAllBytes(Path.Combine(_dir.FullName, "Custname.ntx"))).Height >= 5);
+
+            for (var step = 0; step < 250; step++)
+            {
+                var pick = random.Next(table.RecordCount);
+                var values = table.Read(pick).Values.ToArray();
+                values[Field(table, "CUSTNUM")] = (decimal)(step < 150 ? 5000 + step : random.Next(1, 2000));
+                values[Field(table, "LASTNAME")] = step < 150 ? "ZZ" : $"L{random.Next(40):D2}";
+                table.Update(pick, values);
+            }
+        }
+
+        AssertIndexesMatchTable(path);
+        Assert.All(IndexFiles(), file => Assert.NotEmpty(RawTree.Read(File.ReadAllBytes(file)).FreePages));
+    }
+
     // Moving most keys to one end of the tree empties pages all over it: they must borrow from a
     // sibling or merge with it, and the pages that go must end up on the free list, not lost.
     [Fact]
