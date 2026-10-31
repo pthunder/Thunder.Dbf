@@ -524,6 +524,33 @@ public sealed partial class CdxWriteTests
         Assert.Empty(index["CALL_ID"].SeekExact(9001));
     }
 
+    // Found in the Visual FoxPro office runs: with other users writing all the time, the open-time
+    // check never saw the index hold still and gave up. After two tries it walks under the locks, and
+    // if even those stay busy, the first write checks the index in full under its own locks.
+    [Fact]
+    public void A_table_another_writer_never_stops_changing_still_opens_for_writing()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using var stop = new CancellationTokenSource();
+        var busy = Task.Run(() =>
+        {
+            using var writer = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+            var template = writer.Read(0).Values.ToArray();
+            for (var i = 0; !stop.IsCancellationRequested; i++)
+                writer.Append(Call(template, id: 500_000 + i, contact: i % 7, subject: $"busy {i}"));
+        });
+        Thread.Sleep(300);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true))
+        {
+            Assert.True(table.MaintainsIndex);
+            stop.Cancel();
+            busy.Wait();
+            table.Append(Call(table.Read(0).Values.ToArray(), id: 900_001, contact: 1, subject: "after"));   // checks in full first
+        }
+        AssertIndexMatchesTable(dbf, cdx);
+    }
+
     // A FOR tag holds fewer keys than records anyway, so its count says nothing; the last records'
     // keys show an append that reached the table but not the index.
     [Fact]
