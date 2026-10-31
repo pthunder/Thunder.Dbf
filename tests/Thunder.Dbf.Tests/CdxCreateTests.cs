@@ -65,7 +65,7 @@ public sealed class CdxCreateTests : IDisposable
         }
 
         using var check = DbfTable.Open(path);
-        using var ours = CdxIndex.Open(Path.ChangeExtension(path, ".cdx"), table: check);
+        using var ours = CdxIndex.Open(CdxIndex.FindFor(path)!, table: check);
         using var theirs = CdxIndex.Open(Fixture("vfp9/kinds.CDX"), table: check);
         var made = ours[name];
         var vfp = theirs[name];
@@ -78,7 +78,7 @@ public sealed class CdxCreateTests : IDisposable
 
         // The header's options byte and the root right after the header, as VFP lays a tag out.
         var vfpHeader = File.ReadAllBytes(Fixture("vfp9/kinds.CDX")).AsSpan((int)vfp.HeaderOffset, 1024);
-        var ourHeader = SharedFile.ReadAllBytes(Path.ChangeExtension(path, ".cdx")).AsSpan((int)made.HeaderOffset, 1024);
+        var ourHeader = SharedFile.ReadAllBytes(CdxIndex.FindFor(path)!).AsSpan((int)made.HeaderOffset, 1024);
         Assert.Equal(vfpHeader[14], ourHeader[14]);
         Assert.Equal(made.HeaderOffset + 1024, BinaryPrimitives.ReadUInt32LittleEndian(ourHeader));
     }
@@ -99,7 +99,7 @@ public sealed class CdxCreateTests : IDisposable
         }
 
         using var check = DbfTable.Open(path);
-        using var ours = CdxIndex.Open(Path.ChangeExtension(path, ".cdx"), table: check);
+        using var ours = CdxIndex.Open(CdxIndex.FindFor(path)!, table: check);
         Assert.Equal(VfpTags().Select(r => (string)r[0]), ours.Tags.Select(t => t.Name));
         foreach (var tag in ours.Tags)
         {
@@ -124,7 +124,7 @@ public sealed class CdxCreateTests : IDisposable
         var path = BareKinds();
         using (var table = OpenToIndex(path))
             table.CreateIndexTag("CODE", "code");
-        var cdx = Path.ChangeExtension(path, ".cdx");
+        var cdx = CdxIndex.FindFor(path)!;
         var before = SharedFile.ReadAllBytes(cdx);
 
         using var again = OpenToIndex(path);
@@ -145,7 +145,7 @@ public sealed class CdxCreateTests : IDisposable
             Assert.Equal(DbfErrorCode.ExclusiveUseRequired, Assert.Throws<DbfException>(() => shared.CreateIndexTag("CODE", "code")).Code);
         using (var plain = DbfTable.Open(path, writable: true, exclusive: true))
             Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => plain.CreateIndexTag("CODE", "code")).Code);
-        Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
+        Assert.Null(CdxIndex.FindFor(path));
     }
 
     // A refusal writes nothing: not even a new .cdx, or the header flag that would name it.
@@ -160,7 +160,7 @@ public sealed class CdxCreateTests : IDisposable
             Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.CreateIndexTag("CCODE", "code", null, false, false, candidate: true)).Code);
             Assert.False(table.MaintainsIndex);
         }
-        Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
+        Assert.Null(CdxIndex.FindFor(path));
         Assert.Equal(before[28], SharedFile.ReadAllBytes(path)[28]);
     }
 
@@ -171,6 +171,6 @@ public sealed class CdxCreateTests : IDisposable
         using var table = OpenToIndex(path);
         Assert.Contains("logical", Assert.Throws<DbfException>(() => table.CreateIndexTag("LIVE", "id", forExpression: "id")).Message);
         Assert.Contains("code page", Assert.Throws<DbfException>(() => table.CreateIndexTag("SNOW", "code", forExpression: "status=\"\u2603\"")).Message);
-        Assert.False(File.Exists(Path.ChangeExtension(path, ".cdx")));
+        Assert.Null(CdxIndex.FindFor(path));
     }
 }
