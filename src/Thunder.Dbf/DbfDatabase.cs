@@ -488,7 +488,11 @@ public sealed record DbfCheckReport(string Folder, bool ReadOnly, TimeSpan Elaps
     public override string ToString()
     {
         var text = new StringBuilder();
-        text.AppendLine($"{Folder}: {Tables.Count} tables, {(ReadOnly ? "read-only" : "read/write")}, checked in {Elapsed.TotalMilliseconds:F0} ms. {(Ok ? "All good." : $"{Problems.Count()} problem(s).")}");
+        var notes = Tables.Sum(t => t.Warnings.Count);
+        var verdict = !Ok ? $"{Problems.Count()} problem(s)."
+            : notes == 0 ? "All good."
+            : $"No problems; {notes} note(s) below.";
+        text.AppendLine($"{Folder}: {Tables.Count} tables, {(ReadOnly ? "read-only" : "read/write")}, checked in {Elapsed.TotalMilliseconds:F0} ms. {verdict}");
         foreach (var table in Tables)
         {
             var status = table.Problems.Count > 0 ? "PROBLEM" : table.Warnings.Count > 0 ? "warning" : "ok";
