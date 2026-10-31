@@ -181,16 +181,16 @@ public sealed partial class CdxTag
 {
     private const int MaxDepth = 32;
     private const int InteriorHeaderLength = 12;
-    private const int LeafHeaderLength = 24;
-    private const int TagNameLength = 10;
+    internal const int LeafHeaderLength = 24;
+    internal const int TagNameLength = 10;
 
     // Tag header offsets (see docs/formats/cdx.md). The expressions live in a 512-byte pool after the first 512 bytes.
     private const int IgnoreCaseOffset = 499;
-    private const int DescendingOffset = 502;
-    private const int ForPositionOffset = 504;
-    private const int KeyPositionOffset = 508;
-    private const int PoolOffset = 512;
-    private const int PoolLength = 512;
+    internal const int DescendingOffset = 502;
+    internal const int ForPositionOffset = 504;
+    internal const int KeyPositionOffset = 508;
+    internal const int PoolOffset = 512;
+    internal const int PoolLength = 512;
 
     private const ushort LeafAttribute = 0x02;
     private const uint NoPage = 0xFFFFFFFF;

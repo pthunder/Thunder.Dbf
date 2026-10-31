@@ -21,7 +21,10 @@ public sealed partial class CdxWriteTests : IDisposable
         { "infused-dbf/foxprodb/contacts.CDX", "infused-dbf/foxprodb/contacts.dbf" },
         { "infused-dbf/foxprodb/setup.CDX", "infused-dbf/foxprodb/setup.dbf" },
         { "infused-dbf/foxprodb/types.CDX", "infused-dbf/foxprodb/types.dbf" },
-        { "xsharp/rdd-tests/TEST10K.CDX", "xsharp/rdd-tests/TEST10K.DBF" },
+        { "vfp9/kinds.CDX", "vfp9/kinds.DBF" },
+        // Not X#'s TEST10K: X# (like Harbour) lets a key's shared prefix run into the previous key's
+        // trailing blanks, which Visual FoxPro 9 doesn't, so its leaves pack tighter than these would.
+        // VFP reads both; this writer writes VFP's.
     };
 
     // ---- fidelity with what FoxPro and X# wrote -----------------------------------------------
@@ -55,6 +58,7 @@ public sealed partial class CdxWriteTests : IDisposable
         { "infused-dbf/foxprodb/calls.CDX", "infused-dbf/foxprodb/calls.dbf" },
         { "infused-dbf/foxprodb/setup.CDX", "infused-dbf/foxprodb/setup.dbf" },
         { "xsharp/rdd-tests/TEST10K.CDX", "xsharp/rdd-tests/TEST10K.DBF" },
+        { "vfp9/kinds.CDX", "vfp9/kinds.DBF" },
     };
 
     // Every key FoxPro and X# stored is the key built here for the same record, so maintained keys
@@ -66,11 +70,13 @@ public sealed partial class CdxWriteTests : IDisposable
         using var table = DbfTable.Open(Fixture(tableFixture));
         using var index = CdxIndex.Open(Fixture(indexFixture), table: table);
         var checkedTags = 0;
-        foreach (var tag in index.Tags.Where(t => Evaluates(t, table)))
+        // kinds.CDX's GNAME is sorted by VFP's GENERAL collation, which stays refused.
+        foreach (var tag in index.Tags.Where(t => Evaluates(t, table) && t.Name != "GNAME"))
         {
             // X# sorted these character tags without regard to case; their keys are still byte-exact.
             var byteOrdered = !(indexFixture.Contains("TEST10K") && tag.Name is "CITY" or "FIRST" or "LAST");
-            AssertExactKeys(tag, table, byteOrdered);
+            // A Visual FoxPro UNIQUE tag keeps the first record it met with each key.
+            AssertExactKeys(tag, table, byteOrdered, firstCome: indexFixture.Contains("kinds") && tag.IsUnique);
             checkedTags++;
         }
         Assert.True(checkedTags > 0);
