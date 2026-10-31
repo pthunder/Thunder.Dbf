@@ -109,11 +109,19 @@ public sealed class ConcurrentEditTests : IDisposable
     }
 
     [Fact]
-    public void A_stray_index_next_to_the_table_blocks_writes_until_it_is_gone()
+    public void A_stray_index_that_cannot_be_kept_up_to_date_blocks_writes_until_it_is_gone()
     {
         var folder = Directory.CreateDirectory(Path.Combine(_dir.FullName, "retro")).FullName;
         foreach (var file in new[] { "NUM2000.DBF", "NUM2000.NDX" })
             File.Copy(Path.Combine(Fixtures.Root, "retroinv", file), Path.Combine(folder, file));
+
+        // A healthy .ndx is kept up to date now; a damaged one (no key length) can't be, and nobody
+        // can tell it doesn't belong to the table.
+        using (var damage = File.OpenWrite(Path.Combine(folder, "NUM2000.NDX")))
+        {
+            damage.Position = 12;
+            damage.Write([0, 0]);
+        }
 
         using (var table = DbfTable.Open(Path.Combine(folder, "NUM2000.DBF"), writable: true))
         {
