@@ -1613,7 +1613,7 @@ public sealed partial class DbfTable : IDisposable
         return changes;
     }
 
-    private int _tagsLastPlanned;
+    private int _tagsLastPlanned; // only a capacity hint: a stale value costs a list resize, nothing more
 
     // A candidate key is checked against what the tag will hold once this batch's planned changes
     // are applied, not only what's in it now: AppendRange applies its rows' keys at the commit, so

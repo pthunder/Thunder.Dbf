@@ -95,6 +95,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
         if (!OpenedForWriting || _held is not null)
             return false;
         var held = TakeIndexLock();
+        var begun = false;
         try
         {
             // Another program may have changed the file since this process last wrote: the tags are
@@ -103,27 +104,27 @@ public sealed partial class CdxIndex : IMaintainedIndex
             _lockedCounter = state.Counter;
             ReloadTagsUnderLock(state);
             if (MaintainRefusal is not null)
-            {
-                _lockedCounter = null;
-                held.Dispose();
                 return false; // the batch's first write refuses, with the reason, as usual
-            }
             Unchanged = _ourState == state;
             _deferredFrom = FileLength();
+            _held = held;
+            _holdFailed = false;
+            _deferred = [];
+            _deferredFreed.Clear();
+            begun = true;
+            return true;
         }
-        catch
+        finally
         {
-            Unchanged = false;
-            _lockedCounter = null;
-            _nodes.Clear();
-            held.Dispose();
-            throw;
+            // Every way out but a begun batch lets the lock go; the batch keeps it until it finishes.
+            if (!begun)
+            {
+                Unchanged = false;
+                _lockedCounter = null;
+                _nodes.Clear();
+                held.Dispose();
+            }
         }
-        _held = held;
-        _holdFailed = false;
-        _deferred = [];
-        _deferredFreed.Clear();
-        return true;
     }
 
     private void WriteRuns(Dictionary<long, byte[]> pages, IEnumerable<long> which)
@@ -193,6 +194,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     internal object? CachedNode(long offset, CdxTag owner) =>
         Unchanged && _nodes.TryGetValue(offset, out var hit) && hit.Owner == owner ? hit.Node : null;
 
+    // Called before a node's Offset is changed (a root split or collapse): inside a batch the cache
+    // holds the node itself, so the old entry would otherwise be the moved node, under its old page.
     internal void ForgetNode(long offset) => _nodes.Remove(offset);
 
     internal void CacheNode(long offset, CdxTag owner, object node)
