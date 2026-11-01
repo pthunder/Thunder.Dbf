@@ -132,6 +132,31 @@ Measured at scale:
 | Read across a 1 GB memo file | under 1 s | under 10 MB |
 | Import a 77 MB CSV | 4.7 s | 9 MB |
 
+## Measured against Visual FoxPro
+
+Run on one Windows 11 PC with a local SSD, against Visual FoxPro 9 SP2 and its OLE DB driver on the same tables: `calls.dbf` (2 index tags) and X#'s `TEST10K` (7 tags), 2,000 appends of a record with new keys, at steady state (`DOTNET_TieredCompilation=0`; a long-running app gets there by itself), medians of 3 runs.
+
+| Per second | calls.dbf | TEST10K |
+|---|---|---|
+| Thunder.Dbf, default (every write forced to disk) | 1,096 | 1,352 |
+| VFP 9 with `FLUSH FORCE` after each record | 1,479 | 2,307 |
+| Thunder.Dbf, `FlushWritesToDisk = false` | **21,053** | 15,267 |
+| VFP OLE DB `INSERT` (never forces writes) | 14,493 | 16,667 |
+| VFP 9 shared `INSERT` (never forces writes) | 18,868 | 21,053 |
+| Thunder.Dbf bulk load (`DeferIndexWrites` under `LockTable()`) | **24,390** | 21,277 |
+| VFP 9 holding `FLOCK()` | 20,202 | 22,472 |
+| Seek by key: Thunder.Dbf against OLE DB `SELECT ... WHERE` | **76,923** against 1,580 | |
+| Read a whole table: Thunder.Dbf against OLE DB `SELECT *` | | **666,667** against 238,095 rows |
+
+On the same PC, what was left after a writer was cut off:
+
+| | Thunder.Dbf | Visual FoxPro 9 and OLE DB |
+|---|---|---|
+| Writers killed mid-write | never silently wrong: clean, or the damage reported on the next open | 51 of 180 left silently wrong (a key SEEK can't find, or one REINDEX disagrees with) |
+| Power cut (Hyper-V), default settings | 50 cuts: no confirmed write lost, never silently wrong | VFP reading the same files: 15 silently wrong, 9 unopenable |
+
+Bold marks where Thunder.Dbf leads. The 50 power cuts are the default-settings share of 150 (50 more each with `FlushWritesToDisk = false` and with deferred batches, in which Thunder.Dbf was never silently wrong either). What each setting trades is in [Durability](docs/durability.md#choosing).
+
 ## Documentation
 
 [docs/](docs/README.md) has guides for connecting, reading and writing, indexes, locking, durability, CSV, SQL, the web service, the command line, security and testing, plus byte-level notes on every format.

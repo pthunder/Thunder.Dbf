@@ -3,8 +3,9 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <PackageId>Thunder.Dbf</PackageId>
-    <Description>Pure .NET engine for dBASE, FoxPro and Clipper files: tables, memos and indexes, with dBASE-compatible locking. No native drivers.</Description>
-    <PackageTags>$(PackageTags);visual-foxpro;dbt;fpt;adonet;csv</PackageTags>
+    <Title>Thunder.Dbf: DBF reader and writer for dBASE, FoxPro and Clipper</Title>
+    <Description>Read and write DBF files in pure .NET without breaking the legacy app: dBASE, FoxPro, Visual FoxPro and Clipper tables, memos and indexes (.dbf, .dbt, .fpt, .mdx, .cdx, .ntx, .ndx), with every index kept up to date as the legacy app would, dBASE- and FoxPro-compatible locking, and crash-safe writes. No ODBC, OLE DB or native drivers.</Description>
+    <PackageTags>$(PackageTags);visual-foxpro;visualfoxpro;vfp;dbase-iv;dbf-reader;dbf-writer;shapefile;dbt;fpt;adonet;csv</PackageTags>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>

@@ -7,7 +7,8 @@
   <PropertyGroup>
     <IsPackable>true</IsPackable>
     <PackageId>Thunder.Dbf.Sql</PackageId>
-    <Description>Migrate dBASE and FoxPro tables to SQLite, SQL Server or PostgreSQL, and keep them in sync both ways.</Description>
+    <Title>Thunder.Dbf.Sql: migrate and sync DBF tables with SQL databases</Title>
+    <Description>Migrate dBASE, FoxPro and Clipper DBF tables to SQLite, SQL Server or PostgreSQL, and keep them in sync both ways while the legacy app keeps running.</Description>
     <PackageTags>$(PackageTags);sql;sqlite;sqlserver;postgresql;sync</PackageTags>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
