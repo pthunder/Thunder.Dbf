@@ -407,8 +407,32 @@ public sealed partial class CdxWriteTests
         {
             Assert.Equal(13, exclusive.RecordCount);
             Assert.Equal(3, exclusive.RecordsMissingFromFile);
+            Assert.Equal(bytes.AsSpan(thirteenth).ToArray(), File.ReadAllBytes(exclusive.CutOffBackupPath!)); // the end mark and the zeros, kept
             Assert.True(exclusive.MaintainsIndex);
             Assert.DoesNotContain(exclusive.ReadAll(), r => Convert.ToInt32(r["CALL_ID"]) == 0);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // The smallest case: only the last counted record never written, zeros with no end mark. Kept, it
+    // would have been a blank record no error mentioned; it's cut back like the rest.
+    [Fact]
+    public void A_single_never_written_last_record_is_cut_back_too()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int recordLength, headerLength;
+        using (var original = DbfTable.Open(dbf))
+            (recordLength, headerLength) = (original.Header.RecordLength, original.Header.HeaderLength);
+        var bytes = SharedFile.ReadAllBytes(dbf);
+        var last = headerLength + 15 * recordLength;
+        Array.Clear(bytes, last, recordLength);
+        SharedFile.WriteAllBytes(dbf, bytes[..(last + recordLength)]); // no end mark after it
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Equal(15, exclusive.RecordCount);
+            Assert.Equal(1, exclusive.RecordsMissingFromFile);
+            Assert.Equal(new byte[recordLength], File.ReadAllBytes(exclusive.CutOffBackupPath!));
         }
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }

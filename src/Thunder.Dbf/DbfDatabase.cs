@@ -303,9 +303,9 @@ public sealed class DbfDatabase : IDisposable
                 warnings.Add("This platform can't take byte-range locks, so writes here aren't coordinated with other programs using the table. Run on Windows or Linux to share the files safely.");
             if (table.HasPendingJournal)
                 warnings.Add("The table's .journal holds a key change a write didn't finish (or one in flight). The next writable open or write, with the same indexes kept, finishes it.");
-            if (table.RecordsInFile() < table.Header.RecordCount)
+            if (table.RecordsInFile() is var held && held < table.Header.RecordCount)
                 problems.Add(new DbfException(DbfErrorCode.NotADbfFile,
-                    $"The table's header counts {table.Header.RecordCount:N0} records, but the file holds only {table.RecordsInFile():N0}.",
+                    $"The table's header counts {table.Header.RecordCount:N0} records, but the file holds only {held:N0}.",
                     "A power cut or an interrupted copy cut it short, and Visual FoxPro won't open it (error 2091). Opening it with exclusive: true (writable) cuts the count back to the records it holds, keeping the bytes of a part record beside it, and rebuilds its indexes; or restore it from a backup.", path));
             if (table.RecordsPastCount() is > 0 and var past)
                 warnings.Add($"{past:N0} record(s) sit past the header's count: an append in progress, or one that was cut off. If it was cut off, Visual FoxPro reports the table as corrupted (error 2091); opening it here with exclusive: true (and writable) takes them off and rebuilds its indexes.");

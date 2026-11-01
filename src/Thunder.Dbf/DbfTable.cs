@@ -901,6 +901,8 @@ public sealed partial class DbfTable : IDisposable
         if (_stream.Length <= Header.HeaderLength || Header.RecordLength == 0)
             return 0;
         var held = Math.Min((_stream.Length - Header.HeaderLength) / Header.RecordLength, Header.RecordCount);
+        // A last record with any other first byte isn't one dBASE or FoxPro wrote: it's counted out on
+        // purpose, and a repair keeps its bytes in the cut-off backup, so nothing is lost by it.
         while (held > 0 && ReadByteAt(Header.HeaderLength + (held - 1) * Header.RecordLength) is not ((byte)' ' or (byte)'*'))
             held--;
         return held;
@@ -921,9 +923,11 @@ public sealed partial class DbfTable : IDisposable
     // records point past the end.
     private void RepairShortTable()
     {
-        if (!_exclusive || !_stream.CanWrite || RecordsInFile() >= Header.RecordCount)
+        if (!_exclusive || !_stream.CanWrite)
             return;
-        var whole = RecordsInFile();
+        var whole = RecordsInFile(); // once: it walks back over a tail of never-written records
+        if (whole >= Header.RecordCount)
+            return;
         var dataEnd = Header.HeaderLength + whole * Header.RecordLength;
         if (_stream.Length > dataEnd + 1 || (_stream.Length == dataEnd + 1 && ReadByteAt(dataEnd) != EndOfFile))
         {
