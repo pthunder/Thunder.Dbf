@@ -46,7 +46,8 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 - **Writes behave like dBASE.** They take the same record and header locks dBASE does and keep every index tag in step. Fields you didn't change keep their exact bytes, and everything is flushed in a crash-safe order.
 - **Nothing is half-written.** Every value is checked before anything is written. A character the code page can't hold is an error, never a silent `?`.
 - **Errors explain themselves.** Every failure has a code, a hint and an HTTP status, and messages never leak paths or account names.
-- **Untrusted input can't escape the folder.** Table names and links are checked, and hostile files can't crash or hang the process.
+- **Untrusted input can't escape the folder.** Table names and links are checked, and hostile files can't crash or hang the process: 100,000 corrupted copies of the test files, thrown at every reader and writer, gave no crash, hang or runaway allocation (see [Testing](docs/testing.md#fuzzing)).
+- **Safer than the legacy drivers when things go wrong.** Writes are forced to disk in a crash-safe order, a write cut off by a crash is caught when the table next opens, and an opt-in journal finishes it exactly. You choose how much of that to trade for speed (see [Durability](docs/durability.md#choosing)).
 - **Tested on real files,** not only on files it wrote itself (see below).
 
 ## Install
@@ -153,12 +154,15 @@ Done:
 12. ~~`INDEX ON` (`CreateIndexTag`) and `PACK`~~
 13. ~~Keeping `.ndx` and `.ntx` indexes up to date on writes~~
 14. ~~0.1.0 on nuget.org: `Thunder.Dbf`, `Thunder.Dbf.Sql` and the `thunder-dbf` tool, plus web service downloads on each GitHub release~~
+15. ~~Checked against Visual FoxPro 9 itself: fixed `.cdx` roots, exclusive maintenance, `.cdx` tag creation (currency, datetime and nullable keys too), crash-safe key changes with an opt-in journal, a `Jet` lock scheme for Access~~
+16. ~~Write speed: `FlushWritesToDisk`, cached `.cdx` pages, and `DeferIndexWrites` for bulk loads~~
+17. ~~Fuzzed: every reader and writer against 100,000 corrupted files~~
 
 Next:
 
 - FoxPro `.cdx` writing out of preview: a pass of the [Visual FoxPro round-trip test](docs/testing.md#checking-against-visual-foxpro-itself) (the index lock, large record numbers, batch candidate keys and crash-safe page order are in)
 - Creating `.ndx` and `.ntx` indexes (`INDEX ON` writes `.mdx` and `.cdx` tags)
-- A journal for `.cdx` page changes, so a crash mid-split always leaves an index Thunder.Dbf can rebuild itself
+- A journal for `.cdx` page changes, so a crash mid-split always leaves an index Thunder.Dbf can rebuild itself (key changes are journaled already)
 - Stable keys for the SQL bridge that survive a `PACK` (today a packed table is refused and the mirror is rebuilt)
 
 Ideas and requests are welcome in [issues](https://github.com/pthunder/Thunder.Dbf/issues).

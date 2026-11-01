@@ -60,6 +60,22 @@ What every write does for you:
 - **Handles Visual FoxPro extras:** null flags are set and cleared, and autoincrement fields take the next number when you pass `null`.
 - **Commits in a safe order:** memo, records, the header count, then the index. See [Durability](durability.md).
 
+### Faster writes
+
+Every write is forced to the disk by default, which is the safe setting and the slow part. Two opt-in settings trade some of that safety for speed; [Durability](durability.md#choosing) has the full table of what each costs.
+
+```csharp
+table.FlushWritesToDisk = false;      // still crash-safe against a killed process; a power cut can lose the latest writes
+table.DeferIndexWrites = true;        // for migrations and bulk loads, inside LockTable():
+using (table.LockTable())
+{
+    foreach (var row in rows)
+        table.Append(row);
+}                                     // each changed .cdx page is written once, here
+```
+
+`AppendRange` commits once per `commitEvery` rows, so it's fast with the default settings too.
+
 ## Packing
 
 ```csharp

@@ -18,6 +18,10 @@ dBASE III and IV, FoxPro 2 and Visual FoxPro tables; `.dbt` and `.fpt` memos; dB
 **How big can tables be?**
 dBASE's own limits apply (2 GB files, 1 billion records). Thunder.Dbf streams everything: a million-row table scans in under a second, and a 1 GB memo file reads with under 10 MB of memory.
 
+**Is it fast?**
+
+Reads are: a Seek through a `.cdx` tag answers in microseconds, and reading a whole table runs at hundreds of thousands of records a second, ahead of the Visual FoxPro OLE DB driver on the same machine. Writes are as safe as you ask them to be. By default every write is forced to disk in a crash-safe order, which is slower than Visual FoxPro, which never forces its writes. With `FlushWritesToDisk = false` they're many times faster, close to the OLE DB driver on tables with a few index tags, and bulk loads with `DeferIndexWrites` are faster again. See [Durability](durability.md#choosing) for what each setting trades.
+
 **Does it need ODBC, OLE DB, Jet or a 32-bit process?**
 No. It's pure .NET with no native dependencies, 64-bit, on Windows, Linux and macOS.
 

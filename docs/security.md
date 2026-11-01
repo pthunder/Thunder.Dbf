@@ -20,7 +20,7 @@ Legacy dBASE and FoxPro folders often hold customer records, and the point of Th
 | Learning about the server from errors | `Message` and `Hint` never hold paths, account names or table lists; those live in `FilePath`/`Diagnostic` for logs. The web service also scrubs and logs server-side only. |
 | SQL injection (bridge, migrator, ADO.NET) | Values always travel as parameters; identifiers are quoted by the dialect. |
 | Expression injection | Expressions come from index files, not from requests; the evaluator has no side effects, file access or dynamic code. |
-| Malformed or hostile files: huge lengths, cycles, bad pointers | Every length, count and pointer read from a file is bounded; index walks visit each page once; memos are capped (`MaxMemoBytes`). Bad files produce explained errors, not hangs or huge allocations. |
+| Malformed or hostile files: huge lengths, cycles, bad pointers | Every length, count and pointer read from a file is bounded; index walks visit each page once; memos are capped (`MaxMemoBytes`). Bad files produce explained errors, not hangs or huge allocations: checked by fuzzing every reader and writer with 100,000 corrupted files (see [Testing](testing.md#fuzzing)). |
 | Formula injection through exported CSV | `DbfExport` neutralizes text starting with `= + - @` by default. |
 | Unauthorized reads and writes over HTTP | API keys stored only as SHA-256 hashes and compared in constant time; per-key table and field permissions; read-only by default; three separate switches for writes; per-key rate limits. |
 | Corrupting data the legacy app depends on | Locks, index maintenance, untouched-byte preservation, validation before writing, and safe commit order. |
