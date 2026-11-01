@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-01
+
+Checked against Visual FoxPro 9 itself on Windows: its own tables and indexes in eleven code pages, Thunder.Dbf and VFP writing the same files at once, writers killed mid-write and 150 Hyper-V power cuts. Thunder.Dbf was never silently wrong: what a kill or a cut left was always either clean or reported. Visual FoxPro and its OLE DB driver, killed 180 times mid-write, left 51 tables silently wrong. FoxPro `.cdx` maintenance is still opt-in (`maintainFoxProIndexes`).
+
+**Upgrading from 0.1.0:** nothing in the public API was removed, and code compiled against 0.1.0 runs unchanged. Two behaviours changed:
+- `Pack()`, `RebuildIndex()`, `CreateIndexTag()` and `MaintainIndex(path, rebuild: true)` need the table opened with `exclusive: true`, as in dBASE and FoxPro; they throw `ExclusiveUseRequired` otherwise.
+- `DbfTable.Create` holds the new `.dbf` unshared while it's open.
+
 - **Counted records that were never written are found too:** a power cut can leave a file long enough for every counted record whose last ones were never written (an end-of-file mark on a record boundary, then zeros to the end of the disk page). Only records starting with a deletion flag count, so these are reported and cut back like a short file instead of being kept as blank records. A moot batch note is cleared at the exclusive open, not only at the first write.
 - **A header counting records the file doesn't hold is reported and repaired:** a power cut can keep the count and lose the last records (4 of 50 Hyper-V cuts with flushes off). `Check()` now reports it as a problem (it said "No problems"), and a writable exclusive open cuts the count back to the whole records the file holds, keeping a part record's bytes beside the table, reporting the number in `RecordsMissingFromFile`, and rebuilding the indexes (the structural `.cdx` is taken over again where it can be). There used to be no way back but by hand. A cut-off batch's journal note whose indexes have all been deleted is now cleared instead of refusing writes for ever.
 - **`UPPER()` in `.cdx` keys over letters beyond ASCII,** in code pages 437, 850, 852, 866, 1250, 1251, 1252, 1253, 1254 and 1257 (Western, Central European, Cyrillic, Greek, Turkish and Baltic, Windows and DOS), where case-insensitive name tags are common: upper-cased as Visual FoxPro 9 SP2 does, measured for every byte against VFP running in each code page (.NET's capital when the code page has it, the byte kept when it doesn't, as for µ, and VFP's own result for the few bytes where it differs, such as ž in 1252). In 852, 1250 and 1251, VFP's SEEK and REINDEX were checked on tags Thunder.Dbf built and kept. Other code pages keep refusing such keys until they're measured the same way.
