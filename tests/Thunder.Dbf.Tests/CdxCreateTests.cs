@@ -208,13 +208,53 @@ public sealed class CdxCreateTests : IDisposable
         Assert.Equal([0xC8, 0x41, 0x4A, 0x20, 0x8A], key[..5]); // Č A J, space, Š
     }
 
+    // VFP 9 SP2's UPPER() per code page, as measured byte by byte with VFP running in each: one ordinary
+    // capital, and every byte where VFP differs from the rule (.NET's capital if the code page has it).
+    [Theory]
+    [InlineData(852, 0xA5, 0xA4)]   // ą → Ą
+    [InlineData(1250, 0x9A, 0x8A)]  // š → Š
+    [InlineData(1250, 0xB5, 0xB5)]  // µ kept: its capital is Greek
+    [InlineData(1251, 0xB8, 0xA8)]  // ё → Ё
+    [InlineData(1251, 0xB5, 0xB5)]  // µ kept
+    [InlineData(866, 0xE0, 0x90)]   // р → Р
+    [InlineData(1257, 0xE0, 0xC0)]  // ą → Ą
+    [InlineData(1252, 0xE9, 0xC9)]  // é → É
+    [InlineData(1252, 0x9E, 0x9E)]  // ž: VFP leaves it lower case
+    [InlineData(1252, 0xDF, 0xDF)]  // ß kept: no one-letter capital
+    [InlineData(437, 0x82, 0x90)]   // é → É
+    [InlineData(437, 0xE5, 0xE5)]   // σ: VFP leaves it
+    [InlineData(437, 0xED, 0xED)]   // φ: VFP leaves it
+    [InlineData(1253, 0xE1, 0xC1)]  // α → Α
+    [InlineData(1253, 0xB5, 0xB5)]  // µ kept
+    [InlineData(1253, 0xF2, 0xF2)]  // final ς: VFP leaves it
+    [InlineData(1254, 0xE7, 0xC7)]  // ç → Ç
+    [InlineData(1254, 0xA2, 0xC2)]  // ¢ → Â, as VFP does
+    [InlineData(1254, 0xE2, 0xE2)]  // â: VFP leaves it
+    [InlineData(1254, 0xF8, 0xF8)]  // ø: VFP leaves it
+    [InlineData(850, 0x82, 0x90)]   // é → É
+    [InlineData(850, 0x8B, 0x8B)]   // ï: VFP leaves it
+    [InlineData(850, 0xB8, 0xD8)]   // VFP's own mapping
+    [InlineData(850, 0xE2, 0xED)]   // VFP's own mapping
+    [InlineData(850, 0xEC, 0xEC)]   // ý: VFP leaves it
+    public void UPPER_takes_Visual_FoxPros_capital_byte_for_byte(int codePage, int lower, int upper)
+    {
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+        var table = FoxProUpper.For(System.Text.Encoding.GetEncoding(codePage));
+        Assert.NotNull(table);
+        Assert.Equal((byte)upper, table[lower]);
+        Assert.Equal((byte)'A', table['a']);
+    }
+
     // A code page whose upper case hasn't been checked against VFP keeps refusing non-ASCII UPPER() keys.
     [Fact]
     public void UPPER_keys_over_non_ASCII_text_in_an_unchecked_code_page_are_refused()
     {
         var path = BareKinds();
+        var bytes = File.ReadAllBytes(path);
+        bytes[29] = 0x7E; // Windows-1256, Arabic: VFP's UPPER() there hasn't been measured
+        File.WriteAllBytes(path, bytes);
         using var table = OpenToIndex(path);
-        Assert.Equal(1252, table.Encoding.CodePage);
+        Assert.Equal(1256, table.Encoding.CodePage);
         var row = table.Read(0).Values.ToArray();
         row[0] = 5000;
         row[2] = "café";
