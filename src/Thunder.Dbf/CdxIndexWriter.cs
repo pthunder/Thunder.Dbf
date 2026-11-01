@@ -2032,14 +2032,28 @@ public sealed partial class CdxTag : IMaintainedTag
 
 /// <summary>
 /// Visual FoxPro's UPPER() as a byte table, for the single-byte code pages where it's been checked
-/// against VFP itself, every byte from 128 to 255, with VFP running in that code page: each character
-/// takes .NET's upper case when that's one character the code page has, and otherwise keeps its byte
-/// (µ in 1250 and 1251, whose capital is Greek; ß, which has no single capital). Other code pages
-/// aren't listed until they're checked the same way, so UPPER() keys over their non-ASCII text stay refused.
+/// against VFP 9 SP2 itself, every byte from 128 to 255, with VFP running in that code page: each
+/// character takes .NET's upper case when that's one character the code page has, and otherwise
+/// keeps its byte (µ, whose capital is Greek; ß, which has no single capital), except where VFP was
+/// measured to do otherwise, listed per code page. Other code pages aren't listed until they're
+/// checked the same way, so UPPER() keys over their non-ASCII text stay refused.
 /// </summary>
 internal static class FoxProUpper
 {
-    private static readonly int[] Checked = [852, 1250, 1251];
+    // Where VFP's UPPER() differs from the rule: byte, and what VFP gives for it.
+    private static readonly Dictionary<int, (byte Byte, byte Upper)[]> Exceptions = new()
+    {
+        [852] = [],
+        [866] = [],
+        [1250] = [],
+        [1251] = [],
+        [1257] = [],
+        [1252] = [(0x9E, 0x9E)],                             // ž stays lower case
+        [437] = [(0xE5, 0xE5), (0xED, 0xED)],                // Greek σ and φ stay lower case
+        [1253] = [(0xB5, 0xB5), (0xF2, 0xF2)],               // µ, and final ς
+        [1254] = [(0xA2, 0xC2), (0xE2, 0xE2), (0xF8, 0xF8)], // ¢ becomes Â; â and ø stay
+        [850] = [(0x8B, 0x8B), (0xB8, 0xD8), (0xE2, 0xED), (0xEC, 0xEC)],
+    };
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte[]?> Tables = new();
 
     /// <summary>The byte table for <paramref name="encoding"/>, or null when its upper case hasn't been checked.</summary>
@@ -2047,7 +2061,7 @@ internal static class FoxProUpper
 
     private static byte[]? Build(int codePage)
     {
-        if (!Checked.Contains(codePage))
+        if (!Exceptions.TryGetValue(codePage, out var exceptions))
             return null;
         var encoding = System.Text.Encoding.GetEncoding(codePage, System.Text.EncoderFallback.ExceptionFallback, System.Text.DecoderFallback.ExceptionFallback);
         var table = new byte[256];
@@ -2072,6 +2086,8 @@ internal static class FoxProUpper
                 // A byte the code page leaves undefined, or a capital it doesn't have: kept as it is.
             }
         }
+        foreach (var (b, upper) in exceptions)
+            table[b] = upper;
         return table;
     }
 }

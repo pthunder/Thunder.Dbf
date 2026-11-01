@@ -46,7 +46,7 @@ For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (tabl
 | Default (`FlushWritesToDisk` on) | Never leaves a key missing (UNIQUE tags aside); a cut-off write is caught on open | Only the write in progress can be lost | Share the table record by record | Slowest: every step forced to disk |
 | + `UseJournal` | A cut-off write is finished exactly by the next one | The same | The same | Two more forced writes per key change |
 | `FlushWritesToDisk = false` | The same as the default | The latest writes can be lost, and the index left out of step (`Check()`, then a rebuild) | The same | Several times faster |
-| + `DeferIndexWrites` under `LockTable()` | The batch's index changes can be missing; its journal note stops Thunder.Dbf writes until a rebuild, and VFP can find stale keys until then | The same as flushes off | Wait for the batch to finish | Fastest: each index page written once per batch |
+| + `DeferIndexWrites` under `LockTable()` (one forced flush per batch, even with flushes off) | The batch's index changes can be missing; its journal note stops Thunder.Dbf writes until a rebuild, and VFP can find stale keys until then | The same as flushes off | Wait for the batch to finish | Fastest: each index page written once per batch |
 
 Visual FoxPro and its OLE DB driver, for comparison, never force writes to disk, and keep no write order a killed process could rely on.
 
