@@ -180,6 +180,49 @@ public sealed class CdxCreateTests : IDisposable
         Assert.Equal(240, made["LONGEST"].KeyLength);
     }
 
+    // Visual FoxPro's UPPER() beyond ASCII, measured byte for byte in VFP 9 running in code page 1250:
+    // .NET's capital when the code page has it, the byte kept when it doesn't (µ, whose capital is
+    // Greek; ß, which has no one-letter capital).
+    [Fact]
+    public void UPPER_keys_in_a_checked_code_page_take_Visual_FoxPros_capitals()
+    {
+        var path = BareKinds();
+        var bytes = File.ReadAllBytes(path);
+        bytes[29] = 0xC8; // Windows-1250, Central European
+        File.WriteAllBytes(path, bytes);
+        using (var table = OpenToIndex(path))
+        {
+            Assert.Equal(1250, table.Encoding.CodePage);
+            var row = table.Read(0).Values.ToArray();
+            row[0] = 5000;
+            row[2] = "čaj šum µm ß";
+            table.Append(row);
+            table.CreateIndexTag("UNAME", "UPPER(name)");
+        }
+
+        using var check = DbfTable.Open(path);
+        using var index = CdxIndex.Open(CdxIndex.FindFor(path)!, table: check);
+        var key = index["UNAME"].RawEntries().Single(e => e.Record == check.RecordCount).Key;
+        var cp1250 = System.Text.Encoding.GetEncoding(1250);
+        Assert.Equal(cp1250.GetBytes("ČAJ ŠUM µM ß".PadRight(30)), key);
+        Assert.Equal([0xC8, 0x41, 0x4A, 0x20, 0x8A], key[..5]); // Č A J, space, Š
+    }
+
+    // A code page whose upper case hasn't been checked against VFP keeps refusing non-ASCII UPPER() keys.
+    [Fact]
+    public void UPPER_keys_over_non_ASCII_text_in_an_unchecked_code_page_are_refused()
+    {
+        var path = BareKinds();
+        using var table = OpenToIndex(path);
+        Assert.Equal(1252, table.Encoding.CodePage);
+        var row = table.Read(0).Values.ToArray();
+        row[0] = 5000;
+        row[2] = "café";
+        table.Append(row);
+        var error = Assert.Throws<DbfException>(() => table.CreateIndexTag("UNAME", "UPPER(name)"));
+        Assert.Contains("checked against Visual FoxPro", error.Message);
+    }
+
     [Fact]
     public void A_FOR_filter_must_be_logical_and_expressions_must_fit_the_code_page()
     {

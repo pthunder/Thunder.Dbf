@@ -1247,14 +1247,14 @@ public sealed partial class CdxTag : IMaintainedTag
                     break;
                 case PartKind.Upper:
                     StoredBytes(record, part).CopyTo(target);
+                    var upper = FoxProUpper.For(_index.Encoding);
                     foreach (ref var b in target)
                     {
-                        if (b >= 0x80)
+                        if (b >= 0x80 && upper is null)
                             throw new DbfException(DbfErrorCode.IndexWouldGoStale,
-                                $"Tag {Name}'s key UPPER({part.Field.Name}) can't be built exactly for record {record.RecordNumber}: the value has characters outside ASCII, which FoxPro upper-cases by its own code page tables.",
+                                $"Tag {Name}'s key UPPER({part.Field.Name}) can't be built exactly for record {record.RecordNumber}: the value has characters outside ASCII, and FoxPro's upper case for this code page hasn't been checked against Visual FoxPro.",
                                 "Keep that field to ASCII, or open with allowUnmaintainedIndexes: true and REINDEX in FoxPro afterwards.", _index.Table?.FilePath);
-                        if (b is >= (byte)'a' and <= (byte)'z')
-                            b -= 0x20;
+                        b = upper is not null ? upper[b] : b is >= (byte)'a' and <= (byte)'z' ? (byte)(b - 0x20) : b;
                     }
                     break;
                 case PartKind.Dtos:
@@ -2027,5 +2027,51 @@ public sealed partial class CdxTag : IMaintainedTag
             level[i].Left = i == 0 ? NoPage : (uint)level[i - 1].Offset;
             level[i].Right = i == level.Count - 1 ? NoPage : (uint)level[i + 1].Offset;
         }
+    }
+}
+
+/// <summary>
+/// Visual FoxPro's UPPER() as a byte table, for the single-byte code pages where it's been checked
+/// against VFP itself, every byte from 128 to 255, with VFP running in that code page: each character
+/// takes .NET's upper case when that's one character the code page has, and otherwise keeps its byte
+/// (µ in 1250 and 1251, whose capital is Greek; ß, which has no single capital). Other code pages
+/// aren't listed until they're checked the same way, so UPPER() keys over their non-ASCII text stay refused.
+/// </summary>
+internal static class FoxProUpper
+{
+    private static readonly int[] Checked = [852, 1250, 1251];
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, byte[]?> Tables = new();
+
+    /// <summary>The byte table for <paramref name="encoding"/>, or null when its upper case hasn't been checked.</summary>
+    public static byte[]? For(System.Text.Encoding encoding) => Tables.GetOrAdd(encoding.CodePage, Build);
+
+    private static byte[]? Build(int codePage)
+    {
+        if (!Checked.Contains(codePage))
+            return null;
+        var encoding = System.Text.Encoding.GetEncoding(codePage, System.Text.EncoderFallback.ExceptionFallback, System.Text.DecoderFallback.ExceptionFallback);
+        var table = new byte[256];
+        for (var b = 0; b < 256; b++)
+        {
+            table[b] = (byte)b;
+            if (b < 0x80)
+            {
+                if (b is >= 'a' and <= 'z')
+                    table[b] = (byte)(b - 0x20);
+                continue;
+            }
+            try
+            {
+                var c = encoding.GetString([(byte)b]);
+                var capital = char.ToUpperInvariant(c[0]).ToString();
+                if (c.Length == 1 && capital != c && encoding.GetBytes(capital) is [var one])
+                    table[b] = one;
+            }
+            catch (Exception ex) when (ex is System.Text.DecoderFallbackException or System.Text.EncoderFallbackException)
+            {
+                // A byte the code page leaves undefined, or a capital it doesn't have: kept as it is.
+            }
+        }
+        return table;
     }
 }
