@@ -21,5 +21,6 @@
   </Folder>
   <Folder Name="/tools/">
     <Project Path="tools/Thunder.Dbf.Cli/Thunder.Dbf.Cli.csproj" />
+    <Project Path="tools/Thunder.Dbf.Fuzz/Thunder.Dbf.Fuzz.csproj" />
   </Folder>
 </Solution>

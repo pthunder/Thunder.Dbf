@@ -36,7 +36,7 @@ public sealed record DbfField(string Name, char Type, int Length, int DecimalCou
     /// <summary>The field holds bytes, not text, so no code page conversion applies (Visual FoxPro NOCPTRANS).</summary>
     public bool IsBinary => (Flags & 0x04) != 0;
     /// <summary>The field numbers new records itself (Visual FoxPro autoincrement).</summary>
-    public bool IsAutoIncrement => (Flags & 0x08) != 0;
+    public bool IsAutoIncrement => (Flags & 0x08) != 0 && Type == 'I'; // VFP numbers only Integer fields; a flag elsewhere is damage (found by fuzzing)
 
     /// <summary>Visual FoxPro autoincrement step (descriptor byte 23).</summary>
     public int AutoIncrementStep { get; init; }

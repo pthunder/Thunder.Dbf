@@ -46,6 +46,16 @@ Index tests don't compare against stored expected bytes. They rebuild what each 
 
 For format and index code, break the implementation on purpose (a wrong separator key in a node split, a wrong exponent bias in numeric keys) and confirm the tests fail before trusting a green run. The editorial guidelines ask this of every change to that code.
 
+## Fuzzing
+
+`tools/Thunder.Dbf.Fuzz` throws corrupted copies of the fixtures at every reader and writer: open, `Check()`, read every record and memo, walk and seek every index tag, then append and update. Each case flips bits, overwrites lengths and pointers with edge values, truncates, zeroes or copies chunks of one file, mostly in its header. A finding is an exception that isn't explained (a `DbfException`, or from the index classes an `InvalidDataException` or `NotSupportedException`), a case that runs longer than 10 seconds, or one that allocates more than 512 MB.
+
+```bash
+tools/Thunder.Dbf.Fuzz/fuzz.sh 1 100000
+```
+
+Findings go to `artifacts/fuzz/findings.jsonl`, each with its seed and its damaged files in `artifacts/fuzz/seed-N/`; a seed reproduces its case exactly. The first 100,000 cases found no crash, hang or runaway allocation, and six places where a damaged file gave a raw .NET exception; each is fixed and has a test in `FuzzRegressionTests`. A value the caller passes that doesn't fit its field is an `ArgumentException` or `OverflowException` by design, not a finding.
+
 ## Checking against Visual FoxPro itself
 
 On a Windows machine with Visual FoxPro 9 installed (it comes with Visual Studio subscriptions), these tests let VFP judge the `.cdx` files Thunder.Dbf keeps, and the other way round:

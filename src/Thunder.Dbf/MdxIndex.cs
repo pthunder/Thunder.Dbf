@@ -415,7 +415,9 @@ internal static class MdxKeys
         if (exponent is >= -28 and <= 28 && significant.Length <= 28
             && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value != 0)
             return value;
-        return double.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture);
+        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+            ? number
+            : throw new InvalidDataException("A numeric key in the .mdx holds digits that aren't BCD; the index is damaged."); // found by fuzzing
     }
 
     /// <summary>Orders two numeric keys by value, straight from their bytes, for any exponent.</summary>

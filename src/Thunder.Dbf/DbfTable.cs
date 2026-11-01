@@ -85,7 +85,11 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>The fields, in table order.</summary>
     public IReadOnlyList<DbfField> Fields => Header.Fields;
     /// <summary>The number of records, including those marked deleted.</summary>
-    public int RecordCount => checked((int)Header.RecordCount);
+    public int RecordCount => Header.RecordCount <= int.MaxValue
+        ? (int)Header.RecordCount
+        : throw new DbfException(DbfErrorCode.NotADbfFile,
+            $"The table's header counts {Header.RecordCount:N0} records, more than a dBASE or FoxPro table can hold.",
+            "The header is damaged. Restore the table from a backup.", _path); // found by fuzzing
     /// <summary>True when the table was opened for writing.</summary>
     public bool CanWrite => _stream.CanWrite;
 
@@ -1030,7 +1034,17 @@ public sealed partial class DbfTable : IDisposable
     private DbfRecord ReadBuffered(int index)
     {
         Seek(index);
-        _stream.ReadExactly(_buffer);
+        try
+        {
+            _stream.ReadExactly(_buffer);
+        }
+        catch (EndOfStreamException ex)
+        {
+            // Found by fuzzing: a header that counts more records than the file holds (a copy cut short).
+            throw new DbfException(DbfErrorCode.NotADbfFile,
+                $"The table's header counts {Header.RecordCount:N0} records, but the file ends before record {index + 1:N0}.",
+                "The file was probably truncated by an interrupted copy. Restore it from a backup; the records before it can still be read one by one.", _path, ex);
+        }
         return Decode(index, _buffer);
     }
 
@@ -1312,25 +1326,32 @@ public sealed partial class DbfTable : IDisposable
         };
     }
 
+    // A record an index entry points at, which a damaged index can put past the table's end (found by fuzzing).
+    private DbfRecord ReadIndexed(int recordNumber) =>
+        recordNumber >= 1 && recordNumber <= RecordCount
+            ? Read(recordNumber - 1)
+            : throw new DbfException(DbfErrorCode.IndexDamaged, $"The index points at record {recordNumber:N0}, but the table has {RecordCount:N0}.",
+                "The index is out of step with the table. Rebuild it (RebuildIndex, or REINDEX in the legacy app).", _path);
+
     /// <summary>Reads records in the tag's key order (any index format).</summary>
-    public IEnumerable<DbfRecord> ReadInOrder(IDbfIndexTag tag) => tag.Entries().Select(e => Read(e.RecordNumber - 1));
+    public IEnumerable<DbfRecord> ReadInOrder(IDbfIndexTag tag) => tag.Entries().Select(e => ReadIndexed(e.RecordNumber));
 
     /// <summary>The first record whose key equals <paramref name="key"/>, through any index format.</summary>
     public DbfRecord? Seek(IDbfIndexTag tag, object? key)
     {
         foreach (var entry in tag.SeekExact(key))
-            return Read(entry.RecordNumber - 1);
+            return ReadIndexed(entry.RecordNumber);
         return null;
     }
 
     /// <summary>Reads records in the tag's key order, skipping any the tag's FOR filter left out.</summary>
-    public IEnumerable<DbfRecord> ReadInOrder(MdxTag tag) => tag.Entries().Select(e => Read(e.RecordNumber - 1));
+    public IEnumerable<DbfRecord> ReadInOrder(MdxTag tag) => tag.Entries().Select(e => ReadIndexed(e.RecordNumber));
 
     /// <summary>The first record whose key equals <paramref name="key"/> (prefix match for character keys), like dBASE's SEEK.</summary>
     public DbfRecord? Seek(MdxTag tag, object key)
     {
         foreach (var entry in tag.SeekExact(key))
-            return Read(entry.RecordNumber - 1);
+            return ReadIndexed(entry.RecordNumber);
         return null;
     }
 
@@ -1598,10 +1619,23 @@ public sealed partial class DbfTable : IDisposable
         foreach (var tag in MaintainedIndexes.SelectMany(i => i.MaintainedTags))
         {
             tags++;
-            var wasIn = before is not null && tag.Includes(before);
-            var isIn = tag.Includes(after);
-            var oldKey = wasIn ? tag.KeyFor(before!) : null;
-            var newKey = isIn ? tag.KeyFor(after) : null;
+            bool wasIn, isIn;
+            byte[]? oldKey, newKey;
+            try
+            {
+                wasIn = before is not null && tag.Includes(before);
+                isIn = tag.Includes(after);
+                oldKey = wasIn ? tag.KeyFor(before!) : null;
+                newKey = isIn ? tag.KeyFor(after) : null;
+            }
+            catch (Exception ex) when (ex is FormatException or KeyNotFoundException or InvalidOperationException)
+            {
+                // The expression came from the index file, so one that doesn't parse or doesn't fit the
+                // table is a damaged index (found by fuzzing). The parser's and evaluator's messages name
+                // fields, functions and positions, never a path (guideline 1.2).
+                throw new DbfException(DbfErrorCode.IndexDamaged, $"Tag {tag.Name}'s key expression can't be worked out for this table: {ex.Message}",
+                    "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex);
+            }
             if (oldKey is not null && newKey is not null && oldKey.AsSpan().SequenceEqual(newKey))
                 continue;
             if (newKey is not null && tag.RefusesDuplicates)
