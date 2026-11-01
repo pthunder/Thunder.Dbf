@@ -384,6 +384,35 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // The other shape a power cut left (run 3, cut 38): the file is long enough for every counted
+    // record, but the last ones were never written: an end-of-file mark on a record boundary, then
+    // zeros to the end of the disk page. They aren't records, so they're cut back too, never kept as
+    // blank ones (which gave two CALL_ID 0s and a refused rebuild).
+    [Fact]
+    public void Counted_records_that_were_never_written_are_cut_back_too()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int recordLength, headerLength;
+        using (var original = DbfTable.Open(dbf))
+            (recordLength, headerLength) = (original.Header.RecordLength, original.Header.HeaderLength);
+        var bytes = SharedFile.ReadAllBytes(dbf);
+        var thirteenth = headerLength + 13 * recordLength;
+        Array.Clear(bytes, thirteenth, bytes.Length - thirteenth);
+        bytes[thirteenth] = 0x1A; // records 14 to 16: an end mark, then zeros
+        SharedFile.WriteAllBytes(dbf, bytes);
+
+        var report = DbfDatabase.Open(_dir.FullName).Check().Tables.Single(t => t.Name.Equals("calls", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(report.Problems, p => p.Code == DbfErrorCode.NotADbfFile && p.Message.Contains("holds only 13"));
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Equal(13, exclusive.RecordCount);
+            Assert.Equal(3, exclusive.RecordsMissingFromFile);
+            Assert.True(exclusive.MaintainsIndex);
+            Assert.DoesNotContain(exclusive.ReadAll(), r => Convert.ToInt32(r["CALL_ID"]) == 0);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
     // A cut-off batch's note names the indexes it was writing; once they've all been deleted (rebuilt
     // in VFP, say, or dropped) the note is moot, and the next write clears it rather than refusing.
     [Fact]
@@ -396,10 +425,17 @@ public sealed partial class CdxWriteTests
         SharedFile.WriteAllBytes(dbf, bytes);
         DbfJournal.Write(dbf, new DbfJournalEntry(0, [new DbfJournalChange("calls.CDX", "", null, null)], IsBatch: true));
 
-        using var table = DbfTable.Open(dbf, writable: true);
-        Assert.True(table.HasPendingJournal);
-        table.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the index went" });
-        Assert.False(table.HasPendingJournal);
+        using (var table = DbfTable.Open(dbf, writable: true))
+        {
+            Assert.True(table.HasPendingJournal);
+            table.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the index went" });
+            Assert.False(table.HasPendingJournal);
+        }
+
+        // An exclusive open clears it straight away, before any write.
+        DbfJournal.Write(dbf, new DbfJournalEntry(0, [new DbfJournalChange("calls.CDX", "", null, null)], IsBatch: true));
+        using (var exclusive = DbfTable.Open(dbf, writable: true, exclusive: true))
+            Assert.False(exclusive.HasPendingJournal);
     }
 
     // The note's index names are matched however their case is spelled: a .cdx still there under

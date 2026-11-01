@@ -162,6 +162,7 @@ public sealed partial class DbfTable : IDisposable
                     table.AttachOtherIndexes(path, table.Header);
                     table.RepairShortTable();
                     table.RepairUnfinishedAppends();
+                    table.ClearMootBatchNote();
                 }
                 catch
                 {
@@ -889,9 +890,21 @@ public sealed partial class DbfTable : IDisposable
         return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
     }
 
-    /// <summary>How many whole records the file holds, past its header (the header's count aside).</summary>
-    internal long RecordsInFile() =>
-        _stream.Length <= Header.HeaderLength || Header.RecordLength == 0 ? 0 : (_stream.Length - Header.HeaderLength) / Header.RecordLength;
+    /// <summary>
+    /// How many of the records the header counts the file really holds: whole records, up to the last one
+    /// that starts with a deletion flag (a space or '*'). After a power cut the file can be long enough
+    /// and still end in records that were never written: an end-of-file mark, then zeros to the end of
+    /// the disk page (found by the Hyper-V power cuts).
+    /// </summary>
+    internal long RecordsInFile()
+    {
+        if (_stream.Length <= Header.HeaderLength || Header.RecordLength == 0)
+            return 0;
+        var held = Math.Min((_stream.Length - Header.HeaderLength) / Header.RecordLength, Header.RecordCount);
+        while (held > 0 && ReadByteAt(Header.HeaderLength + (held - 1) * Header.RecordLength) is not ((byte)' ' or (byte)'*'))
+            held--;
+        return held;
+    }
 
     /// <summary>
     /// How many records the header counted that the file didn't hold, which this writable exclusive open
@@ -1880,13 +1893,26 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>True when the table's journal holds a note: a write was cut off, or another Thunder.Dbf process is mid-write.</summary>
     public bool HasPendingJournal => _path is not null && DbfJournal.IsPending(_path);
 
-    // Finishes a key change a writer was cut off in the middle of. Every journaled write holds the
-    // header lock, which the caller holds now; the record is locked too, against legacy programs
-    // editing it meanwhile (without waiting: whoever holds it may be waiting for this header lock,
-    // and will finish the note itself). Each noted change is matched to exactly one kept tag (index
-    // file, tag name, key length); a note this table can't match stops writes, rather than being
-    // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
-    // record has are added and forced to disk before stale ones go, so none goes missing on the way.
+    // On a writable exclusive open: a cut-off batch's note whose indexes have all been deleted is moot,
+    // so it goes now rather than at the first write.
+    private void ClearMootBatchNote()
+    {
+        if (!_exclusive || !_stream.CanWrite || _path is null || !DbfJournal.IsPending(_path))
+            return;
+        try
+        {
+            if (DbfJournal.Read(_path) is { IsBatch: true } note && note.Changes.Count > 0 && !NamedIndexesRemain(note))
+            {
+                DbfJournal.Clear(_path);
+                _journalPending = false;
+            }
+        }
+        catch (InvalidDataException)
+        {
+            // A note this version can't read: the first write explains it.
+        }
+    }
+
     // Whether any index file a batch note names is still next to the table. The names come from the
     // note, a file, so only their bare file names count, and they're matched however their case is
     // spelled, as FoxPro and the companion-file lookups match them (on Linux too).
@@ -1898,6 +1924,13 @@ public sealed partial class DbfTable : IDisposable
         return note.Changes.Any(c => present.Contains(Path.GetFileName(c.IndexFile)));
     }
 
+    // Finishes a key change a writer was cut off in the middle of. Every journaled write holds the
+    // header lock, which the caller holds now; the record is locked too, against legacy programs
+    // editing it meanwhile (without waiting: whoever holds it may be waiting for this header lock,
+    // and will finish the note itself). Each noted change is matched to exactly one kept tag (index
+    // file, tag name, key length); a note this table can't match stops writes, rather than being
+    // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
+    // record has are added and forced to disk before stale ones go, so none goes missing on the way.
     private void ReplayJournal(bool lookForNote = true)
     {
         if (_path is null || !_stream.CanWrite || _deferring)
