@@ -889,11 +889,6 @@ public sealed partial class DbfTable : IDisposable
         return UnfinishedAppends(Header.HeaderLength + (long)Header.RecordCount * Header.RecordLength);
     }
 
-    // On a writable exclusive open: takes records left past the count back off and rebuilds every
-    // index, since a writer cut off may already have added keys for them, and a key left behind would
-    // point at whatever record is appended there next. So nothing is taken off unless every index
-    // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
-    // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
     /// <summary>How many whole records the file holds, past its header (the header's count aside).</summary>
     internal long RecordsInFile() =>
         _stream.Length <= Header.HeaderLength || Header.RecordLength == 0 ? 0 : (_stream.Length - Header.HeaderLength) / Header.RecordLength;
@@ -961,6 +956,11 @@ public sealed partial class DbfTable : IDisposable
         return (byte)_stream.ReadByte();
     }
 
+    // On a writable exclusive open: takes records left past the count back off and rebuilds every
+    // index, since a writer cut off may already have added keys for them, and a key left behind would
+    // point at whatever record is appended there next. So nothing is taken off unless every index
+    // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
+    // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
     private void RepairUnfinishedAppends()
     {
         if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
@@ -1887,6 +1887,17 @@ public sealed partial class DbfTable : IDisposable
     // file, tag name, key length); a note this table can't match stops writes, rather than being
     // written over, until the table is opened with those indexes or they're all rebuilt. Keys the
     // record has are added and forced to disk before stale ones go, so none goes missing on the way.
+    // Whether any index file a batch note names is still next to the table. The names come from the
+    // note, a file, so only their bare file names count, and they're matched however their case is
+    // spelled, as FoxPro and the companion-file lookups match them (on Linux too).
+    private bool NamedIndexesRemain(DbfJournalEntry note)
+    {
+        var present = Directory.EnumerateFiles(Path.GetDirectoryName(Path.GetFullPath(_path!))!)
+            .Select(Path.GetFileName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return note.Changes.Any(c => present.Contains(Path.GetFileName(c.IndexFile)));
+    }
+
     private void ReplayJournal(bool lookForNote = true)
     {
         if (_path is null || !_stream.CanWrite || _deferring)
@@ -1914,7 +1925,7 @@ public sealed partial class DbfTable : IDisposable
             RecheckAfterReplay();
             return;
         }
-        if (entry.IsBatch && entry.Changes.Count > 0 && entry.Changes.All(c => !File.Exists(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_path))!, c.IndexFile))))
+        if (entry.IsBatch && entry.Changes.Count > 0 && !NamedIndexesRemain(entry))
         {
             // Every index the cut-off batch was writing has been deleted: there's nothing left for it to be out of step with.
             DbfJournal.Clear(_path);
