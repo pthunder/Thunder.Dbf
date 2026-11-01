@@ -160,6 +160,7 @@ public sealed partial class DbfTable : IDisposable
                     if (OperatingSystem.IsWindows())
                         table.WatchFolder(); // before the first listing, so nothing made meanwhile is missed
                     table.AttachOtherIndexes(path, table.Header);
+                    table.RepairShortTable();
                     table.RepairUnfinishedAppends();
                 }
                 catch
@@ -893,6 +894,73 @@ public sealed partial class DbfTable : IDisposable
     // point at whatever record is appended there next. So nothing is taken off unless every index
     // next to the table is kept here or can be taken over with a rebuild; otherwise the records stay,
     // Check() keeps reporting them, and the indexes that can't be rebuilt keep blocking writes.
+    /// <summary>How many whole records the file holds, past its header (the header's count aside).</summary>
+    internal long RecordsInFile() =>
+        _stream.Length <= Header.HeaderLength || Header.RecordLength == 0 ? 0 : (_stream.Length - Header.HeaderLength) / Header.RecordLength;
+
+    /// <summary>
+    /// How many records the header counted that the file didn't hold, which this writable exclusive open
+    /// took off the count (0 when none): the count reached the disk and the last records didn't (a power
+    /// cut, with the operating system writing pages back out of order), or a copy was cut short. The
+    /// bytes of a part record are kept in <see cref="CutOffBackupPath"/>.
+    /// </summary>
+    public long RecordsMissingFromFile { get; private set; }
+
+    // A header counting more records than the file holds (found by the Hyper-V power cuts) can't be read
+    // to the end, and Visual FoxPro won't open it (error 2091). Only an exclusive open, where nobody can
+    // be appending, cuts the count back to the whole records the file has; the bytes of a part record are
+    // kept beside the table first, and the indexes it keeps are rebuilt, since their keys for the missing
+    // records point past the end.
+    private void RepairShortTable()
+    {
+        if (!_exclusive || !_stream.CanWrite || RecordsInFile() >= Header.RecordCount)
+            return;
+        var whole = RecordsInFile();
+        var dataEnd = Header.HeaderLength + whole * Header.RecordLength;
+        if (_stream.Length > dataEnd + 1 || (_stream.Length == dataEnd + 1 && ReadByteAt(dataEnd) != EndOfFile))
+        {
+            var (backup, copy) = NewCutOffBackup();
+            using (copy)
+            {
+                _stream.Position = dataEnd;
+                _stream.CopyTo(copy);
+                FlushToDisk(copy);
+            }
+            CutOffBackupPath = backup;
+        }
+        RecordsMissingFromFile = Header.RecordCount - whole;
+        Header.RecordCount = (uint)whole;
+        _stream.SetLength(dataEnd);
+        _stream.Position = dataEnd;
+        _stream.WriteByte(EndOfFile);
+        FlushToDisk(_stream);
+        Header.WriteFixed(_stream);
+        FlushToDisk(_stream);
+
+        // The structural .cdx was checked against the count as it was, reading records that weren't
+        // there, so it was refused; against the table as it now is, a takeover with a rebuild may take it.
+        if (_maintainFoxProIndexes && Header.HasStructuralCdx && !HasMaintainedStructuralCdx && FindCompanion(_path!, ".cdx") is { } cdx)
+        {
+            try
+            {
+                MaintainIndexCore(cdx, rebuild: true); // rebuilds every index the table keeps
+                return;
+            }
+            catch (DbfException)
+            {
+                // Still unreadable: it stays unmaintained, and writes say so, as they did.
+            }
+        }
+        if (MaintainedIndexes.Any())
+            RebuildIndex();
+    }
+
+    private byte ReadByteAt(long offset)
+    {
+        _stream.Position = offset;
+        return (byte)_stream.ReadByte();
+    }
+
     private void RepairUnfinishedAppends()
     {
         if (!_exclusive || !_stream.CanWrite || RecordsPastCount() == 0)
@@ -1050,7 +1118,7 @@ public sealed partial class DbfTable : IDisposable
             // Found by fuzzing: a header that counts more records than the file holds (a copy cut short).
             throw new DbfException(DbfErrorCode.NotADbfFile,
                 $"The table's header counts {Header.RecordCount:N0} records, but the file ends before record {index + 1:N0}.",
-                "The file was probably truncated by an interrupted copy. Restore it from a backup; the records before it can still be read one by one.", _path, ex);
+                "A power cut or an interrupted copy cut it short. Open it with exclusive: true (writable) to cut the count back to the records it holds, or restore it from a backup.", _path, ex);
         }
         return Decode(index, _buffer);
     }
@@ -1843,6 +1911,13 @@ public sealed partial class DbfTable : IDisposable
         if (entry is null)
         {
             DbfJournal.Clear(_path); // torn: cut off while noting, before any index change
+            RecheckAfterReplay();
+            return;
+        }
+        if (entry.IsBatch && entry.Changes.Count > 0 && entry.Changes.All(c => !File.Exists(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(_path))!, c.IndexFile))))
+        {
+            // Every index the cut-off batch was writing has been deleted: there's nothing left for it to be out of step with.
+            DbfJournal.Clear(_path);
             RecheckAfterReplay();
             return;
         }
