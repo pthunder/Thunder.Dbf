@@ -52,8 +52,10 @@ public sealed class FuzzRegressionTests : IDisposable
         Patch(path, bytes => BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), 0xFFFF_FFF0));
         using var table = DbfTable.Open(path);
         Assert.Equal(DbfErrorCode.NotADbfFile, Assert.Throws<DbfException>(() => table.RecordCount).Code);
+        Assert.Equal(DbfErrorCode.NotADbfFile, Assert.Throws<DbfException>(() => table.ReadAll().First()).Code);
         using var db = DbfDatabase.Open(_dir.FullName);
-        _ = db.Check(); // reports it among the tables' problems, doesn't throw
+        var report = db.Check().Tables.Single(t => t.Name.Equals("dbase_03", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(report.Problems, p => p.Code == DbfErrorCode.NotADbfFile); // reported, not thrown
     }
 
     // An index whose entries point past the table's end (the table was cut back, the index wasn't).

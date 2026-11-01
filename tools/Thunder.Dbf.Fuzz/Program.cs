@@ -57,7 +57,6 @@ for (var seed = first; seed < first + count; seed++)
         try { Exercise(Path.Combine(dir, Path.GetFileName(set.First(f => Path.GetExtension(f).Equals(".dbf", StringComparison.OrdinalIgnoreCase)))), dir); }
         catch (Exception ex) { thrown = ex; }
     }, 64 * 1024 * 1024) { IsBackground = true };
-    var clock = Stopwatch.StartNew();
     thread.Start();
     if (!thread.Join(TimeSpan.FromSeconds(10)))
     {

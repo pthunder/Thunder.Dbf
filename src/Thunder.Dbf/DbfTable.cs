@@ -1630,9 +1630,11 @@ public sealed partial class DbfTable : IDisposable
             }
             catch (Exception ex) when (ex is FormatException or KeyNotFoundException or InvalidOperationException)
             {
-                // The expression came from the index file, so one that doesn't parse or doesn't fit the
-                // table is a damaged index (found by fuzzing). The parser's and evaluator's messages name
-                // fields, functions and positions, never a path (guideline 1.2).
+                // The record was encoded and decoded again before planning, so every value already has its
+                // field's own type: a key that can't be worked out is the expression's fault, and the
+                // expression came from the index file, so the index is damaged or another table's (found by
+                // fuzzing). The parser's and evaluator's messages name fields, functions and positions,
+                // never a path (guideline 1.2).
                 throw new DbfException(DbfErrorCode.IndexDamaged, $"Tag {tag.Name}'s key expression can't be worked out for this table: {ex.Message}",
                     "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex);
             }
