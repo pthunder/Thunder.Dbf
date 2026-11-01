@@ -194,6 +194,24 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx);
     }
 
+    // Inside a batch the cache shares its nodes rather than copying them: thousands of mixed changes
+    // across X#'s seven tags (splits, keys moving, records deleted and recalled) must still leave
+    // exactly the keys record-by-record writes would.
+    [Fact]
+    public void A_long_mixed_batch_over_seven_tags_leaves_every_key_right()
+    {
+        var (dbf, cdx) = People();
+        using (var table = TakeOver(dbf, cdx))
+        {
+            table.DeferIndexWrites = true;
+            table.FlushWritesToDisk = false;
+            using (table.LockTable())
+                Mutate(table, new Random(23), steps: 3000);
+            Assert.False(table.HasPendingJournal);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
     // What a process killed during a batch leaves on disk: the records, and an index without their
     // keys. It isn't silent: the next writable open refuses the index until it's rebuilt.
     [Fact]

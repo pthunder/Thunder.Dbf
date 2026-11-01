@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **Faster deferred batches:** inside a `DeferIndexWrites` batch the `.cdx` node cache shares its nodes instead of copying them in and out (the copies were most of a 7-tag batch's time on Windows), and each record's planned key changes are sized up front.
 - **`DeferIndexWrites`, for migrations and bulk loads:** with it on, a batch under `LockTable()` keeps its `.cdx` changes in memory and writes each changed page once, when the lock is disposed. It holds the index lock meanwhile (Visual FoxPro users wait), and the batch is noted in the table's journal until its pages are written, so a batch cut off (killed, or a failed write) stops Thunder.Dbf writes until `RebuildIndex()`, updates included. Off by default; ignored while `UseJournal` is on. `docs/durability.md` has a table of what each setting trades.
 - **Faster `.cdx` writes on Windows:** a writable table watches its folder for new files instead of checking the folder before every write (other systems, and a watcher that fails, keep the folder-time check). Notice of a new file comes a few milliseconds after it appears, so a write within those milliseconds doesn't see it; the next one does.
 - **A FoxPro tag whose keys would be longer than 240 bytes is refused** with `InvalidValue` before anything is written. It used to fail with an `InvalidDataException` from inside the tree code (found by the Visual FoxPro stress tests; nothing was damaged).
