@@ -155,7 +155,7 @@ On the same PC, what was left after a writer was cut off:
 | Writers killed mid-write | never silently wrong: clean, or the damage reported on the next open | 51 of 180 left silently wrong (a key SEEK can't find, or one REINDEX disagrees with) |
 | Power cut (Hyper-V), default settings | 50 cuts: no confirmed write lost, never silently wrong | VFP reading the same files: 15 silently wrong, 9 unopenable |
 
-What each setting trades is in [Durability](docs/durability.md#choosing).
+Bold marks where Thunder.Dbf leads. The 50 power cuts are the default-settings share of 150 (50 more each with `FlushWritesToDisk = false` and with deferred batches, in which Thunder.Dbf was never silently wrong either). What each setting trades is in [Durability](docs/durability.md#choosing).
 
 ## Documentation
 
