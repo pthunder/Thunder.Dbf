@@ -291,6 +291,7 @@ public sealed partial class DbfTable : IDisposable
         if (!File.Exists(full))
             throw new DbfException(DbfErrorCode.TableNotFound, "There's no index file at that path.", "Check the name and folder.", diagnostic: full);
         var hadStructuralCdx = HasMaintainedStructuralCdx;
+        var (refusal, rebuildable) = (_structuralCdxRefusal, _structuralCdxRebuildable);
         if (!TryAttachIndex(full, acceptAfterRebuild: rebuild))
             throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"The index {name} can't be kept up to date (unreadable, or a format or sort order Thunder.Dbf doesn't write).",
                 rebuild
@@ -314,6 +315,7 @@ public sealed partial class DbfTable : IDisposable
             index.RebuildAbandoned();
             index.Dispose();
             HasMaintainedStructuralCdx = hadStructuralCdx;
+            (_structuralCdxRefusal, _structuralCdxRebuildable) = (refusal, rebuildable); // writes say why, as before
             _unmaintainedIndexes = unmaintainedBefore;
             throw;
         }
@@ -2144,6 +2146,8 @@ public sealed partial class DbfTable : IDisposable
     /// Rebuilds every tag of every index the table keeps (the production .mdx, a structural .cdx, and
     /// attached .ndx/.ntx/.idx files) from the table, like dBASE's REINDEX. Use it after writing with
     /// <c>allowUnmaintainedIndexes</c>, or when an index has gone out of step.
+    /// A structural .cdx refused when the table opened, for keys out of step with the table or out of
+    /// order, is taken over and rebuilt too, as <see cref="MaintainIndex(string, bool)"/> with a rebuild does.
     /// </summary>
     public void RebuildIndex()
     {

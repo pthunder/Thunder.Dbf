@@ -271,6 +271,45 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A takeover whose rebuild fails (a CANDIDATE key twice in the table, put there without the index)
+    // leaves the .cdx unmaintained and writes refused for the same reason as before (review of #24).
+    [Fact]
+    public void A_takeover_whose_rebuild_fails_leaves_writes_refused_as_before()
+    {
+        var (dbf, _) = Copy("infused-dbf/foxprodb", "calls");
+        using (var unindexed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+        {
+            var template = unindexed.Read(0).Values.ToArray();
+            unindexed.Append(Call(template, (int)unindexed.Read(3)["CALL_ID"]!, contact: 1, subject: "a CALL_ID record 4 already has"));
+        }
+        using var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
+        var row = exclusive.Read(0).Values.ToArray();
+        row[0] = 6000;
+        var before = Assert.Throws<DbfException>(() => exclusive.Append(row));
+        Assert.ThrowsAny<DbfException>(exclusive.RebuildIndex);
+        Assert.False(exclusive.MaintainsIndex);
+        var after = Assert.Throws<DbfException>(() => exclusive.Append(row));
+        Assert.Equal(before.Code, after.Code);
+        Assert.Equal(before.Message, after.Message);
+        Assert.Equal(before.Diagnostic, after.Diagnostic);
+    }
+
+    // The takeover stops at what a rebuild replaces: a .cdx refused as damaged (a page no tree can
+    // own) still isn't taken over by RebuildIndex().
+    [Fact]
+    public void RebuildIndex_doesnt_take_over_a_cdx_refused_as_damaged()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        BitConverter.TryWriteBytes(bytes.AsSpan(0, 4), 0x7FFF_FE00u); // the directory's root, far past the file
+        SharedFile.WriteAllBytes(cdx, bytes);
+        using var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true);
+        Assert.False(exclusive.MaintainsIndex);
+        Assert.Throws<DbfException>(exclusive.RebuildIndex);
+        Assert.False(exclusive.MaintainsIndex);
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // untouched
+    }
+
     // A batch of updates cut off leaves the key counts matching the table, so only the batch's note
     // in the journal tells: the next write refuses, until a rebuild clears it.
     [Fact]
