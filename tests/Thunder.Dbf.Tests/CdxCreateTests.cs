@@ -208,6 +208,29 @@ public sealed class CdxCreateTests : IDisposable
         Assert.Equal([0xC8, 0x41, 0x4A, 0x20, 0x8A], key[..5]); // Č A J, space, Š
     }
 
+    // The whole path in 1252, through a tag: é takes its capital, ž stays lower case as in VFP.
+    [Fact]
+    public void UPPER_keys_in_1252_keep_the_bytes_Visual_FoxPro_keeps()
+    {
+        var path = BareKinds();
+        using (var table = OpenToIndex(path))
+        {
+            Assert.Equal(1252, table.Encoding.CodePage);
+            var row = table.Read(0).Values.ToArray();
+            row[0] = 5000;
+            row[2] = "café žar";
+            table.Append(row);
+            table.CreateIndexTag("UNAME", "UPPER(name)");
+        }
+
+        using var check = DbfTable.Open(path);
+        using var index = CdxIndex.Open(CdxIndex.FindFor(path)!, table: check);
+        var key = index["UNAME"].RawEntries().Single(e => e.Record == check.RecordCount).Key;
+        Assert.Equal(System.Text.Encoding.GetEncoding(1252).GetBytes("CAFÉ žAR".PadRight(30)), key);
+        Assert.Equal(0xC9, key[3]); // É
+        Assert.Equal(0x9E, key[5]); // ž, kept
+    }
+
     // VFP 9 SP2's UPPER() per code page, as measured byte by byte with VFP running in each: one ordinary
     // capital, and every byte where VFP differs from the rule (.NET's capital if the code page has it).
     [Theory]
