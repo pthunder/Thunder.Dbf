@@ -735,11 +735,14 @@ public sealed partial class DbfTable : IDisposable
         _deferring = false;
         Exception? failure = null;
         var clean = true;
+        // Forced to disk whatever FlushWritesToDisk says (one flush per batch): the note is emptied next,
+        // and it must never outlive the pages it covers, or a power cut could keep an emptied note and
+        // lose the batch (found by the Hyper-V power cuts, 3 in 50 with flushes off).
         foreach (var index in MaintainedIndexes)
         {
             try
             {
-                clean &= index.FinishDeferredWrites(ForcesWrites);
+                clean &= index.FinishDeferredWrites(toDisk: true);
             }
             catch (Exception ex)
             {
@@ -750,6 +753,8 @@ public sealed partial class DbfTable : IDisposable
         // in the batch failed partway; otherwise it stays, and stops every Thunder.Dbf writer until a rebuild.
         if (failure is null && clean && !_indexesNeedRebuild)
         {
+            _memo?.FlushToDisk(true);
+            FlushToDisk(_stream, true); // the batch's records and count, on disk before the note goes too
             DbfJournal.Clear(_path!);
             return;
         }
