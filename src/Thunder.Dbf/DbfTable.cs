@@ -2156,6 +2156,15 @@ public sealed partial class DbfTable : IDisposable
         if (!_stream.CanWrite)
             throw new DbfException(DbfErrorCode.ReadOnlyConnection, "The table was opened read-only.",
                 "Open it with writable: true to rebuild its index.", _path);
+        // A structural .cdx refused when the table opened, for what a rebuild replaces anyway (keys out
+        // of step with the table, after a batch was cut off, say), is taken over and rebuilt with the
+        // rest, as MaintainIndex(path, rebuild: true) would (found by the Visual FoxPro kill tests).
+        if (_maintainFoxProIndexes && !HasMaintainedStructuralCdx && _structuralCdxRebuildable && _path is not null
+            && FindCompanion(_path, ".cdx") is { } structuralCdx)
+        {
+            MaintainIndexCore(structuralCdx, rebuild: true); // attaches it, then rebuilds every index the table keeps
+            return;
+        }
         if (!MaintainedIndexes.Any())
             throw new DbfException(DbfErrorCode.IndexDamaged, "The table has no index open that Thunder.Dbf can rebuild.",
                 "Open the table by path, writable, with its index files next to it.", _path);

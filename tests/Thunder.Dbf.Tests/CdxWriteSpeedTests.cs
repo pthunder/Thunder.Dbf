@@ -238,6 +238,37 @@ public sealed partial class CdxWriteTests
         });
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
         AssertIndexMatchesTable(dbf, cdx); // the batch that finished is whole
+
+        // The documented way back: RebuildIndex() on an exclusive open.
+        var cutOff = Path.Combine(killed, "calls.dbf");
+        using (var exclusive = DbfTable.Open(cutOff, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.True(exclusive.MaintainsIndex);
+            Assert.False(exclusive.HasPendingJournal);
+        }
+        AssertIndexMatchesTable(cutOff, Path.Combine(killed, "calls.CDX"), rebuilt: true);
+    }
+
+    // A structural .cdx refused when the table opened (short of the table's records here) is what
+    // RebuildIndex() is for: it takes the index over and rebuilds it (found by the Visual FoxPro kill
+    // tests, where it said "no index open" and only MaintainIndex(path, rebuild: true) would do).
+    [Fact]
+    public void RebuildIndex_takes_over_a_structural_cdx_that_was_refused_at_open()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var unindexed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+        {
+            var template = unindexed.Read(0).Values.ToArray();
+            unindexed.Append(Call(template, 5000, contact: 1, subject: "the index never heard of this"));
+        }
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.False(exclusive.MaintainsIndex); // refused: one key short
+            exclusive.RebuildIndex();
+            Assert.True(exclusive.MaintainsIndex);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
     // A batch of updates cut off leaves the key counts matching the table, so only the batch's note
