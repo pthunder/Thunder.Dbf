@@ -211,6 +211,8 @@ public sealed class IndexSafetyTests : IDisposable
         table.Append(table.Read(0).Values.ToArray()); // no index yet: fine
 
         Copy("retroinv/NUM2000.NDX"); // the legacy app runs INDEX ON meanwhile
+        if (table.WatchesFolder) // Windows: the watcher's notice comes a moment after the file (docs/durability.md)
+            Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)));
         var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
     }
