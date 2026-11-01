@@ -193,6 +193,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
     internal object? CachedNode(long offset, CdxTag owner) =>
         Unchanged && _nodes.TryGetValue(offset, out var hit) && hit.Owner == owner ? hit.Node : null;
 
+    internal void ForgetNode(long offset) => _nodes.Remove(offset);
+
     internal void CacheNode(long offset, CdxTag owner, object node)
     {
         if (!Unchanged)
@@ -1716,6 +1718,7 @@ public sealed partial class CdxTag : IMaintainedTag
             if (isRoot)
             {
                 node.Attributes &= unchecked((ushort)~RootAttribute);
+                _index.ForgetNode(node.Offset); // the node moves: one cached copy per page
                 node.Offset = _index.AllocatePage();
             }
             var right = Split(node, appendedAtEnd);
@@ -1923,6 +1926,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 return;
             var child = ReadNode(root.Children![0]);
             var childPage = child.Offset;
+            _index.ForgetNode(childPage); // the node moves: one cached copy per page
             child.Offset = root.Offset;
             child.Attributes |= RootAttribute;
             child.Left = child.Right = NoPage;
