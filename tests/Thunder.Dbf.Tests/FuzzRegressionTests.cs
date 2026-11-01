@@ -87,6 +87,22 @@ public sealed class FuzzRegressionTests : IDisposable
         var error = Assert.Throws<DbfException>(() => table.Append(table.Read(0).Values.ToArray()));
         Assert.Equal(DbfErrorCode.IndexDamaged, error.Code);
         Assert.Contains("key expression", error.Message);
+        Assert.Contains("NUM2000", error.Diagnostic); // the tag's name, for logs only
+        Assert.DoesNotContain("NUM2000", error.Message);
+    }
+
+    // The other side of that: a wrongly typed value from the caller is refused when it's encoded,
+    // before any key is worked out, so it stays the caller's value error, never "damaged index".
+    [Fact]
+    public void A_wrongly_typed_value_for_an_indexed_field_is_still_the_callers_mistake()
+    {
+        var path = Copy("retroinv", "NUM2000");
+        using var table = DbfTable.Open(path, writable: true);
+        var values = table.Read(0).Values.ToArray();
+        var id = table.Fields.ToList().FindIndex(f => f.Name == "ID");
+        values[id] = "not a number";
+        var error = Record.Exception(() => table.Append(values));
+        Assert.True(error is ArgumentException or FormatException or OverflowException, $"expected a value error, got {error}");
     }
 
     // Visual FoxPro numbers only Integer fields; the autoincrement flag on a date is damage, and ignored.
