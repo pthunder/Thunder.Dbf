@@ -352,6 +352,69 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(copy, Path.Combine(killed, "calls.CDX"), rebuilt: true);
     }
 
+    // A power cut can leave the header's count on disk and not the last records (the operating system
+    // wrote the pages back out of order): found 4 times in 50 Hyper-V cuts. An exclusive open cuts the
+    // count back to the whole records the file holds, keeps the part record's bytes beside the table,
+    // and rebuilds the index; Check() reports it first, and a shared open leaves it alone.
+    [Fact]
+    public void A_header_counting_records_the_file_lacks_is_reported_then_cut_back_by_an_exclusive_open()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        int recordLength, headerLength;
+        using (var original = DbfTable.Open(dbf))
+            (recordLength, headerLength) = (original.Header.RecordLength, original.Header.HeaderLength);
+        var halfRecord = SharedFile.ReadAllBytes(dbf).AsSpan((int)(headerLength + 10L * recordLength), recordLength / 2).ToArray();
+        using (var file = SharedFile.OpenWrite(dbf))
+            file.SetLength(headerLength + 10L * recordLength + recordLength / 2); // 16 counted, 10 and a half there
+
+        var report = DbfDatabase.Open(_dir.FullName).Check().Tables.Single(t => t.Name.Equals("calls", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(report.Problems, p => p.Code == DbfErrorCode.NotADbfFile && p.Message.Contains("holds only 10"));
+
+        using (var shared = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, allowUnmaintainedIndexes: true))
+            Assert.Equal(16, shared.RecordCount); // only an exclusive open may cut the count back
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Equal(10, exclusive.RecordCount);
+            Assert.Equal(6, exclusive.RecordsMissingFromFile);
+            Assert.Equal(halfRecord, File.ReadAllBytes(exclusive.CutOffBackupPath!));
+            Assert.Equal(10, exclusive.ReadAll().Count());
+            Assert.True(exclusive.MaintainsIndex);
+        }
+        Assert.Equal(headerLength + 10L * recordLength + 1, new FileInfo(dbf).Length);
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // A cut-off batch's note names the indexes it was writing; once they've all been deleted (rebuilt
+    // in VFP, say, or dropped) the note is moot, and the next write clears it rather than refusing.
+    [Fact]
+    public void A_batch_note_whose_indexes_are_all_gone_is_cleared()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        File.Delete(cdx);
+        var bytes = SharedFile.ReadAllBytes(dbf);
+        bytes[28] &= unchecked((byte)~0x01); // no structural .cdx any more
+        SharedFile.WriteAllBytes(dbf, bytes);
+        DbfJournal.Write(dbf, new DbfJournalEntry(0, [new DbfJournalChange("calls.CDX", "", null, null)], IsBatch: true));
+
+        using var table = DbfTable.Open(dbf, writable: true);
+        Assert.True(table.HasPendingJournal);
+        table.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the index went" });
+        Assert.False(table.HasPendingJournal);
+    }
+
+    // The note's index names are matched however their case is spelled: a .cdx still there under
+    // another case keeps the note, and writes refused, on Linux as on Windows (review of #27).
+    [Fact]
+    public void A_batch_note_naming_an_index_in_another_case_still_refuses()
+    {
+        var (dbf, _) = Copy("infused-dbf/foxprodb", "calls");
+        DbfJournal.Write(dbf, new DbfJournalEntry(0, [new DbfJournalChange("CALLS.cdx", "", null, null)], IsBatch: true));
+        using var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true);
+        var error = Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+        Assert.True(table.HasPendingJournal);
+    }
+
     // The journal promises each write's keys are finished on disk before its note goes, so a table
     // keeping one writes record by record whatever DeferIndexWrites says.
     [Fact]
