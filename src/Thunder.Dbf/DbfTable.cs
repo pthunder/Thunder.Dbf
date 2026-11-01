@@ -1633,10 +1633,10 @@ public sealed partial class DbfTable : IDisposable
                 // The record was encoded and decoded again before planning, so every value already has its
                 // field's own type: a key that can't be worked out is the expression's fault, and the
                 // expression came from the index file, so the index is damaged or another table's (found by
-                // fuzzing). The parser's and evaluator's messages name fields, functions and positions,
-                // never a path (guideline 1.2).
-                throw new DbfException(DbfErrorCode.IndexDamaged, $"Tag {tag.Name}'s key expression can't be worked out for this table: {ex.Message}",
-                    "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex);
+                // fuzzing). The tag's name and the parser's message go in Diagnostic (guideline 1.2).
+                throw new DbfException(DbfErrorCode.IndexDamaged, "An index tag's key expression can't be worked out for this table.",
+                    "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex,
+                    diagnostic: $"tag {tag.Name}: {ex.Message}");
             }
             if (oldKey is not null && newKey is not null && oldKey.AsSpan().SequenceEqual(newKey))
                 continue;
