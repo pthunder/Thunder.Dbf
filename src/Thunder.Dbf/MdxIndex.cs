@@ -158,15 +158,31 @@ public sealed partial class MdxIndex : IDisposable
 
     internal byte[] ReadBlock(int page)
     {
-        var offset = (long)page * PageSize;
-        if (page <= 0 || offset + BlockSize > _stream.Length)
+        var block = new byte[BlockSize];
+        ReadBlock(page, block);
+        return block;
+    }
+
+    /// <summary>Reads a block into <paramref name="block"/> (BlockSize bytes), so a hot path can reuse one buffer.</summary>
+    internal void ReadBlock(int page, byte[] block) => ReadAt(page, 0, block.AsSpan(0, BlockSize));
+
+    /// <summary>Reads <paramref name="bytes"/> from <paramref name="at"/> bytes into a block, without reading the whole block.</summary>
+    internal void ReadAt(int page, int at, Span<byte> bytes)
+    {
+        if (page <= 0)
             throw new InvalidDataException($"Index page {page} is outside the .mdx file.");
 
-        var block = new byte[BlockSize];
+        // A block past the end shows up as a short read, without asking the file's length first.
         DbfTable.DiscardReadBuffer(_stream); // other programs change indexes too
-        _stream.Position = offset;
-        _stream.ReadExactly(block);
-        return block;
+        _stream.Position = (long)page * PageSize + at;
+        try
+        {
+            _stream.ReadExactly(bytes);
+        }
+        catch (EndOfStreamException)
+        {
+            throw new InvalidDataException($"Index page {page} is outside the .mdx file.");
+        }
     }
 }
 
