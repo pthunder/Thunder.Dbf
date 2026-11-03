@@ -186,13 +186,8 @@ public sealed class MdxInPlaceTests : IDisposable
             using (var index = MdxIndex.Open(stream, leaveOpen: true))
             {
                 var tag = index["NAME"];
-                try
-                {
-                    tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, "K9999", tag.Name, tag.Expression), 99_999);
-                }
-                catch (IOException)
-                {
-                }
+                var cut = Record.Exception(() => tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, "K9999", tag.Name, tag.Expression), 99_999));
+                Assert.True(cut is null || (stream.CutOff && cut is IOException { Message: "cut off" }), $"{shape}: {cut}");
             }
             using var after = new MemoryStream(stream.ToArray());
             using var reopened = MdxIndex.Open(after);
@@ -215,6 +210,7 @@ public sealed class MdxInPlaceTests : IDisposable
             if (!stream.CutOff)
             {
                 Assert.Contains("K9999", scanned); // the whole insert went through
+                Assert.True(allowed >= 3, $"{shape}: only {allowed} writes were cut, so nothing was really tested");
                 break;
             }
         }
@@ -236,16 +232,47 @@ public sealed class MdxInPlaceTests : IDisposable
 
         public bool CutOff { get; private set; }
 
-        // A MemoryStream subclass's span Write lands here too, so this is the one place writes are counted.
+        // Both overloads count, so a writer that switches between them can't slip writes past the cut.
         public override void Write(byte[] buffer, int offset, int count)
+        {
+            Count();
+            base.Write(buffer, offset, count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer)
+        {
+            Count();
+            base.Write(buffer.ToArray(), 0, buffer.Length);
+        }
+
+        private void Count()
         {
             if (_left-- <= 0)
             {
                 CutOff = true;
                 throw new IOException("cut off");
             }
-            base.Write(buffer, offset, count);
         }
+    }
+
+    // A tag whose root points back at itself would send the search down for ever: the depth guard
+    // stops it with an explanation, on insert and on lookup alike.
+    [Fact]
+    public void A_tag_that_loops_is_reported_on_insert_not_followed()
+    {
+        using var stream = OpenIndex(descending: false, ["Bbb", "Ccc"]);
+        using var index = MdxIndex.Open(stream, leaveOpen: true);
+        var tag = index["NAME"];
+        var root = RootPage(index, tag);
+        var block = index.ReadBlock(root);
+        var count = BinaryPrimitives.ReadInt32LittleEndian(block);
+        BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(8 + count * tag.ItemLength), root); // an interior node whose last child is itself
+        BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(8), root);
+        index.WriteBlock(root, block);
+
+        var key = MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, "Mmm", tag.Name, tag.Expression);
+        Assert.Contains("levels", Assert.Throws<InvalidDataException>(() => tag.Insert(key, 9)).Message);
+        Assert.Throws<InvalidDataException>(() => tag.FirstRecordFor(key));
     }
 
     [Fact]

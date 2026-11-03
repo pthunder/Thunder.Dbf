@@ -384,6 +384,9 @@ public sealed partial class MdxTag
     // the top down, so each parent points at the new right half before its child gives those keys up.
     // A cut can leave keys in both an old node and the new right half (a scan sees them twice), never
     // in neither. Only the key being added can go missing, as with any cut-off write.
+    //
+    // Only valid straight after Insert's FindLeaf: it works on the path that search left behind
+    // (_levels, _pathPages, _pathSlots, _leafDepth), so nothing may search or read into those buffers first.
     private void InsertSplitting(int leafPage, byte[] leaf, int slot, byte[] key, int recordNumber)
     {
         var fresh = new List<(int Page, byte[] Block)>();
