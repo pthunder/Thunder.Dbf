@@ -177,7 +177,9 @@ public sealed partial class MdxIndex : IDisposable
         if (page <= 0)
             throw new InvalidDataException($"Index page {page} is outside the .mdx file.");
 
-        // A block past the end shows up as a short read, without asking the file's length first.
+        // A block past the end shows up as a short read, without asking the file's length first. A small
+        // read (the root pointer, the has-keys flag) of a block cut off later in the file passes; the next
+        // full read of that block reports it.
         try
         {
             ReadRaw((long)page * PageSize + at, bytes);
