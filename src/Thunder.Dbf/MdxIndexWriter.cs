@@ -70,7 +70,7 @@ public sealed partial class MdxIndex
     {
         if (_batch is not { } batch)
             return true;
-        _batch = null;
+        _batch = null; // a write that throws below ends the batch too: the table keeps its note on the exception
 
         // New blocks first (nothing on disk points at them yet), then, once they're out, the blocks that
         // existed (some now pointing at new ones), blocks put on the free list once nothing points at

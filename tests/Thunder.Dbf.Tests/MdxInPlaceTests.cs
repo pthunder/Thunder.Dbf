@@ -157,6 +157,18 @@ public sealed class MdxInPlaceTests : IDisposable
         Assert.Equal([.. Enumerable.Range(0, 40).Select(i => $"N{i:D3}"), "N998", "N999"], index["NAME"].Entries().Select(e => ((string)e.Key!).TrimEnd()));
     }
 
+    // The table ends a batch before it creates a tag; the index refuses one on its own too.
+    [Fact]
+    public void The_index_refuses_to_create_a_tag_during_a_batch()
+    {
+        using var stream = OpenIndex(descending: false, ["Bbb"]);
+        using var index = MdxIndex.Open(stream, leaveOpen: true);
+        IMaintainedIndex maintained = index;
+        Assert.True(maintained.BeginDeferredWrites());
+        Assert.Throws<InvalidOperationException>(() => index.PrepareTag("OTHER", "name", null, 'C', 30, unique: false, descending: false));
+        Assert.True(maintained.FinishDeferredWrites(toDisk: false));
+    }
+
     private static int RootPage(MdxIndex index, MdxTag tag) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(tag.HeaderPage));
 
     // A dBASE table with one 30-character tag, NAME, holding the given names: small enough that the
