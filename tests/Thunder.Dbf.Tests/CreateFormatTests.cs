@@ -16,6 +16,35 @@ public sealed class CreateFormatTests : IDisposable
 
     private string PathOf(string name) => Path.Combine(_dir.FullName, name);
 
+    // The field flags a new Visual FoxPro table gets (binary 0x04 on I, Y, T and B; nullable 0x02; 0x05 on
+    // _NullFlags; none on memos) are the ones Visual FoxPro 9 SP2 itself wrote for the same fields in
+    // tests/fixtures/vfp9/kinds.DBF (kinds.prg's CREATE TABLE): every descriptor's name, type, length,
+    // decimals and flags must match byte for byte (review of #16).
+    [Fact]
+    public void A_new_Visual_FoxPro_table_describes_its_fields_as_Visual_FoxPro_9_does()
+    {
+        var path = PathOf("kinds.dbf");
+        using (DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+        [
+            DbfFieldDefinition.Integer("ID"), DbfFieldDefinition.Character("CODE", 12), DbfFieldDefinition.Character("NAME", 30),
+            DbfFieldDefinition.Numeric("AMOUNT", 12, 2), DbfFieldDefinition.Currency("PRICE"), DbfFieldDefinition.Date("WHEN"),
+            DbfFieldDefinition.DateTime("STAMP"), DbfFieldDefinition.Logical("FLAG"), DbfFieldDefinition.Double("SCORE", 3),
+            DbfFieldDefinition.Numeric("QTY", 6), DbfFieldDefinition.Character("STATUS", 1), DbfFieldDefinition.Memo("NOTE"),
+            DbfFieldDefinition.Character("OPT", 10) with { Nullable = true },
+        ])) { }
+
+        static List<string> Descriptors(byte[] file)
+        {
+            var list = new List<string>();
+            for (var at = 32; file[at] != 0x0D; at += 32)
+                list.Add(Convert.ToHexString(file.AsSpan(at, 12)) + Convert.ToHexString(file.AsSpan(at + 16, 3)));
+            return list;
+        }
+        var vfp = Descriptors(SharedFile.ReadAllBytes(IndexTestSupport.Fixture("vfp9/kinds.DBF")));
+        Assert.Equal(14, vfp.Count); // 13 fields and _NullFlags
+        Assert.Equal(vfp, Descriptors(SharedFile.ReadAllBytes(path)));
+    }
+
     [Theory]
     [InlineData(DbfTableFormat.DbaseIII, 0x03, 0x83, ".dbt", 0x57)]
     [InlineData(DbfTableFormat.DbaseIV, 0x03, 0x8B, ".dbt", 0x57)]
