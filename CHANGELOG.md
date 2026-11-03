@@ -12,7 +12,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - **A writer killed while a dBASE `.mdx` node splits no longer loses keys already in the tag** (#35). A split used to write the shortened node before linking in its new right half, so a cut between the two left up to half a node of keys unreachable, silently. Now the new nodes go first, then the tag header if the root moved, then the changed nodes from the top down. A cut at any point leaves every old key findable (a scan may see some twice); one inside an interior split can leave a page reached through both halves, which the index reports as damaged and `RebuildIndex()` repairs. Tested by cutting an insert off after each of its writes in turn, for a root leaf, a leaf under an interior root, and a split that reaches an interior node.
 - **Splits no longer re-read and decode the path.** A full leaf splits using the nodes the search already read on its way down, instead of reading the path from the root again into lists with one array per key: 20% less allocated in a 100,000-row load with 2 tags, and a few percent faster. The `.mdx` files written are byte for byte the same as before.
+
+## [0.3.1] - 2026-11-03
+
+A fix for the first thing a new user of 0.3.0's Visual FoxPro tables hit, and the web service's sign-in packages on one version. Nothing in the public API changed; code compiled against 0.3.0 runs unchanged.
+
 - **`Append`, `AppendRange` and `Update` take one value per field the table was created with,** on a Visual FoxPro table with nullable fields too: its hidden `_NullFlags` is worked out from the others. They used to want a value for it as well, so `Append(1, "Ada")` on a table with two fields, one of them nullable, failed with "The table has 3 fields but 2 values were given" (found by the 0.3.0 smoke test). A value for `_NullFlags` is still accepted, so existing code runs unchanged, and the error for any other count now says the hidden field needs no value. `DbfRecord.Values` still lists `_NullFlags`.
+- **The web service's IdentityModel packages are all 8.23.0.** The 0.3.0 update raised `System.IdentityModel.Tokens.Jwt` alone, leaving the OpenID Connect packages that `JwtBearer` brings in at 8.19.2; Microsoft asks for one version across them, since a mix can fail at run time. This affects the `thunder-dbf-server` downloads only, not the NuGet packages.
 
 ## [0.3.0] - 2026-11-03
 
