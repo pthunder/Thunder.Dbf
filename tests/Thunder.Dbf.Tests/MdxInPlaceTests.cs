@@ -128,6 +128,35 @@ public sealed class MdxInPlaceTests : IDisposable
         Assert.Throws<InvalidDataException>(() => tag.FirstRecordFor(key));
     }
 
+    // A batch starts from the .mdx as it is on disk, not as this process last read it. Pages a split adds
+    // go at the end of the file, just after the tag's header, inside the read-ahead a buffered stream
+    // keeps from reloading the tags; another writer's key added there since must survive the batch
+    // (found by an automated review, gpt-6-astra).
+    [Fact]
+    public void A_batch_keeps_keys_another_writer_added_since_this_one_last_read()
+    {
+        var path = Path.Combine(_dir.FullName, "shared.dbf");
+        using (DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 9), DbfFieldDefinition.Character("NAME", 30)])) { }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("NAME", "name");
+
+        using (var a = DbfTable.Open(path, writable: true))
+        using (var b = DbfTable.Open(path, writable: true))
+        {
+            for (var i = 0; i < 40; i++)
+                a.Append(i + 1, $"N{i:D3}"); // splits the root leaf: the new right leaf follows the tag header
+            a.Refresh(); // reloads the tags: the .mdx is only read
+            b.Append(98, "N998");
+            a.DeferIndexWrites = true;
+            using (a.LockTable())
+                a.Append(99, "N999");
+        }
+
+        using var check = DbfTable.Open(path);
+        using var index = check.OpenProductionIndex()!;
+        Assert.Equal([.. Enumerable.Range(0, 40).Select(i => $"N{i:D3}"), "N998", "N999"], index["NAME"].Entries().Select(e => ((string)e.Key!).TrimEnd()));
+    }
+
     private static int RootPage(MdxIndex index, MdxTag tag) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(tag.HeaderPage));
 
     // A dBASE table with one 30-character tag, NAME, holding the given names: small enough that the

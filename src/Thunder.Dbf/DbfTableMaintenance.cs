@@ -253,7 +253,7 @@ public sealed partial class DbfTable
                 "An .mdx file is next to the table, but the table's header doesn't list it, so it may belong to something else.",
                 "Move it aside or delete it if it's stale, then try again.", _path);
 
-        var stream = DbfException.OpenFile(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite);
+        var stream = DbfException.OpenFile(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite, bufferSize: 0);
         try
         {
             MdxIndex.WriteEmpty(stream, Path.GetFileNameWithoutExtension(_path!));

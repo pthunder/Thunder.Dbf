@@ -51,11 +51,17 @@ public sealed partial class MdxIndex
 
     private Batch? _batch;
     internal static int MaxUnchangedPages = 16_384; // 8 MB of pages kept only because they were read (tests lower it)
+    private const int MaxRunPages = 256; // a contiguous run is written 128 KB at a time, not copied whole
 
     bool IMaintainedIndex.BeginDeferredWrites()
     {
         if (_batch is not null || _stream is not FileStream { CanWrite: true })
             return false;
+        // Under the table lock now, so nothing changes from here: the tags are reloaded first, as the
+        // batch's first write would without it (another writer may have changed them since this process
+        // last looked), and pages are read from the file from here on, not from what was read before.
+        DbfTable.DiscardReadBuffer(_stream);
+        ReloadTags();
         _batch = new Batch(_stream.Length);
         return true;
     }
@@ -88,7 +94,7 @@ public sealed partial class MdxIndex
         for (var start = 0; start < pages.Count;)
         {
             var end = start + 1;
-            while (end < pages.Count && pages[end] == pages[end - 1] + 1)
+            while (end < pages.Count && pages[end] == pages[end - 1] + 1 && end - start < MaxRunPages)
                 end++;
             var run = new byte[(end - start) * PageSize];
             for (var i = start; i < end; i++)
@@ -172,11 +178,15 @@ public sealed partial class MdxIndex
         var onDisk = (int)Math.Clamp(batch.StartLength - (long)first * PageSize, 0, span.Length);
         if (onDisk > 0)
         {
+            DbfTable.DiscardReadBuffer(_stream); // what's on disk, never read-ahead from before the batch
             _stream.Position = (long)first * PageSize;
             _stream.ReadExactly(span.AsSpan(0, onDisk));
         }
         for (var p = first; p <= last; p++)
-            batch.Pages.TryAdd(p, span.AsSpan((p - first) * PageSize, PageSize).ToArray());
+        {
+            if (!batch.Pages.ContainsKey(p))
+                batch.Pages[p] = span.AsSpan((p - first) * PageSize, PageSize).ToArray();
+        }
     }
 
     /// <summary>
