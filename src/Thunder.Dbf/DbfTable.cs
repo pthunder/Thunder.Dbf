@@ -681,7 +681,9 @@ public sealed partial class DbfTable : IDisposable
     /// <c>.cdx</c> and dBASE <c>.mdx</c> changes in memory and write each changed page once, when the
     /// lock is disposed, rather than after every record. Much faster when many records go in at once.
     /// Meanwhile the FoxPro index lock is held too, so Visual FoxPro users wait, readers included;
-    /// dBASE readers, which take no index lock, see the index as it was before the batch. A process killed
+    /// dBASE readers, which take no index lock, see the index as it was before the batch. The batch is
+    /// forced to disk when it ends, whatever <see cref="FlushWritesToDisk"/> says, which costs more than
+    /// it saves on a few hundred records: <see cref="AppendRange"/> suits small groups. A process killed
     /// during the batch leaves the index without the batch's keys: the next open reports it and a
     /// rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
     /// </summary>
