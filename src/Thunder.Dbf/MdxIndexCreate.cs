@@ -58,6 +58,7 @@ public sealed partial class MdxIndex
     /// </summary>
     internal MdxTag PrepareTag(string name, string expression, string? forExpression, char keyType, int keyLength, bool unique, bool descending)
     {
+        ThrowIfDeferring();
         if (Tags.Count >= MaxTags)
             throw new InvalidOperationException($"An .mdx holds at most {MaxTags} tags.");
         if (Tags.Any(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
@@ -99,6 +100,7 @@ public sealed partial class MdxIndex
     /// </summary>
     internal void PublishTag(MdxTag tag)
     {
+        ThrowIfDeferring();
         var headerArea = ReadHeaderArea(_stream);
         var entryLength = headerArea[26] == 0 ? 32 : headerArea[26];
         var count = Tags.Count;

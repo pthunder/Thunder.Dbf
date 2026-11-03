@@ -155,7 +155,7 @@ public sealed partial class DbfTable : IDisposable
                 try
                 {
                     if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
-                        table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share));
+                        table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share, bufferSize: 0)); // read a block at a time, as other programs left it
                     table._journalPending = DbfJournal.IsPending(path);
                     if (OperatingSystem.IsWindows())
                         table.WatchFolder(); // before the first listing, so nothing made meanwhile is missed
@@ -646,8 +646,8 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed. With
-    /// <see cref="DeferIndexWrites"/> on, it also holds the FoxPro index lock and writes the index once,
-    /// when the lock is disposed.
+    /// <see cref="DeferIndexWrites"/> on, it also holds the FoxPro index lock and writes the FoxPro and
+    /// dBASE indexes once, when the lock is disposed.
     /// </summary>
     public DbfLock LockTable()
     {
@@ -678,9 +678,13 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Opt-in, for migrations and bulk loads: while <see cref="LockTable"/> is held, keep the FoxPro
-    /// <c>.cdx</c> changes in memory and write each changed page once, when the lock is disposed,
-    /// rather than after every record. Much faster when many records go in at once. Meanwhile the
-    /// index lock is held too, so Visual FoxPro users wait, readers included. A process killed
+    /// <c>.cdx</c> and dBASE <c>.mdx</c> changes in memory and write each changed page once, when the
+    /// lock is disposed, rather than after every record. Much faster when many records go in at once.
+    /// Meanwhile the FoxPro index lock is held too, so Visual FoxPro users wait, readers included;
+    /// dBASE readers take no index lock: during the batch they see its records but the index as it was
+    /// before it, and while it's being written at the end, a part-written index. The batch is
+    /// forced to disk when it ends, whatever <see cref="FlushWritesToDisk"/> says, which costs more than
+    /// it saves on a few hundred records: <see cref="AppendRange"/> suits small groups. A process killed
     /// during the batch leaves the index without the batch's keys: the next open reports it and a
     /// rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
     /// </summary>
@@ -737,9 +741,9 @@ public sealed partial class DbfTable : IDisposable
         _deferring = false;
         Exception? failure = null;
         var clean = true;
-        // Forced to disk whatever FlushWritesToDisk says (one flush per batch): the note is emptied next,
-        // and it must never outlive the pages it covers, or a power cut could keep an emptied note and
-        // lose the batch (found by the Hyper-V power cuts, 3 in 50 with flushes off).
+        // Forced to disk whatever FlushWritesToDisk says (a few flushes per batch, not one per record):
+        // the note is emptied next, and it must never outlive the pages it covers, or a power cut could
+        // keep an emptied note and lose the batch (found by the Hyper-V power cuts, 3 in 50 with flushes off).
         foreach (var index in MaintainedIndexes)
         {
             try

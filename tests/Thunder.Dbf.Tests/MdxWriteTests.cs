@@ -94,35 +94,139 @@ public sealed class MdxWriteTests : IDisposable
     [Fact]
     public void Random_changes_keep_every_tag_exact()
     {
-        var random = new Random(42);
+        using (var table = OpenWritable())
+            Mutate(table, new Random(42), steps: 600);
+
+        AssertIndexMatchesTable();
+    }
+
+    // DeferIndexWrites: a batch under LockTable() keeps the .mdx's pages in memory and writes each
+    // changed one once, when the lock goes. The file must end exactly as record-by-record writes leave it.
+    [Theory]
+    [InlineData(16_384)]
+    [InlineData(4)] // pages kept only because they were read are let go every few reads
+    public void A_deferred_batch_leaves_the_mdx_exactly_as_record_by_record_writes_would(int maxUnchangedPages)
+    {
+        var plain = Directory.CreateDirectory(Path.Combine(_dir.FullName, "plain")).FullName;
+        foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+            File.Copy(file, Path.Combine(plain, Path.GetFileName(file)));
+        using (var table = DbfTable.Open(Path.Combine(plain, "CHANGELOG.DBF"), writable: true, exclusive: true))
+        {
+            table.FlushWritesToDisk = false; // forcing writes changes nothing in the bytes compared
+            Mutate(table, new Random(7), steps: 2500);
+        }
+
+        var before = SharedFile.ReadAllBytes(Path.ChangeExtension(_table, ".MDX"));
+        var saved = MdxIndex.MaxUnchangedPages;
+        MdxIndex.MaxUnchangedPages = maxUnchangedPages;
+        try
+        {
+            using var table = OpenWritable();
+            table.FlushWritesToDisk = false;
+            table.DeferIndexWrites = true;
+            using (table.LockTable())
+            {
+                Mutate(table, new Random(7), steps: 2500);
+                Assert.Equal(before, SharedFile.ReadAllBytes(Path.ChangeExtension(_table, ".MDX"))); // nothing written yet
+            }
+            Assert.False(table.HasPendingJournal);
+        }
+        finally
+        {
+            MdxIndex.MaxUnchangedPages = saved;
+        }
+
+        Assert.Equal(SharedFile.ReadAllBytes(Path.Combine(plain, "CHANGELOG.MDX")), SharedFile.ReadAllBytes(Path.ChangeExtension(_table, ".MDX")));
+        AssertIndexMatchesTable();
+    }
+
+    // What a process killed during a batch leaves: the records, an .mdx without their keys, and the
+    // batch's note. The next write refuses until RebuildIndex() puts the index right.
+    [Fact]
+    public void An_mdx_batch_cut_off_is_refused_until_rebuilt()
+    {
+        var killed = Directory.CreateDirectory(Path.Combine(_dir.FullName, "killed")).FullName;
+        using (var table = DbfTable.Open(_table, writable: true)) // shared, so the files can be copied mid-batch
+        {
+            table.DeferIndexWrites = true;
+            var template = table.Read(0).Values.ToArray();
+            using (table.LockTable())
+            {
+                for (var i = 0; i < 300; i++)
+                    table.Append(Row(table, template, id: 7000 + i, action: i % 7, user: "cut"));
+                foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+                    File.WriteAllBytes(Path.Combine(killed, Path.GetFileName(file)), SharedFile.ReadAllBytes(file));
+            }
+        }
+        AssertIndexMatchesTable(); // the batch that finished is whole
+
+        var cutOff = Path.Combine(killed, "CHANGELOG.DBF");
+        var error = Assert.Throws<DbfException>(() =>
+        {
+            using var reopened = DbfTable.Open(cutOff, writable: true);
+            reopened.UpdateFields(0, new Dictionary<string, object?> { ["USER"] = "refused" });
+        });
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+
+        using (var exclusive = DbfTable.Open(cutOff, writable: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+        }
+        using var rebuilt = DbfTable.Open(cutOff);
+        using var index = rebuilt.OpenProductionIndex()!;
+        Assert.Equal(7299m, rebuilt.Seek(index["ID_TAG"], 7299m)!["ID"]);
+    }
+
+    // Creating a tag ends the batch first: its pages go out, then the tag is built from the table.
+    [Fact]
+    public void Creating_a_tag_during_a_deferred_batch_writes_the_batch_first()
+    {
         using (var table = OpenWritable())
         {
+            table.DeferIndexWrites = true;
             var template = table.Read(0).Values.ToArray();
-            for (var step = 0; step < 600; step++)
+            using (table.LockTable())
             {
-                var pick = random.Next(table.RecordCount);
-                switch (random.Next(5))
-                {
-                    case 0 or 1:
-                        table.Append(Row(table, template, id: 5000 + step, action: random.Next(20), user: $"r{random.Next(60):D2}"));
-                        break;
-                    case 2:
-                        var values = table.Read(pick).Values.ToArray();
-                        values[Field(table, "LEVEL")] = (decimal)random.Next(-5, 5);
-                        values[Field(table, "USER")] = $"r{random.Next(60):D2}";
-                        table.Update(pick, values);
-                        break;
-                    case 3:
-                        table.Delete(pick);
-                        break;
-                    default:
-                        table.Recall(pick);
-                        break;
-                }
+                for (var i = 0; i < 200; i++)
+                    table.Append(Row(table, template, id: 8000 + i, action: i % 5, user: $"b{i % 9}"));
+                table.CreateIndexTag("USER2", "user");
+                table.Append(Row(table, template, id: 8500, action: 1, user: "after"));
             }
+            Assert.False(table.HasPendingJournal);
         }
 
         AssertIndexMatchesTable();
+        using var reopened = DbfTable.Open(_table);
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(reopened.RecordCount - DeletedCount(reopened), index["USER2"].Entries().Count());
+    }
+
+    private static void Mutate(DbfTable table, Random random, int steps)
+    {
+        var template = table.Read(0).Values.ToArray();
+        for (var step = 0; step < steps; step++)
+        {
+            var pick = random.Next(table.RecordCount);
+            switch (random.Next(5))
+            {
+                case 0 or 1:
+                    table.Append(Row(table, template, id: 5000 + step, action: random.Next(20), user: $"r{random.Next(60):D2}"));
+                    break;
+                case 2:
+                    var values = table.Read(pick).Values.ToArray();
+                    values[Field(table, "LEVEL")] = (decimal)random.Next(-5, 5);
+                    values[Field(table, "USER")] = $"r{random.Next(60):D2}";
+                    table.Update(pick, values);
+                    break;
+                case 3:
+                    table.Delete(pick);
+                    break;
+                default:
+                    table.Recall(pick);
+                    break;
+            }
+        }
     }
 
     [Fact]
