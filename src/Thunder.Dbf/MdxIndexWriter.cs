@@ -72,16 +72,21 @@ public sealed partial class MdxIndex
             return true;
         _batch = null; // a write that throws below ends the batch too: the table keeps its note on the exception
 
-        // New blocks first (nothing on disk points at them yet), then, once they're out, the blocks that
-        // existed (some now pointing at new ones), blocks put on the free list once nothing points at
-        // them, and the file header (page count, free list, date) last. Contiguous pages go in one write.
+        // New blocks first (nothing on disk points at them yet), then, once they're out, the tree blocks
+        // that existed (some now pointing at new ones), then the tag headers that point at each tag's
+        // root, then blocks put on the free list (the old roots may point at them until the headers are
+        // out), and the file header (page count, free list, date) last. Contiguous pages go in one write.
+        // A batch cut off between these can leave a tag missing keys, never reaching a page twice through
+        // a new root over an old one; either way its journal note stays, and RebuildIndex puts it right.
         var firstNew = (int)((batch.StartLength + PageSize - 1) / PageSize);
         var headerPages = HeaderAreaSize / PageSize;
         var freed = batch.Freed.SelectMany(p => Enumerable.Range(p, PagesPerBlock)).ToHashSet();
-        WriteRuns(batch, p => p >= firstNew && !freed.Contains(p));
+        var tagHeaders = Tags.SelectMany(t => Enumerable.Range(t.HeaderPage, PagesPerBlock)).ToHashSet();
+        WriteRuns(batch, p => p >= firstNew && !freed.Contains(p) && !tagHeaders.Contains(p));
         if (batch.Changed.Any(p => p >= firstNew))
             DbfTable.FlushToDisk(_stream, toDisk);
-        WriteRuns(batch, p => p >= headerPages && p < firstNew && !freed.Contains(p));
+        WriteRuns(batch, p => p >= headerPages && p < firstNew && !freed.Contains(p) && !tagHeaders.Contains(p));
+        WriteRuns(batch, p => tagHeaders.Contains(p) && !freed.Contains(p));
         WriteRuns(batch, p => p >= headerPages && freed.Contains(p));
         WriteRuns(batch, p => p < headerPages);
         DbfTable.FlushToDisk(_stream, toDisk);
@@ -567,11 +572,22 @@ public sealed partial class MdxTag
 
     // ---- rebuild --------------------------------------------------------------------------
 
-    /// <summary>Empties the tag: frees every node and starts again with one empty leaf as root.</summary>
+    /// <summary>
+    /// Empties the tag: frees every node and starts again with one empty leaf as root. A damaged tree
+    /// (a batch cut off mid-write can leave one reaching a page twice) frees nothing: its pages can't be
+    /// trusted to be its own, and dBASE reuses freed pages. They're left unused; the new tree doesn't need them.
+    /// </summary>
     internal void Clear()
     {
         var pages = new List<int>();
-        Collect(RootPage(), pages, [], depth: 0);
+        try
+        {
+            Collect(RootPage(), pages, [], depth: 0);
+        }
+        catch (InvalidDataException)
+        {
+            pages.Clear();
+        }
         foreach (var page in pages)
             _index.FreePage(page);
 

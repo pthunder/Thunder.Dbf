@@ -140,6 +140,83 @@ public sealed class MdxWriteTests : IDisposable
         AssertIndexMatchesTable();
     }
 
+    // A batch cut off while its pages are going out can leave a tag reaching a page twice (a new root
+    // over an old one not yet rewritten). RebuildIndex is the way back, so it must rebuild such a tag
+    // rather than refuse to walk it (found by an automated review, gpt-6-astra).
+    [Fact]
+    public void RebuildIndex_repairs_a_tag_that_reaches_a_page_twice()
+    {
+        using (var table = OpenWritable())
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 600).Select(i => Row(table, template, id: 6000 + i, action: i % 9, user: $"g{i % 40:D2}")));
+        }
+        using (var stream = new FileStream(Path.ChangeExtension(_table, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        using (var index = MdxIndex.Open(stream, leaveOpen: true))
+        {
+            var tag = index["ID_TAG"];
+            var root = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(tag.HeaderPage));
+            var block = index.ReadBlock(root);
+            Assert.True(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(block) >= 2); // an interior root
+            block.AsSpan(8, 4).CopyTo(block.AsSpan(8 + tag.ItemLength)); // its second child is its first again
+            index.WriteBlock(root, block);
+        }
+
+        using (var table = DbfTable.Open(_table, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
+            table.RebuildIndex();
+
+        AssertIndexMatchesTable();
+    }
+
+    // Blocks allocated and freed inside one batch (tags grown, then emptied by deleting every record,
+    // which their FOR .NOT. DELETED() filters drop) must come out as record-by-record writes leave them.
+    [Fact]
+    public void A_batch_that_grows_then_empties_the_tags_leaves_the_same_bytes()
+    {
+        static void GrowThenEmpty(DbfTable table)
+        {
+            table.FlushWritesToDisk = false;
+            var template = table.Read(0).Values.ToArray();
+            for (var i = 0; i < 400; i++)
+                table.Append(Row(table, template, id: 20000 + i, action: i % 11, user: $"e{i % 70:D2}"));
+            for (var i = 0; i < table.RecordCount; i++)
+                table.Delete(i);
+        }
+        var plain = Directory.CreateDirectory(Path.Combine(_dir.FullName, "plain")).FullName;
+        foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+            File.Copy(file, Path.Combine(plain, Path.GetFileName(file)));
+        using (var table = DbfTable.Open(Path.Combine(plain, "CHANGELOG.DBF"), writable: true, exclusive: true))
+            GrowThenEmpty(table);
+
+        using (var table = OpenWritable())
+        {
+            table.DeferIndexWrites = true;
+            using (table.LockTable())
+                GrowThenEmpty(table);
+        }
+
+        Assert.Equal(SharedFile.ReadAllBytes(Path.Combine(plain, "CHANGELOG.MDX")), SharedFile.ReadAllBytes(Path.ChangeExtension(_table, ".MDX")));
+        AssertIndexMatchesTable();
+    }
+
+    // The upgrade note's promise: during a batch, an index opened separately (here in the same process)
+    // sees the batch's records with the index as it was before the batch, and the new keys once it ends.
+    [Fact]
+    public void An_index_opened_during_a_batch_sees_its_keys_only_once_it_ends()
+    {
+        using var table = OpenWritable();
+        table.DeferIndexWrites = true;
+        var template = table.Read(0).Values.ToArray();
+        using (table.LockTable())
+        {
+            table.Append(Row(table, template, id: 9999, action: 1, user: "batch"));
+            using var during = table.OpenProductionIndex()!;
+            Assert.Null(table.Seek(during["ID_TAG"], 9999m));
+        }
+        using var after = table.OpenProductionIndex()!;
+        Assert.Equal(9999m, table.Seek(after["ID_TAG"], 9999m)!["ID"]);
+    }
+
     // What a process killed during a batch leaves: the records, an .mdx without their keys, and the
     // batch's note. The next write refuses until RebuildIndex() puts the index right.
     [Fact]

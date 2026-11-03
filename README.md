@@ -182,6 +182,7 @@ Done:
 15. ~~Checked against Visual FoxPro 9 itself: fixed `.cdx` roots, exclusive maintenance, `.cdx` tag creation (currency, datetime and nullable keys too), crash-safe key changes with an opt-in journal, a `Jet` lock scheme for Access~~
 16. ~~Write speed: `FlushWritesToDisk`, cached `.cdx` pages, and `DeferIndexWrites` for bulk loads~~
 17. ~~Fuzzed: every reader and writer against 100,000 corrupted files~~
+18. ~~Creating tables in dBASE III, dBASE IV, FoxPro 2 or Visual FoxPro format~~
 
 Next:
 

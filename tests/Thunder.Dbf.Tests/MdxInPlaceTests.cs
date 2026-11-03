@@ -65,10 +65,12 @@ public sealed class MdxInPlaceTests : IDisposable
     // later one: removing a leaf's last key leaves its separator larger than what it holds, so a
     // duplicate of that key further on is found only through the fallback. Thousands of inserts and
     // removes over 60 keys, with many duplicates, must agree with a plain walk of every entry.
-    [Fact]
-    public void FirstRecordFor_finds_keys_in_later_leaves_after_removals()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FirstRecordFor_finds_keys_in_later_leaves_after_removals(bool descending)
     {
-        using var stream = OpenIndex(descending: false, ["Bbb"]);
+        using var stream = OpenIndex(descending, ["Bbb"]);
         using var index = MdxIndex.Open(stream, leaveOpen: true);
         var tag = index["NAME"];
         byte[] Key(string name) => MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, name, tag.Name, tag.Expression);
@@ -97,6 +99,43 @@ public sealed class MdxInPlaceTests : IDisposable
             int? first = entries.FirstOrDefault(e => ((string)e.Key!).TrimEnd() == name) is { RecordNumber: > 0 } hit ? hit.RecordNumber : null;
             Assert.Equal(first, tag.FirstRecordFor(Key(name)));
         }
+    }
+
+    // A full leaf takes the general path, which splits it: once as the root (a new root grows above it),
+    // once under an interior node (the parent gains a pointer). Every key stays, in order (review of #34).
+    [Fact]
+    public void An_insert_into_a_full_leaf_splits_it_and_keeps_every_key()
+    {
+        using var stream = OpenIndex(descending: false, ["M000"]);
+        using var index = MdxIndex.Open(stream, leaveOpen: true);
+        var tag = index["NAME"];
+        byte[] Key(string name) => MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, name, tag.Name, tag.Expression);
+        int Count(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page));
+        bool IsLeaf(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page).AsSpan(8 + Count(page) * tag.ItemLength)) == 0;
+        var names = new List<string> { "M000" };
+        void Add(string name) { tag.Insert(Key(name), names.Count + 1); names.Add(name); }
+        void AssertEveryKey() => Assert.Equal(names.Order(StringComparer.Ordinal), tag.Entries().Select(e => ((string)e.Key!).TrimEnd()));
+
+        for (var i = 1; i < tag.MaxKeys; i++)
+            Add($"M{i:D3}");
+        var root = RootPage(index, tag);
+        Assert.True(IsLeaf(root));
+        Assert.Equal(tag.MaxKeys, Count(root)); // a full root leaf
+        Add("M0005");
+        Assert.NotEqual(root, RootPage(index, tag)); // a new root above the two halves
+        Assert.False(IsLeaf(RootPage(index, tag)));
+        AssertEveryKey();
+
+        // Keys before every other fill the first leaf under the interior root, then one more splits it.
+        root = RootPage(index, tag);
+        var first = BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(root).AsSpan(8));
+        for (var i = 0; Count(first) < tag.MaxKeys; i++)
+            Add($"A{i:D3}");
+        var pointers = Count(root);
+        Add("A0005");
+        Assert.Equal(root, RootPage(index, tag));
+        Assert.Equal(pointers + 1, Count(root)); // the parent gained the new right half
+        AssertEveryKey();
     }
 
     [Fact]
