@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **`Append`, `AppendRange` and `Update` take one value per field the table was created with,** on a Visual FoxPro table with nullable fields too: its hidden `_NullFlags` is worked out from the others. They used to want a value for it as well, so `Append(1, "Ada")` on a table with two fields, one of them nullable, failed with "The table has 3 fields but 2 values were given" (found by the 0.3.0 smoke test). A value for `_NullFlags` is still accepted, so existing code runs unchanged, and the error for any other count now says the hidden field needs no value. `DbfRecord.Values` still lists `_NullFlags`.
+
 ## [0.3.0] - 2026-11-03
 
 New tables in any of the four formats, and dBASE `.mdx` writes about twice as fast, with bulk loads batched as FoxPro's already were.

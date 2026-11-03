@@ -45,6 +45,71 @@ public sealed class CreateFormatTests : IDisposable
         Assert.Equal(vfp, Descriptors(SharedFile.ReadAllBytes(path)));
     }
 
+    // A Visual FoxPro table with nullable fields ends with the hidden _NullFlags. The positional writers
+    // take one value per field the table was created with, or one more for _NullFlags, as 0.3.0 needed:
+    // both write the same bytes, null bits included.
+    [Theory]
+    [InlineData("Append")]
+    [InlineData("AppendRange")]
+    [InlineData("Update")]
+    public void Values_for_a_Visual_FoxPro_table_need_none_for_the_hidden_NullFlags(string writer)
+    {
+        DbfFieldDefinition[] fields =
+        [
+            DbfFieldDefinition.Integer("ID"), DbfFieldDefinition.Character("CODE", 5) with { Nullable = true },
+            DbfFieldDefinition.DateTime("STAMP") with { Nullable = true }, DbfFieldDefinition.Currency("RATE"),
+        ];
+        object?[][] rows = [[1, null, new DateTime(2026, 11, 3, 9, 0, 0), 1.5m], [2, "AB", null, 0m]];
+
+        byte[] Written(string name, bool withNullFlags)
+        {
+            var path = PathOf(name);
+            object?[] Values(object?[] row) => withNullFlags ? [.. row, null] : row;
+            using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, fields))
+            {
+                Assert.Equal(5, table.Fields.Count); // four fields and _NullFlags
+                switch (writer)
+                {
+                    case "Append":
+                        foreach (var row in rows)
+                            table.Append(Values(row));
+                        break;
+                    case "AppendRange":
+                        table.AppendRange(rows.Select(Values));
+                        break;
+                    default:
+                        table.Append(Values([0, "ZZ", null, 9m]));
+                        table.Append(Values([0, "ZZ", null, 9m]));
+                        for (var i = 0; i < rows.Length; i++)
+                            table.Update(i, Values(rows[i]));
+                        break;
+                }
+            }
+            using var check = DbfTable.Open(path);
+            Assert.Null(check.Read(0)["CODE"]);
+            Assert.Equal("AB", check.Read(1)["CODE"]);
+            Assert.Null(check.Read(1)["STAMP"]);
+            var bytes = SharedFile.ReadAllBytes(path);
+            var start = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(8));
+            return bytes[start..];
+        }
+
+        Assert.Equal(Written("FULL.DBF", withNullFlags: true), Written("SHORT.DBF", withNullFlags: false));
+    }
+
+    [Fact]
+    public void A_wrong_value_count_says_the_hidden_NullFlags_needs_no_value()
+    {
+        using var table = DbfTable.Create(PathOf("WRONG.DBF"), DbfTableFormat.VisualFoxPro,
+            [DbfFieldDefinition.Integer("ID"), DbfFieldDefinition.Character("CODE", 5) with { Nullable = true }]);
+        var error = Assert.Throws<ArgumentException>(() => table.Append(1));
+        Assert.Contains("2 fields (plus the hidden _NullFlags, which needs no value) but 1 values", error.Message);
+        Assert.Equal(0, table.RecordCount);
+
+        using var plain = DbfTable.Create(PathOf("PLAIN2.DBF"), DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Integer("ID")]);
+        Assert.Contains("1 fields but 2 values", Assert.Throws<ArgumentException>(() => plain.Append(1, 2)).Message);
+    }
+
     [Theory]
     [InlineData(DbfTableFormat.DbaseIII, 0x03, 0x83, ".dbt", 0x57)]
     [InlineData(DbfTableFormat.DbaseIV, 0x03, 0x8B, ".dbt", 0x57)]
@@ -86,7 +151,7 @@ public sealed class CreateFormatTests : IDisposable
             DbfFieldDefinition.Memo("NOTES"),
         ]))
         {
-            // Values cover the fields as created, plus the hidden _NullFlags field at the end.
+            // Values cover the fields as created, plus (optionally) the hidden _NullFlags field at the end.
             Assert.Equal("_NullFlags", table.Fields[^1].Name);
             Assert.True(table.Fields[^1].IsSystem);
             table.Append(null, "Ada", "AB1", 12.3456m, 98.25, hired, "First", null);
