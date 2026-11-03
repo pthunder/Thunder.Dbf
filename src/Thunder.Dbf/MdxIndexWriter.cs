@@ -466,7 +466,8 @@ public sealed partial class MdxTag
     /// <summary>
     /// Follows the key from the root to its leaf, the way InsertInto (upper: after equal keys) or
     /// the walk (upper: false, at the first equal key) would, without decoding any node. Returns the
-    /// leaf's page, its block (a reused buffer) and the key's slot in it.
+    /// leaf's page, its block (a reused buffer) and the key's slot in it. The block is only good until
+    /// the next call on this tag, which reuses the buffer; like the rest of the writer, one thread per tag.
     /// </summary>
     private (int Page, byte[] Block, int Slot) FindLeaf(byte[] key, bool upper)
     {
