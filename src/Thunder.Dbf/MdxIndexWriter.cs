@@ -365,96 +365,124 @@ public sealed partial class MdxTag
     internal void Insert(byte[] key, int recordNumber)
     {
         // Most inserts land in a leaf with room: that leaf alone changes, in place, in a reused
-        // buffer. A full leaf takes the general path below, which splits it.
+        // buffer. A full leaf splits, using the nodes the search already read on its way down.
         var (page, block, slot, _) = FindLeaf(key, upper: true);
         if (NodeCount(block) < MaxKeys)
-        {
             InsertInPlace(page, block, slot, key, recordNumber);
-            MarkHasKeys();
-            return;
-        }
-
-        var root = RootPage();
-        if (InsertInto(root, key, recordNumber, depth: 0) is { } split)
-        {
-            var newRoot = _index.AllocatePage();
-            WriteNode(newRoot, [new Item(root, split.LeftLast)], lastPointer: split.Right);
-            SetRoot(newRoot);
-        }
+        else
+            InsertSplitting(page, block, slot, key, recordNumber);
         MarkHasKeys();
     }
 
-    private (byte[] LeftLast, int Right)? InsertInto(int page, byte[] key, int recordNumber, int depth)
+    // A full leaf splits in half, the left half keeping its page and the right going to a new one; the
+    // parent gains the right half after the left (keyed by the left's new last key), and splits too if
+    // it's full, up to a new root. Pages are allocated, halved and keyed exactly as dBASE's own split
+    // does, so the bytes match a node-by-node rebuild.
+    //
+    // The writes go in an order that never loses a key to a writer killed partway: new nodes first
+    // (nothing points at them yet), then the tag header if the root moved, then the changed nodes from
+    // the top down, so each parent points at the new right half before its child gives those keys up.
+    // A cut can leave keys in both an old node and the new right half (a scan sees them twice), never
+    // in neither. Only the key being added can go missing, as with any cut-off write.
+    private void InsertSplitting(int leafPage, byte[] leaf, int slot, byte[] key, int recordNumber)
     {
-        GuardDepth(depth);
-        var (items, lastPointer, isLeaf) = ReadNode(page);
+        var fresh = new List<(int Page, byte[] Block)>();
+        var changed = new List<(int Page, byte[] Block)>(); // bottom-up; written top-down
 
-        if (isLeaf)
-        {
-            items.Insert(UpperBound(items, key), new Item(recordNumber, key));
-        }
-        else
-        {
-            var slot = UpperBound(items, key);
-            var child = slot < items.Count ? items[slot].Pointer : lastPointer;
-            if (InsertInto(child, key, recordNumber, depth + 1) is not { } split)
-                return null;
+        var wide = new byte[(MaxKeys + 1) * ItemLength];
+        var count = NodeCount(leaf);
+        leaf.AsSpan(8, slot * ItemLength).CopyTo(wide);
+        BinaryPrimitives.WriteInt32LittleEndian(wide.AsSpan(slot * ItemLength), recordNumber);
+        key.CopyTo(wide.AsSpan(slot * ItemLength + 4, ItemLength - 4));
+        leaf.AsSpan(8 + slot * ItemLength, (count - slot) * ItemLength).CopyTo(wide.AsSpan((slot + 1) * ItemLength));
+        var n = count + 1;
+        var mid = n / 2;
+        var right = _index.AllocatePage();
+        fresh.Add((right, Node(wide, mid, n - mid, lastPointer: 0)));
+        changed.Add((leafPage, Node(wide, 0, mid, lastPointer: 0)));
+        var separator = wide.AsSpan((mid - 1) * ItemLength + 4, KeyLength).ToArray();
+        var child = leafPage;
 
-            // The child split into itself (left) and a new right node: the left keeps this slot with
-            // its new last key as separator, and the right takes the slot after it.
-            if (slot < items.Count)
+        for (var level = _leafDepth - 1; level >= 0; level--)
+        {
+            var page = _pathPages![level];
+            var node = _levels![level];
+            count = NodeCount(node);
+            var at = _pathSlots![level];
+            var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength));
+
+            // The child keeps its slot with its new last key; the right half takes the next slot, with
+            // the key the child had (or, past the last key, becomes the last pointer).
+            wide = new byte[(MaxKeys + 1) * ItemLength];
+            node.AsSpan(8, count * ItemLength).CopyTo(wide);
+            if (at < count)
             {
-                var oldKey = items[slot].Key;
-                items[slot] = new Item(child, split.LeftLast);
-                items.Insert(slot + 1, new Item(split.Right, oldKey));
+                var item = wide.AsSpan(at * ItemLength, ItemLength);
+                var oldKey = item.Slice(4, KeyLength).ToArray();
+                wide.AsSpan(at * ItemLength, (count - at) * ItemLength).CopyTo(wide.AsSpan((at + 1) * ItemLength));
+                separator.CopyTo(item[4..]);
+                var next = wide.AsSpan((at + 1) * ItemLength, ItemLength);
+                BinaryPrimitives.WriteInt32LittleEndian(next, right);
+                oldKey.CopyTo(next[4..]);
             }
             else
             {
-                items.Add(new Item(child, split.LeftLast));
-                lastPointer = split.Right;
+                var item = wide.AsSpan(count * ItemLength, ItemLength);
+                BinaryPrimitives.WriteInt32LittleEndian(item, child);
+                separator.CopyTo(item[4..]);
+                lastPointer = right;
             }
+            n = count + 1;
+            if (n <= MaxKeys)
+            {
+                changed.Add((page, Node(wide, 0, n, lastPointer)));
+                Publish(fresh, changed, newRoot: null);
+                return;
+            }
+
+            // Interior key i is the last key under child i: the left half keeps children 0..mid, so
+            // its last child's key becomes the separator and leaves both halves.
+            mid = n / 2;
+            var newRight = _index.AllocatePage();
+            fresh.Add((newRight, Node(wide, mid + 1, n - mid - 1, lastPointer)));
+            changed.Add((page, Node(wide, 0, mid, BinaryPrimitives.ReadInt32LittleEndian(wide.AsSpan(mid * ItemLength)))));
+            separator = wide.AsSpan(mid * ItemLength + 4, KeyLength).ToArray();
+            right = newRight;
+            child = page;
         }
 
-        if (items.Count <= MaxKeys)
+        // The root split: a new root holds the two halves.
+        var root = _index.AllocatePage();
+        var rootItem = new byte[ItemLength];
+        BinaryPrimitives.WriteInt32LittleEndian(rootItem, child);
+        separator.CopyTo(rootItem.AsSpan(4));
+        fresh.Add((root, Node(rootItem, 0, 1, right)));
+        Publish(fresh, changed, root);
+    }
+
+    // A node of items [from, from + n) of a run of items, laid out as WriteNode lays one out.
+    private byte[] Node(byte[] items, int from, int n, int lastPointer)
+    {
+        var block = new byte[_index.BlockSize];
+        BinaryPrimitives.WriteInt32LittleEndian(block, n);
+        items.AsSpan(from * ItemLength, n * ItemLength).CopyTo(block.AsSpan(8));
+        if (ItemLength > KeyLength + 4)
         {
-            WriteNode(page, items, isLeaf ? 0 : lastPointer);
-            return null;
+            for (var i = 0; i < n; i++)
+                block.AsSpan(8 + i * ItemLength + 4 + KeyLength, ItemLength - 4 - KeyLength).Clear();
         }
-        return isLeaf ? SplitLeaf(page, items) : SplitInterior(page, items, lastPointer);
+        BinaryPrimitives.WriteInt32LittleEndian(block.AsSpan(8 + n * ItemLength), lastPointer);
+        return block;
     }
 
-    private (byte[], int) SplitLeaf(int page, List<Item> items)
+    private void Publish(List<(int Page, byte[] Block)> fresh, List<(int Page, byte[] Block)> changed, int? newRoot)
     {
-        var mid = items.Count / 2;
-        var right = _index.AllocatePage();
-        WriteNode(page, items.GetRange(0, mid), 0);
-        WriteNode(right, items.GetRange(mid, items.Count - mid), 0);
-        return (items[mid - 1].Key, right);
-    }
-
-    // Interior key i is the last key under child i. The left half keeps children 0..mid, so its last
-    // child's key (items[mid].Key) becomes the separator and leaves both halves.
-    private (byte[], int) SplitInterior(int page, List<Item> items, int lastPointer)
-    {
-        var mid = items.Count / 2;
-        var right = _index.AllocatePage();
-        WriteNode(page, items.GetRange(0, mid), items[mid].Pointer);
-        WriteNode(right, items.GetRange(mid + 1, items.Count - mid - 1), lastPointer);
-        return (items[mid].Key, right);
-    }
-
-    private int UpperBound(List<Item> items, byte[] key)
-    {
-        int lo = 0, hi = items.Count;
-        while (lo < hi)
-        {
-            var mid = (lo + hi) / 2;
-            if (CompareKeys(items[mid].Key, key) <= 0)
-                lo = mid + 1;
-            else
-                hi = mid;
-        }
-        return lo;
+        foreach (var (page, block) in fresh)
+            _index.WriteBlock(page, block);
+        if (newRoot is { } root)
+            SetRoot(root);
+        for (var i = changed.Count - 1; i >= 0; i--)
+            _index.WriteBlock(changed[i].Page, changed[i].Block);
     }
 
     // ---- remove ---------------------------------------------------------------------------
@@ -646,9 +674,11 @@ public sealed partial class MdxTag
     // ---- raw nodes, for the common insert and lookup -------------------------------------
 
     private byte[][]? _levels; // one reused block buffer per tree level
+    private int[]? _pathPages, _pathSlots; // the last search's page and child slot at each level
+    private int _leafDepth; // the last search's leaf level
 
     /// <summary>
-    /// Follows the key from the root to its leaf, the way InsertInto (upper: after equal keys) or
+    /// Follows the key from the root to its leaf, the way an insert (upper: after equal keys) or
     /// the walk (upper: false, at the first equal key) would, without decoding any node. Returns the
     /// leaf's page, its block (a reused buffer), the key's slot in it, and whether it's the last leaf
     /// (every node on the way followed its last pointer). The block is only good until the next call on
@@ -657,6 +687,8 @@ public sealed partial class MdxTag
     private (int Page, byte[] Block, int Slot, bool Last) FindLeaf(byte[] key, bool upper)
     {
         _levels ??= new byte[MaxDepth + 1][];
+        _pathPages ??= new int[MaxDepth + 1];
+        _pathSlots ??= new int[MaxDepth + 1];
         var page = RootPage();
         var last = true;
         for (var depth = 0; ; depth++)
@@ -679,8 +711,13 @@ public sealed partial class MdxTag
                     hi = mid;
             }
             var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + count * ItemLength));
+            _pathPages[depth] = page;
+            _pathSlots[depth] = lo;
             if (lastPointer == 0)
+            {
+                _leafDepth = depth;
                 return (page, block, lo, last);
+            }
             last &= lo == count;
             page = lo < count ? BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + lo * ItemLength)) : lastPointer;
         }

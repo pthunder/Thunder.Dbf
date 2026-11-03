@@ -138,6 +138,116 @@ public sealed class MdxInPlaceTests : IDisposable
         AssertEveryKey();
     }
 
+    // Issue #35: a writer killed partway through a split must never leave a key that was already in the
+    // tag silently missing. The insert is cut off after each of its writes in turn (a stream that throws
+    // once k writes have gone through). A leaf split keeps every old key findable by seek and by scan
+    // whatever the cut. An interior split can leave its moved children reachable through both halves
+    // for a moment; a walk then reports the index corrupt (RebuildIndex repairs it), never quietly
+    // drops the keys, which is what the old write order did.
+    [Theory]
+    [InlineData("root leaf")]
+    [InlineData("leaf under an interior root")]
+    [InlineData("interior node too")]
+    public void A_split_cut_off_after_any_write_keeps_every_old_key(string shape)
+    {
+        using var file = OpenIndex(descending: false, ["K0000"]);
+        var names = new List<string> { "K0000" };
+        using (var index = MdxIndex.Open(file, leaveOpen: true))
+        {
+            var tag = index["NAME"];
+            int Count(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page));
+            int Last(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page).AsSpan(8 + Count(page) * tag.ItemLength));
+            bool Ready()
+            {
+                var root = RootPage(index, tag);
+                if (Last(root) == 0)
+                    return shape == "root leaf" && Count(root) == tag.MaxKeys;
+                var leaf = root;
+                while (Last(leaf) != 0)
+                    leaf = Last(leaf);
+                var full = Count(leaf) == tag.MaxKeys;
+                return shape == "leaf under an interior root" ? full && Last(Last(root)) == 0 : full && Count(root) == tag.MaxKeys && Last(Last(root)) == 0;
+            }
+            while (!Ready()) // keys in order fill the last leaf; each split adds a pointer to its parent
+            {
+                var name = $"K{names.Count:D4}";
+                tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, name, tag.Name, tag.Expression), names.Count + 1);
+                names.Add(name);
+            }
+        }
+        var before = new byte[file.Length];
+        file.Position = 0;
+        file.ReadExactly(before);
+
+        var reported = 0;
+        for (var allowed = 0; ; allowed++)
+        {
+            using var stream = new CutOffStream(before, allowed);
+            using (var index = MdxIndex.Open(stream, leaveOpen: true))
+            {
+                var tag = index["NAME"];
+                try
+                {
+                    tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, "K9999", tag.Name, tag.Expression), 99_999);
+                }
+                catch (IOException)
+                {
+                }
+            }
+            using var after = new MemoryStream(stream.ToArray());
+            using var reopened = MdxIndex.Open(after);
+            var check = reopened["NAME"];
+            HashSet<string> scanned;
+            try
+            {
+                scanned = check.Entries().Select(e => ((string)e.Key!).TrimEnd()).ToHashSet();
+            }
+            catch (InvalidDataException) when (shape == "interior node too")
+            {
+                reported++;
+                continue; // reported, not silently short
+            }
+            foreach (var name in names)
+            {
+                Assert.True(scanned.Contains(name), $"{shape}: {name} missing from a scan after {allowed} writes");
+                Assert.NotNull(check.FirstRecordFor(MdxTag.EncodeKey(check.KeyType, check.KeyLength, reopened.Encoding, name, check.Name, check.Expression)));
+            }
+            if (!stream.CutOff)
+            {
+                Assert.Contains("K9999", scanned); // the whole insert went through
+                break;
+            }
+        }
+        Assert.True(shape == "interior node too" || reported == 0);
+    }
+
+    // A file in memory whose writes stop after a given number, the way a killed writer's do.
+    private sealed class CutOffStream : MemoryStream
+    {
+        private int _left;
+
+        public CutOffStream(byte[] bytes, int allowed)
+        {
+            _left = int.MaxValue; // loading the file isn't one of its writes
+            Write(bytes, 0, bytes.Length);
+            Position = 0;
+            _left = allowed;
+        }
+
+        public bool CutOff { get; private set; }
+
+        // A MemoryStream subclass's span Write lands here too, so this is the one place writes are counted.
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (_left-- <= 0)
+            {
+                CutOff = true;
+                throw new IOException("cut off");
+            }
+            base.Write(buffer, offset, count);
+        }
+    }
+
     [Fact]
     public void A_node_claiming_too_many_keys_is_reported_not_trusted()
     {
