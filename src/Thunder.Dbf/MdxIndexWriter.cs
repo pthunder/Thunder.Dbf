@@ -174,6 +174,11 @@ public sealed partial class MdxTag
     /// <summary>The record number of the first entry with exactly this key, or null.</summary>
     internal int? FirstRecordFor(byte[] key)
     {
+        // Usually the first key at or after this one is in the leaf the search lands on. When the
+        // leaf runs out first, the answer is in a later leaf, and the full walk finds it.
+        var (_, block, slot) = FindLeaf(key, upper: false);
+        if (slot < NodeCount(block))
+            return CompareKeys(NodeKey(block, slot), key) == 0 ? BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + slot * ItemLength)) : null;
         foreach (var hit in Walk(new RawProbe(key, this)))
             return hit.Matches ? hit.Entry.RecordNumber : null;
         return null;
@@ -186,6 +191,16 @@ public sealed partial class MdxTag
     /// <summary>Adds (key, record number), after any equal keys, splitting nodes as needed.</summary>
     internal void Insert(byte[] key, int recordNumber)
     {
+        // Most inserts land in a leaf with room: that leaf alone changes, in place, in a reused
+        // buffer. A full leaf takes the general path below, which splits it.
+        var (page, block, slot) = FindLeaf(key, upper: true);
+        if (NodeCount(block) < MaxKeys)
+        {
+            InsertInPlace(page, block, slot, key, recordNumber);
+            MarkHasKeys();
+            return;
+        }
+
         var root = RootPage();
         if (InsertInto(root, key, recordNumber, depth: 0) is { } split)
         {
@@ -444,7 +459,80 @@ public sealed partial class MdxTag
         _index.WriteBlock(page, node);
     }
 
-    private int RootPage() => BinaryPrimitives.ReadInt32LittleEndian(_index.ReadBlock(_headerPage));
+    // ---- raw nodes, for the common insert and lookup -------------------------------------
+
+    private byte[][]? _levels; // one reused block buffer per tree level
+
+    /// <summary>
+    /// Follows the key from the root to its leaf, the way InsertInto (upper: after equal keys) or
+    /// the walk (upper: false, at the first equal key) would, without decoding any node. Returns the
+    /// leaf's page, its block (a reused buffer) and the key's slot in it. The block is only good until
+    /// the next call on this tag, which reuses the buffer; like the rest of the writer, one thread per tag.
+    /// </summary>
+    private (int Page, byte[] Block, int Slot) FindLeaf(byte[] key, bool upper)
+    {
+        _levels ??= new byte[MaxDepth + 1][];
+        var page = RootPage();
+        for (var depth = 0; ; depth++)
+        {
+            GuardDepth(depth);
+            var block = _levels[depth] ??= new byte[_index.BlockSize];
+            _index.ReadBlock(page, block);
+            var count = NodeCount(block);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
+
+            int lo = 0, hi = count;
+            while (lo < hi)
+            {
+                var mid = (lo + hi) / 2;
+                var order = CompareKeys(NodeKey(block, mid), key);
+                if (order < 0 || (upper && order == 0))
+                    lo = mid + 1;
+                else
+                    hi = mid;
+            }
+            var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + count * ItemLength));
+            if (lastPointer == 0)
+                return (page, block, lo);
+            page = lo < count ? BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + lo * ItemLength)) : lastPointer;
+        }
+    }
+
+    private static int NodeCount(byte[] block) => BinaryPrimitives.ReadInt32LittleEndian(block);
+
+    private ReadOnlySpan<byte> NodeKey(byte[] block, int slot) => block.AsSpan(8 + slot * ItemLength + 4, KeyLength);
+
+    // Leaves the block exactly as WriteNode would write the leaf with the item added: bytes 4-7, the
+    // padding after each key and everything after the items zeroed.
+    private void InsertInPlace(int page, byte[] block, int slot, byte[] key, int recordNumber)
+    {
+        var count = NodeCount(block);
+        var at = 8 + slot * ItemLength;
+        block.AsSpan(at, (count - slot) * ItemLength).CopyTo(block.AsSpan(at + ItemLength));
+        var item = block.AsSpan(at, ItemLength);
+        item.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(item, recordNumber);
+        key.CopyTo(item[4..]);
+
+        count++;
+        BinaryPrimitives.WriteInt32LittleEndian(block, count);
+        block.AsSpan(4, 4).Clear();
+        if (ItemLength > KeyLength + 4)
+        {
+            for (var i = 0; i < count; i++)
+                block.AsSpan(8 + i * ItemLength + 4 + KeyLength, ItemLength - 4 - KeyLength).Clear();
+        }
+        block.AsSpan(8 + count * ItemLength).Clear(); // a leaf's last pointer is 0
+        _index.WriteBlock(page, block);
+    }
+
+    private int RootPage()
+    {
+        Span<byte> root = stackalloc byte[4];
+        _index.ReadAt(_headerPage, 0, root);
+        return BinaryPrimitives.ReadInt32LittleEndian(root);
+    }
 
     private void SetRoot(int page)
     {
@@ -455,6 +543,10 @@ public sealed partial class MdxTag
 
     private void MarkHasKeys()
     {
+        Span<byte> flag = stackalloc byte[1];
+        _index.ReadAt(_headerPage, 246, flag);
+        if (flag[0] == 1)
+            return;
         var header = _index.ReadBlock(_headerPage);
         if (header[246] == 1)
             return;
