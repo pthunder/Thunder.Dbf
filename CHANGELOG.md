@@ -10,7 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-03
+
+A fix for the first thing a new user of 0.3.0's Visual FoxPro tables hit, and the web service's sign-in packages on one version. Nothing in the public API changed; code compiled against 0.3.0 runs unchanged.
+
 - **`Append`, `AppendRange` and `Update` take one value per field the table was created with,** on a Visual FoxPro table with nullable fields too: its hidden `_NullFlags` is worked out from the others. They used to want a value for it as well, so `Append(1, "Ada")` on a table with two fields, one of them nullable, failed with "The table has 3 fields but 2 values were given" (found by the 0.3.0 smoke test). A value for `_NullFlags` is still accepted, so existing code runs unchanged, and the error for any other count now says the hidden field needs no value. `DbfRecord.Values` still lists `_NullFlags`.
+- **The web service's IdentityModel packages are all 8.23.0.** The 0.3.0 update raised `System.IdentityModel.Tokens.Jwt` alone, leaving the OpenID Connect packages that `JwtBearer` brings in at 8.19.2; Microsoft asks for one version across them, since a mix can fail at run time. This affects the `thunder-dbf-server` downloads only, not the NuGet packages.
 
 ## [0.3.0] - 2026-11-03
 
