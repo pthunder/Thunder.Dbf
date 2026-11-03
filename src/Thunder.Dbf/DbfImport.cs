@@ -153,11 +153,8 @@ public static class DbfImport
         var line = new int[1]; // the CSV line being loaded, for error messages
         try
         {
-            // A Visual FoxPro table with nullable fields ends with the hidden _NullFlags, which takes a null.
-            var rows = Rows(csvPath, options, plan, line);
-            if (table.Fields.Count > plan.Columns.Count)
-                rows = rows.Select(r => (object?[])[.. r, .. new object?[table.Fields.Count - r.Length]]);
-            table.AppendRange(rows);
+            // A row needs no value for a Visual FoxPro table's hidden _NullFlags: AppendRange works it out.
+            table.AppendRange(Rows(csvPath, options, plan, line));
         }
         catch (Exception ex) when (ex is OverflowException or ArgumentException && ex is not DbfException)
         {

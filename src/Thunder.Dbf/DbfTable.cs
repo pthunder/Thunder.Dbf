@@ -1181,7 +1181,8 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Adds a record with values in field order and returns its zero-based index. A null value in a
-    /// Visual FoxPro autoincrement field takes the table's next number.
+    /// Visual FoxPro autoincrement field takes the table's next number. The hidden <c>_NullFlags</c> of a
+    /// Visual FoxPro table with nullable fields needs no value; one may still be given, last.
     /// </summary>
     public int Append(params object?[] values)
     {
@@ -1244,7 +1245,7 @@ public sealed partial class DbfTable : IDisposable
     // Writes one record after the last, without committing the header.
     private int AppendOne(object?[] values)
     {
-        CheckValueCount(values);
+        values = AllValues(values);
         var index = RecordCount;
 
         values = (object?[])values.Clone();
@@ -1324,7 +1325,7 @@ public sealed partial class DbfTable : IDisposable
     public void Update(int index, params object?[] values)
     {
         EnsureWritable();
-        CheckValueCount(values);
+        values = AllValues(values);
         using var record = Locks.Record(index + 1, "changed");
         using var header = Locks.Header();
         PrepareWrite(appending: false);
@@ -2380,10 +2381,29 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
-    private void CheckValueCount(object?[] values)
+    // Values come one per field the table was created with, or one per field including the hidden system
+    // fields (Visual FoxPro's _NullFlags), as 0.3.0 and earlier needed. A system field is worked out from
+    // the others when the record is written, so the short form leaves it null; a value given for it is
+    // the starting point the null bits are set over, as before.
+    private object?[] AllValues(object?[] values)
     {
-        if (values.Length != Fields.Count)
-            throw new ArgumentException($"The table has {Fields.Count} fields but {values.Length} values were given.", nameof(values));
+        if (values.Length == Fields.Count)
+            return values;
+        var declared = Fields.Count(f => !f.IsSystem);
+        if (values.Length == declared && declared < Fields.Count)
+        {
+            var all = new object?[Fields.Count];
+            for (int i = 0, given = 0; i < Fields.Count; i++)
+            {
+                if (!Fields[i].IsSystem)
+                    all[i] = values[given++];
+            }
+            return all;
+        }
+        throw new ArgumentException(declared == Fields.Count
+            ? $"The table has {Fields.Count} fields but {values.Length} values were given."
+            : $"The table has {declared} fields (plus the hidden {string.Join(", ", Fields.Where(f => f.IsSystem).Select(f => f.Name))}, which needs no value) but {values.Length} values were given.",
+            nameof(values));
     }
 
     private void Seek(int index, bool forAppend = false)
