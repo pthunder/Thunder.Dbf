@@ -13,7 +13,7 @@
 
 **Put a safe, modern app on top of a legacy dBASE or FoxPro system, while the legacy app keeps running on the same files.**
 
-Thunder.Dbf reads and writes xBase tables, memos and indexes exactly as the old apps expect, takes the same locks they do, and never needs ODBC, OLE DB, Jet or a 32-bit process. It has no dependencies and runs on Windows, Linux and macOS.
+Thunder.Dbf reads and writes xBase tables, memos and indexes exactly as the old apps expect, takes the same locks they do, and never needs ODBC, OLE DB, Jet or a 32-bit process. It has no dependencies, runs on Windows, Linux and macOS, and is safe to trim and compile ahead of time (Native AOT, iOS, Android).
 
 ```bash
 dotnet add package Thunder.Dbf

@@ -137,6 +137,8 @@ A seek is only used when it must agree with a scan:
 
 Deleted records are left out. Typed records must be classes.
 
+Typed records are safe in trimmed and Native AOT apps (iOS, for one): the class's public properties are kept for you. `AsQueryable<T>()` isn't, and is marked so your build warns; there, use `ReadAll<T>()` with ordinary LINQ, or `Seek` through the tag. See [Mobile and AOT](getting-started.md#mobile-and-aot).
+
 ## Creating tables
 
 ```csharp

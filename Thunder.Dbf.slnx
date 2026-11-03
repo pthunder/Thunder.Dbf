@@ -7,6 +7,7 @@
     <Project Path="samples/CsvToDbf/CsvToDbf.csproj" />
     <Project Path="samples/LiveBridge/LiveBridge.csproj" />
     <Project Path="samples/MigrateToSqlite/MigrateToSqlite.csproj" />
+    <Project Path="samples/NativeAot/NativeAot.csproj" />
     <Project Path="samples/ReadLegacyData/ReadLegacyData.csproj" />
   </Folder>
   <Folder Name="/src/">

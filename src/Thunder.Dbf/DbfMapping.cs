@@ -9,8 +9,10 @@
 //     are converted to the property's type (decimal to int, DateOnly to DateTime, and so on).
 
 using System.Collections.Concurrent;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace Thunder.Dbf;
 
@@ -35,7 +37,7 @@ public sealed class DbfRecordNumberAttribute : Attribute;
 public sealed class DbfDeletedAttribute : Attribute;
 
 /// <summary>How one class maps onto one table's fields, worked out once per class and table layout.</summary>
-internal sealed class DbfMapper<T> where T : class, new()
+internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] T> where T : class, new()
 {
     private static readonly ConcurrentDictionary<string, DbfMapper<T>> Cache = new();
 
@@ -148,6 +150,8 @@ internal sealed class DbfMapper<T> where T : class, new()
     }
 
     /// <summary>Converts a field value to a property type: numbers between numeric types, dates both ways, text trimmed.</summary>
+    [UnconditionalSuppressMessage("Trimming", "IL2067", Justification =
+        "Only value types get here, and a value type's default is its zeroed bytes: no constructor runs, so none needs keeping.")]
     internal static object? Convert(object? value, Type type, string property)
     {
         var target = Nullable.GetUnderlyingType(type) ?? type;
@@ -155,7 +159,7 @@ internal sealed class DbfMapper<T> where T : class, new()
         {
             if (!type.IsValueType || Nullable.GetUnderlyingType(type) is not null)
                 return null;
-            return Activator.CreateInstance(type); // a blank field reads as the type's default
+            return RuntimeHelpers.GetUninitializedObject(type); // a blank field reads as the type's default
         }
         if (target.IsInstanceOfType(value))
             return value;
@@ -180,15 +184,27 @@ internal sealed class DbfMapper<T> where T : class, new()
     }
 }
 
+internal static class DbfMapper
+{
+    // What a class mapped onto a table needs kept when an app is trimmed: the properties that match
+    // fields, and the constructor Read uses. Annotating T this way keeps both for the class used.
+    public const DynamicallyAccessedMemberTypes Members =
+        DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicParameterlessConstructor;
+}
+
 /// <summary>Reading and writing records as plain C# objects.</summary>
+/// <remarks>
+/// Safe to trim and compile ahead of time (Native AOT, iOS): the class's public properties are kept
+/// for you. <see cref="AsQueryable{T}"/> is the exception; see its remarks.
+/// </remarks>
 public static class DbfTypedRecords
 {
     /// <summary>Reads one record as a <typeparamref name="T"/>.</summary>
-    public static T Read<T>(this DbfTable table, int index) where T : class, new() =>
+    public static T Read<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table, int index) where T : class, new() =>
         DbfMapper<T>.For(table).ToObject(table.Read(index));
 
     /// <summary>Every live record as a <typeparamref name="T"/>, streamed in record order. Deleted records are skipped.</summary>
-    public static IEnumerable<T> ReadAll<T>(this DbfTable table) where T : class, new()
+    public static IEnumerable<T> ReadAll<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table) where T : class, new()
     {
         var mapper = DbfMapper<T>.For(table);
         foreach (var record in table.ReadAll())
@@ -202,14 +218,14 @@ public static class DbfTypedRecords
     // would otherwise win overload resolution and treat the object as one field value.
 
     /// <summary>Appends <paramref name="item"/> and returns the new record's 0-based index. Unmapped fields are left blank.</summary>
-    public static int AppendRecord<T>(this DbfTable table, T item) where T : class, new() =>
+    public static int AppendRecord<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table, T item) where T : class, new() =>
         table.Append(DbfMapper<T>.For(table).ToValues(item, table.Fields.Count));
 
     /// <summary>
     /// Writes every mapped property of <paramref name="item"/> to record <paramref name="index"/>, through
     /// <see cref="DbfTable.UpdateFields"/>: unmapped fields keep whatever is on disk at that moment.
     /// </summary>
-    public static void UpdateRecord<T>(this DbfTable table, int index, T item) where T : class, new() =>
+    public static void UpdateRecord<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table, int index, T item) where T : class, new() =>
         table.UpdateFields(index, DbfMapper<T>.For(table).ToChanges(item, table.Fields));
 
     /// <summary>
@@ -217,6 +233,13 @@ public static class DbfTypedRecords
     /// index tag become seeks; everything else runs in memory over a streamed scan. Deleted records are
     /// left out. Use <see cref="DbfQueryable.Explain"/> to see which happened.
     /// </summary>
-    public static IQueryable<T> AsQueryable<T>(this DbfTable table) where T : class, new() =>
+    /// <remarks>
+    /// Not for trimmed or ahead-of-time compiled apps (Native AOT, iOS): LINQ's queryable operators
+    /// find their in-memory twins by reflection and may build generic code at run time. There, use
+    /// <see cref="ReadAll{T}"/> with ordinary LINQ, or <see cref="DbfTable.Seek(MdxTag, object)"/> for an indexed lookup.
+    /// </remarks>
+    [RequiresUnreferencedCode(DbfQueryProvider.WhyNot)]
+    [RequiresDynamicCode(DbfQueryProvider.WhyNot)]
+    public static IQueryable<T> AsQueryable<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table) where T : class, new() =>
         new DbfQueryable<T>(new DbfQueryProvider<T>(table));
 }

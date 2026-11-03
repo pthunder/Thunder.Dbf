@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **Safe to trim and compile ahead of time,** as iOS requires and Android allows (.NET MAUI, Native AOT). `Thunder.Dbf` is marked `IsAotCompatible`, so its build fails on any trim or AOT warning, and CI publishes the new [NativeAot sample](samples/NativeAot) with `PublishAot=true` on Linux and macOS, warnings as errors, and runs it: create, append, index, seek and read a table in code page 866, typed records and ADO.NET. It used to give 10 trim and AOT warnings, all from three reflection-based features:
+  - Typed records (`Read<T>`, `ReadAll<T>`, `AppendRecord`, `UpdateRecord`) mark `T` with `[DynamicallyAccessedMembers]`, so a trimmed app keeps the class's public properties and constructor. A blank field read into a non-nullable value-type property gets the type's zeroed default without running a constructor, as `default` does.
+  - `AsQueryable<T>()` is marked `[RequiresUnreferencedCode]` and `[RequiresDynamicCode]`, since LINQ's queryable operators find their in-memory versions by reflection: a trimmed or AOT app's build now warns, pointing at `ReadAll<T>()`, `Read(index)` and `Seek`. Nothing changes for other apps.
+  - `DbfDataReader.GetFieldType` carries the same annotation as `DbDataReader`'s.
+  `Thunder.Dbf.Sql` has no trim or AOT warnings of its own; whether it runs trimmed depends on the ADO.NET provider it's given. [Getting started](docs/getting-started.md#mobile-and-aot) has a short Mobile and AOT section, including that tables in the app's own folder are deleted on uninstall, as an SQLite database there is.
+
 ## [0.3.1] - 2026-11-03
 
 A fix for the first thing a new user of 0.3.0's Visual FoxPro tables hit, and the web service's sign-in packages on one version. Nothing in the public API changed; code compiled against 0.3.0 runs unchanged.

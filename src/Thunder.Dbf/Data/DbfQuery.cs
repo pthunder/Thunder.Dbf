@@ -9,13 +9,23 @@
 //                                                never different.
 
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 namespace Thunder.Dbf.Data;
 
 /// <summary>A column a reader returns: a table field or one of the pseudo-columns.</summary>
-internal sealed record DbfReaderColumn(string Name, DbfField? Field, int FieldIndex, Type ClrType, string TypeName, bool AllowsNull)
+internal sealed record DbfReaderColumn(
+    string Name,
+    DbfField? Field,
+    int FieldIndex,
+    [param: DynamicallyAccessedMembers(DbfReaderColumn.ReflectedMembers)][property: DynamicallyAccessedMembers(DbfReaderColumn.ReflectedMembers)] Type ClrType,
+    string TypeName,
+    bool AllowsNull)
 {
+    // What DbDataReader.GetFieldType promises callers can reflect on, so a trimmed app keeps it.
+    public const DynamicallyAccessedMemberTypes ReflectedMembers = DynamicallyAccessedMemberTypes.PublicFields | DynamicallyAccessedMemberTypes.PublicProperties;
+
     public const int RecordNumber = -1;
     public const int Deleted = -2;
 

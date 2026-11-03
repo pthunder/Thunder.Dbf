@@ -4,6 +4,7 @@
 //    | L(1)  | -> |  bool  |     and the rules for comparing and storing values.
 //    '-------'    '-------'
 
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 
@@ -22,6 +23,7 @@ internal static class DbfValues
     public static bool IsHidden(DbfField field) => field.Type == '0' || field.IsSystem;
 
     /// <summary>The .NET type every non-null value of the field has after <see cref="Normalize"/>.</summary>
+    [return: DynamicallyAccessedMembers(DbfReaderColumn.ReflectedMembers)]
     public static Type ClrType(DbfField field) => field.Type switch
     {
         'C' => typeof(string),

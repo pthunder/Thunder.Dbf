@@ -31,6 +31,9 @@ Reads are: a Seek through a `.cdx` tag answers in microseconds, and reading a wh
 **Does it need ODBC, OLE DB, Jet or a 32-bit process?**
 No. It's pure .NET with no native dependencies, 64-bit, on Windows, Linux and macOS.
 
+**Can I use it in a mobile app?**
+Yes: the core package is trim- and AOT-compatible, so it can go into a .NET MAUI app on iOS or Android, and CI checks it with Native AOT on every change. Use anything but `AsQueryable<T>()`, keep tables in the app's own folder, and remember they go when the app is uninstalled. See [Mobile and AOT](getting-started.md#mobile-and-aot).
+
 **My accented letters look wrong.**
 The table probably doesn't record its code page (byte 29 is 0), so it's read as Windows-1252. `Check()` warns about this. Set `DbfDatabaseOptions.Encoding`, add `Code Page=850` (or whichever applies) to the connection string, or put a `.cpg` file next to the table.
 
