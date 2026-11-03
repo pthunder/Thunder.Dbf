@@ -121,7 +121,7 @@ internal abstract class DbfMemoFile : IDisposable
         static int OrDefault(int value, int fallback) => value == 0 ? fallback : value;
     }
 
-    /// <summary>Writes an empty dBASE IV memo file, the kind <see cref="DbfHeader.Create"/> tables expect.</summary>
+    /// <summary>Writes an empty dBASE IV memo file (.dbt) with 512-byte blocks.</summary>
     public static DbfMemoFile CreateDbaseIV(Stream stream, string tableName, bool leaveOpen = false)
     {
         var header = new byte[HeaderSize];
@@ -137,6 +137,37 @@ internal abstract class DbfMemoFile : IDisposable
         stream.Write(header);
         stream.Flush();
         return new DbaseIVMemo(stream, 512, leaveOpen);
+    }
+
+    /// <summary>Writes an empty memo file for a new table: a .dbt for dBASE, an .fpt for the FoxPros.</summary>
+    public static DbfMemoFile Create(Stream stream, DbfTableFormat format, string tableName, bool leaveOpen = false)
+    {
+        if (format == DbfTableFormat.DbaseIV)
+            return CreateDbaseIV(stream, tableName, leaveOpen);
+
+        var header = new byte[HeaderSize];
+        DbfMemoFile memo;
+        if (format == DbfTableFormat.DbaseIII)
+        {
+            // dBASE III: the next free 512-byte block, and the version byte.
+            BinaryPrimitives.WriteUInt32LittleEndian(header, 1);
+            header[16] = 0x03;
+            memo = new DbaseIIIMemo(stream, leaveOpen);
+        }
+        else
+        {
+            // FoxPro: the next free block and the block size, both big-endian. 64 is FoxPro's default.
+            const int FoxProBlockSize = 64;
+            BinaryPrimitives.WriteUInt32BigEndian(header, HeaderSize / FoxProBlockSize);
+            BinaryPrimitives.WriteUInt16BigEndian(header.AsSpan(6, 2), FoxProBlockSize);
+            memo = new FoxProMemo(stream, FoxProBlockSize, leaveOpen);
+        }
+
+        stream.Position = 0;
+        stream.SetLength(0);
+        stream.Write(header);
+        stream.Flush();
+        return memo;
     }
 
     /// <summary>Reads the memo stored at <paramref name="block"/>.</summary>

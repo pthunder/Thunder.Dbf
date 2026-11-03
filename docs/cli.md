@@ -38,7 +38,7 @@ dotnet tool install --global --add-source nupkg thunder-dbf
 |---|---|
 | `thunder-dbf check <folder>` | The handshake: every table's readability, writability, locks, encryption, memos and indexes. Exit code 2 when there are problems. |
 | `thunder-dbf info <table.dbf>` | Fields, record count, encoding, memo file and index tags. It shows no data, so it's safe to paste into a bug report. |
-| `thunder-dbf import <file.csv> [table.dbf]` | Creates a table from a CSV. Add `--plan` to only show the shape, `--shape-only` to create the empty table, plus `--delimiter <c>` and `--code-page <n>`. |
+| `thunder-dbf import <file.csv> [table.dbf]` | Creates a table from a CSV. Add `--plan` to only show the shape, `--shape-only` to create the empty table, plus `--delimiter <c>`, `--code-page <n>` and `--format <f>` (`dbase3`, `dbase4` (the default), `foxpro2` or `vfp`). |
 | `thunder-dbf export <table.dbf> [file.csv]` | Writes a table as UTF-8 CSV, spreadsheet-safe. Add `--include-deleted` for deleted records, or `--raw` to turn off formula protection. |
 | `thunder-dbf migrate <folder> <file.db>` | Copies every table into a SQLite database. Add `--include-deleted` or `--replace`. |
 

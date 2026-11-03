@@ -15,6 +15,12 @@ Yes, on Windows and Linux. Writes take dBASE's record and header locks, keep the
 **Which formats does it read and write?**
 dBASE III and IV, FoxPro 2 and Visual FoxPro tables; `.dbt` and `.fpt` memos; dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` indexes (read and kept up to date on writes); FoxPro `.cdx`/`.idx` indexes (read and seek, and kept up to date as a preview). dBASE II and dBASE 7 are refused with a clear error. See [Reading and writing](reading-and-writing.md#formats) and [Indexes](indexes.md#other-index-formats).
 
+**Is it thread-safe?**
+A `DbfTable` (like a `FileStream` or a `DbConnection`) is for one thread at a time, so give each thread its own. Separate tables on the same file are safe together: inside one process they share one set of locks, so two threads or two web requests each with their own table see each other's locks, and across processes the operating system's file locks do the same on Windows and Linux. The web service opens a table per request this way. See [Locking](locking.md).
+
+**Can it create Visual FoxPro tables?**
+Yes. `DbfTable.Create(path, DbfTableFormat.VisualFoxPro, fields)` writes a Visual FoxPro table with an `.fpt` for memos, including integer, currency, double, datetime, nullable and autoincrement fields. dBASE III, dBASE IV (the default) and FoxPro 2 work the same way. See [Creating tables](reading-and-writing.md#creating-tables).
+
 **How big can tables be?**
 dBASE's own limits apply (2 GB files, 1 billion records). Thunder.Dbf streams everything: a million-row table scans in under a second, and a 1 GB memo file reads with under 10 MB of memory.
 
