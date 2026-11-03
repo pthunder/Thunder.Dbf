@@ -98,7 +98,12 @@ public sealed partial class MdxIndex : IDisposable
     /// Re-reads the tag table, in case the legacy app added, dropped or rebuilt tags since the index
     /// was opened, so writes maintain every tag that exists now.
     /// </summary>
-    internal void ReloadTags() => Tags = LoadTags(ReadHeaderArea(_stream));
+    internal void ReloadTags()
+    {
+        if (_batch is not null)
+            return; // nobody else writes the file during a batch, and this process adds no tags then
+        Tags = LoadTags(ReadHeaderArea(_stream));
+    }
 
     private static byte[] ReadHeaderArea(Stream stream)
     {
@@ -173,11 +178,9 @@ public sealed partial class MdxIndex : IDisposable
             throw new InvalidDataException($"Index page {page} is outside the .mdx file.");
 
         // A block past the end shows up as a short read, without asking the file's length first.
-        DbfTable.DiscardReadBuffer(_stream); // other programs change indexes too
-        _stream.Position = (long)page * PageSize + at;
         try
         {
-            _stream.ReadExactly(bytes);
+            ReadRaw((long)page * PageSize + at, bytes);
         }
         catch (EndOfStreamException)
         {

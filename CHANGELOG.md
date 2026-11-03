@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **`DeferIndexWrites` covers dBASE `.mdx` indexes too:** under `LockTable()`, a batch keeps the `.mdx`'s pages in memory and writes each changed one once, when the lock is disposed (new blocks first, the file header last), with the same journal note and the same refusal until `RebuildIndex()` if the batch is cut off. dBASE readers take no index lock, so they see the `.mdx` as it was before the batch until it ends. A key added past the end of the last leaf (keys added in order) no longer walks the tree to check a unique tag. Loading 100,000 rows into a table with 2 tags under `LockTable()` takes 1.8 s instead of 4.0 s, and allocates 5 KB a row instead of 36 KB (macOS, Apple silicon). The files written are byte for byte the same with and without a batch.
 - **Faster, leaner dBASE `.mdx` maintenance:** a key that fits in its leaf is now added in place, in a reused buffer, instead of every node on its path being decoded into new arrays and written back; a unique tag's check for a taken key reads the same way; and only the tag header's root pointer and has-keys flag are read, not its whole block. The `.mdx` is now opened unbuffered, like the `.cdx`, since it's read and written a block at a time. Loading 100,000 rows into a table with 2 tags allocates 10 KB a row instead of 36 KB, and takes 3.4 s instead of 4.2 s (macOS, Apple silicon). The files written are byte for byte the same.
 
 ## [0.2.0] - 2026-11-01

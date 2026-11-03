@@ -646,8 +646,8 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Locks the whole table the way dBASE's FLOCK() does, until the returned lock is disposed. With
-    /// <see cref="DeferIndexWrites"/> on, it also holds the FoxPro index lock and writes the index once,
-    /// when the lock is disposed.
+    /// <see cref="DeferIndexWrites"/> on, it also holds the FoxPro index lock and writes the FoxPro and
+    /// dBASE indexes once, when the lock is disposed.
     /// </summary>
     public DbfLock LockTable()
     {
@@ -678,9 +678,10 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Opt-in, for migrations and bulk loads: while <see cref="LockTable"/> is held, keep the FoxPro
-    /// <c>.cdx</c> changes in memory and write each changed page once, when the lock is disposed,
-    /// rather than after every record. Much faster when many records go in at once. Meanwhile the
-    /// index lock is held too, so Visual FoxPro users wait, readers included. A process killed
+    /// <c>.cdx</c> and dBASE <c>.mdx</c> changes in memory and write each changed page once, when the
+    /// lock is disposed, rather than after every record. Much faster when many records go in at once.
+    /// Meanwhile the FoxPro index lock is held too, so Visual FoxPro users wait, readers included;
+    /// dBASE readers, which take no index lock, see the index as it was before the batch. A process killed
     /// during the batch leaves the index without the batch's keys: the next open reports it and a
     /// rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
     /// </summary>
