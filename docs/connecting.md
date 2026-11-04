@@ -67,7 +67,7 @@ The folder you open is resolved to its real path first, so connecting through a 
 
 ## Error codes
 
-Every failure is a `DbfException`. `Message` and `Hint` are safe to show anyone; `FilePath` and `Diagnostic` hold the paths and account names, for logs only.
+Every failure in the files, the folder or the data is a `DbfException` (a bad argument from your own code is an ordinary `ArgumentException`). `Message` and `Hint` are safe to show anyone; `FilePath` and `Diagnostic` hold the paths and account names, for logs only.
 
 | Code | HTTP | Means | Usual fix |
 |---|---|---|---|

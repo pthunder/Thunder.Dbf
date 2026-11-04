@@ -4,7 +4,8 @@
      _______________
     | SELECT * FROM |      ProjectThunder :: Thunder.Dbf
     |   CONTACT1    |      DbConnection, DbCommand and DbDataReader over dBASE and
-    |_______________|      FoxPro files: a drop-in for the old Jet and VFP OLE DB drivers.
+    |_______________|      FoxPro files: a replacement for the old Jet and VFP OLE DB
+                           drivers, for single-table reads and writes.
 ```
 
 `Thunder.Dbf.Data` speaks plain ADO.NET, so reports, Dapper, `DataTable.Load` and anything else built on `DbConnection` can read, and carefully write, legacy data. It needs no drivers and no 32-bit process.

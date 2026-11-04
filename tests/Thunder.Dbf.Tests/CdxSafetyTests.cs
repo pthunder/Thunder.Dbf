@@ -525,7 +525,7 @@ public sealed partial class CdxWriteTests
         Assert.Empty(index["CALL_ID"].SeekExact(9001));
     }
 
-    // Found in the Visual FoxPro office runs: with other users writing all the time, the open-time
+    // Found in a multi-user Visual FoxPro test: with other users writing all the time, the open-time
     // check never saw the index hold still and gave up. After two tries it walks under the locks, and
     // if even those stay busy, the first write checks the index in full under its own locks.
     [Fact]

@@ -348,7 +348,7 @@ public sealed class MdxInPlaceTests : IDisposable
         }
     }
 
-    // A tag whose root points back at itself would send the search down for ever: the depth guard
+    // A tag whose root points back at itself would send the search down forever: the depth guard
     // stops it with an explanation, on insert and on lookup alike.
     [Fact]
     public void A_tag_that_loops_is_reported_on_insert_not_followed()
@@ -400,7 +400,7 @@ public sealed class MdxInPlaceTests : IDisposable
     // A batch starts from the .mdx as it is on disk, not as this process last read it. Pages a split adds
     // go at the end of the file, just after the tag's header, inside the read-ahead a buffered stream
     // keeps from reloading the tags; another writer's key added there since must survive the batch
-    // (found by an automated review, gpt-6-astra).
+    // (found by an automated review).
     [Fact]
     public void A_batch_keeps_keys_another_writer_added_since_this_one_last_read()
     {

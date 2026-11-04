@@ -8,7 +8,7 @@
 
 `Thunder.Dbf.Server` is a ready-to-run ASP.NET Core service. It's the safe way to put a web app on top of a legacy system:
 
-- the service is the only process (besides the legacy app) that writes the files
+- the service is designed to be the only process (besides the legacy app) that writes the files
 - every request is authenticated (an API key, or a token from your OpenID Connect provider), authorized per table and field, validated, journaled and rate-limited
 
 The full guide, covering configuration, endpoints, the security model and deployment as a Windows service, is in [src/Thunder.Dbf.Server/README.md](../src/Thunder.Dbf.Server/README.md).
@@ -21,7 +21,7 @@ dotnet run --project src/Thunder.Dbf.Server                    # serve the folde
 ```
 
 ```bash
-curl -H "X-Api-Key: $KEY" https://localhost:5001/tables/CONTACT1/records?take=10
+curl -H "X-Api-Key: $KEY" "https://localhost:5001/tables/CONTACT1/records?take=10"
 ```
 
 | Endpoint | Does |
@@ -76,7 +76,7 @@ A token's roles, groups or claims pick a named **profile**, which has the same s
 ```
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" https://localhost:5001/tables/CONTACT1/records?take=10
+curl -H "Authorization: Bearer $TOKEN" "https://localhost:5001/tables/CONTACT1/records?take=10"
 ```
 
 Provider notes (Entra app roles and groups, Auth0 namespaced claims, Keycloak mappers) are in the [server guide](../src/Thunder.Dbf.Server/README.md#signing-in-with-openid-connect).

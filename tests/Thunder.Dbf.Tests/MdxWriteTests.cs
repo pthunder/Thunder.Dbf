@@ -142,7 +142,7 @@ public sealed class MdxWriteTests : IDisposable
 
     // A batch cut off while its pages are going out can leave a tag reaching a page twice (a new root
     // over an old one not yet rewritten). RebuildIndex is the way back, so it must rebuild such a tag
-    // rather than refuse to walk it (found by an automated review, gpt-6-astra).
+    // rather than refuse to walk it (found by an automated review).
     [Fact]
     public void RebuildIndex_repairs_a_tag_that_reaches_a_page_twice()
     {

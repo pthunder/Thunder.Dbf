@@ -6,7 +6,7 @@
        /   /__      a safe JSON API in front of a legacy dBASE / FoxPro folder
       /__    /
         /  /        the legacy app keeps running on the same files;
-       / /          this service is the only other thing that writes them
+       / /          this service is designed to be the only other thing that writes them
       //
       '
 ```
@@ -106,9 +106,9 @@ A PATCH starts from the stored record and changes only the fields you send. Ever
 `/openapi/v1.json` is served to anyone, so it describes records generically and never names a table. A caller who signs in can ask for a copy of the document that adds one component schema per table, `Table_<NAME>`, read from the DBF header at that moment, so code generators get real types:
 
 - `GET /tables/{name}/openapi` for one table the caller may read. A table it can't read answers 404, the same as one that doesn't exist.
+- `GET /openapi/tables.json` for every table the caller may read. It names them all, so like `GET /tables` it needs `CanListTables`.
 
 Both answer with `Cache-Control: private, no-store`, because each copy is personal to the caller. `/openapi/tables.json` describes at most 500 tables, and only two are built at a time across the server, since each one opens every table.
-- `GET /openapi/tables.json` for every table the caller may read. It names them all, so like `GET /tables` it needs `CanListTables`.
 
 Each schema lists `_recno`, `_deleted` and every field the caller may see. Fields hidden by an allow-list aren't mentioned. A table name with characters a component name can't hold becomes `_`, and the schema's `title` keeps the real name.
 
@@ -140,7 +140,7 @@ Everything lives under `Thunder` in `appsettings.json`, which has a commented ex
 | `Data:CodePage` | (each table's own) | Force a code page, like 1252, 437 or 850. |
 | `Data:IgnoreMissingMemo` | `false` | Read memos as null when a `.dbt`/`.fpt` is missing. |
 | `Tables:{NAME}:AllowWrites` | `false` | Lets keys with write permission change this table. |
-| `Data:MaintainFoxProIndexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes. Off until checked against Visual FoxPro itself. |
+| `Data:MaintainFoxProIndexes` | `false` | Preview: keep FoxPro `.cdx`/`.idx` indexes up to date, so FoxPro tables can take writes. Off while it's a preview, which ends once the Visual FoxPro round-trip test (see docs/testing.md) passes. |
 | `Tables:{NAME}:AllowUnmaintainedIndexes` | `false` | Allows writes to a table whose index Thunder.Dbf can't keep up to date: a FoxPro `.cdx`, or a production `.mdx` that's missing. A present `.mdx` is always kept up to date. Only if the legacy app reindexes before relying on it. |
 | `ApiKeys:n:Id` | (required) | The key's name in logs and the journal. |
 | `ApiKeys:n:Sha256` | (required) | SHA-256 of the key, 64 hex digits. |
@@ -217,7 +217,7 @@ Tokens are checked against the provider's published keys, fetched over HTTPS fro
 - **PATCH changes only the fields you send.** They're written under the record lock onto the record as it is on disk at that moment, so a change the legacy app just made to another field survives.
 - **Rate limits** apply per address before any key or token is checked, then per key or signed-in user. Failed key attempts are logged at most once a minute per address, with a count, so a guessing attack can't flood the log.
 - **HTTPS** redirection and HSTS are on outside the Development environment.
-- **No leaks in errors.** Library messages name files and the service account so that whoever runs the server can fix things. Before a message reaches a client, the server strips paths down to file names and replaces the account name. Unexpected errors return only a `traceId`.
+- **No leaks in errors.** Library messages never hold paths or account names (those are in `FilePath` and `Diagnostic`, which go to the server log only). As a second line of defense, the server also strips anything path-like down to a file name and replaces the account name before a message reaches a client. Unexpected errors return only a `traceId`.
 
 ## Deploying as a Windows service next to the data folder
 

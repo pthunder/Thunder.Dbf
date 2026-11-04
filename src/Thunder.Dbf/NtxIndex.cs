@@ -14,7 +14,7 @@ namespace Thunder.Dbf;
 
 /// <summary>
 /// A Clipper (and Harbour, xHarbour, X#) single-index (.ntx) file. Opened on its own it's read-only;
-/// a table opened writable keeps the .ntx files next to it up to date (see NtxIndexWriter.cs).
+/// a table opened writable keeps the .ntx files next to it up to date (see docs/formats/ntx.md).
 /// </summary>
 public sealed partial class NtxIndex : IDisposable
 {

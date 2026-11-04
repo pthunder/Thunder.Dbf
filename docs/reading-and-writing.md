@@ -54,11 +54,11 @@ What every write does for you:
 
 - **Locks** the record (or the header and append bytes) the way dBASE does. See [Locking](locking.md).
 - **Validates every value before writing anything:** widths, decimals, types, and characters the code page can't hold. Nothing is silently turned into `?`.
-- **Keeps unchanged bytes:** `Update` rewrites only the fields whose values changed, so other apps' formatting survives, such as `Y`/`N` logicals and zero-padded memo pointers.
+- **Keeps unchanged bytes:** `Update` rewrites only the fields whose values changed (compared with the record on disk; to keep other programs' edits, use `UpdateFields`), so other apps' formatting survives, such as `Y`/`N` logicals and zero-padded memo pointers.
 - **Maintains memos:** new text goes into new memo blocks; unchanged memos keep theirs. dBASE IV free-block chains are respected.
 - **Updates the production index:** every tag, including `FOR` filters and unique tags. See [Indexes](indexes.md).
 - **Handles Visual FoxPro extras:** null flags are set and cleared, and autoincrement fields take the next number when you pass `null`.
-- **Commits in a safe order:** memo, records, the header count, then the index. See [Durability](durability.md).
+- **Commits in a safe order:** an append writes the memo, the record, the header count, then the index keys; an update that changes keys writes the new keys, the record, then removes the old keys. See [Durability](durability.md).
 
 ### Faster writes
 
@@ -71,7 +71,7 @@ using (table.LockTable())
 {
     foreach (var row in rows)
         table.Append(row);
-}                                     // each changed .cdx page is written once, here
+}                                     // each changed .cdx or .mdx page is written once, here
 ```
 
 `AppendRange` commits once per `commitEvery` rows, so it's fast with the default settings too.
@@ -133,7 +133,7 @@ The steps, and what an open does at each, are in [the protocol](formats/restruct
 - **Killed after it**, the next exclusive open moves the rest of the new files in, even when the `.dbf` itself is in the backup between its two renames.
 - **Killed while an open is finishing or undoing a change**, the next exclusive open carries on from the same decision: the manifest and the decision are kept until every file is where it belongs. Two opens at once take turns on the change's lock, and one that finds the change over, or another change under way, leaves it alone.
 - **A move that fails** (another program opened a file, say) undoes the change before the decision, with `FileInUse` or another code saying why and the table as it was. After it, the error is `IncompleteTransaction` and says the change is decided, and the next exclusive open finishes it; failing only to clear the staging folder away says the new structure is in place.
-- **While a change is under way, or one was cut off**, Thunder.Dbf writers are turned away with `IncompleteTransaction`, and readers too while the `.dbf` or memo file is between its two renames. On Linux and macOS an open also checks, by device and inode, that the `.dbf` it opened is the one at the path once it has looked, and opens again when it isn't: a handle opened just before the swap would otherwise go on reading and writing the old file, by then the backup. That check needs a 64-bit process and glibc 2.33 or later (or musl, or macOS); without it, keep other Thunder.Dbf writers away from a table while its structure changes. Other programs don't look for the folder at all, so keep them closed, as for `PACK`.
+- **While a change is under way, or one was cut off**, Thunder.Dbf writers are turned away with `IncompleteTransaction`, and readers too while the `.dbf` or memo file is between its two renames. On Linux and macOS an open also checks, by device and inode, that the `.dbf` it opened is the one at the path once it has looked, and opens again when it isn't: a handle opened just before the swap would otherwise go on reading and writing the old file, by then the backup. That check needs a 64-bit process and, on Linux, glibc 2.33 or later or musl; without it, keep other Thunder.Dbf writers away from a table while its structure changes. Other programs don't look for the folder at all, so keep them closed, as for `PACK`.
 - A `.restructure-partial` or `.restructure-retired` folder left by a kill is ignored, and cleared by the next change or writable exclusive open. A staging folder's id or a backup's manifest that's missing, damaged or names anything but this table's own files stops the open with `IncompleteTransaction` and instructions, before or after the decision alike, rather than moving files on its say-so. Any of the change's folders that turns out to be a link stops it with `PathEscapesFolder`, unentered.
 
 `Update` writes the whole record you pass, so a change another program made between your `Read` and your `Update` is overwritten. `UpdateFields` avoids that: it locks the record, re-reads it, changes only the named fields and writes it back in one step, and returns the record before and after. Prefer it whenever the legacy app may be editing the same records; the SQL `UPDATE`, the web service's `PATCH` and the SQL bridge all use it.

@@ -43,7 +43,7 @@ public sealed record DbfImportOptions
     /// <summary>Create the empty table only (the "basic shape"), without loading rows.</summary>
     public bool ShapeOnly { get; init; }
 
-    /// <summary>Date formats to recognise, tried in order. ISO dates and yyyyMMdd are always recognised.</summary>
+    /// <summary>Date formats to recognize, tried in order. ISO dates and yyyyMMdd are always recognized.</summary>
     public IReadOnlyList<string> DateFormats { get; init; } = ["M/d/yyyy", "MM/dd/yyyy"];
 
     /// <summary>Force a column's type, by CSV header name: for example a ZIP column that must stay text.</summary>

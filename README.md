@@ -3,10 +3,10 @@
 ```
        .-----.
       /     /      T H U N D E R . D B F
-     /     /__     a ProjectThunder joint
+     /     /__     by ProjectThunder
     /__      /
       /    /       dBASE  .  FoxPro  .  Clipper
-     /   /         ...now on Windows AND Mac
+     /   /         Windows  .  Linux  .  macOS
     /  /
    / /
   //
@@ -44,9 +44,10 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 
 - **Read-only by default.** Writes are switched on deliberately: per database, per table, and in the web service per API key.
 - **Writes behave like dBASE.** They take the same record and header locks dBASE does and keep every index tag in step. Fields you didn't change keep their exact bytes, and everything is flushed in a crash-safe order.
+- **Locks are real on Windows and Linux.** On macOS .NET can't lock part of a file, so `Check()` warns, and `RequireLocks = true` refuses writes there rather than write uncoordinated (see [Locking](docs/locking.md#where-it-works)).
 - **Nothing is half-written.** Every value is checked before anything is written. A character the code page can't hold is an error, never a silent `?`.
-- **Errors explain themselves.** Every failure has a code, a hint and an HTTP status, and messages never leak paths or account names.
-- **Untrusted input can't escape the folder.** Table names and links are checked, and hostile files can't crash or hang the process: 100,000 corrupted copies of the test files, thrown at every reader and writer, gave no crash, hang or runaway allocation (see [Testing](docs/testing.md#fuzzing)).
+- **Errors explain themselves.** Every failure in the files, the folder or the data is a `DbfException` with a code, a hint and an HTTP status, and its messages never leak paths or account names. A bad argument from your own code is an ordinary `ArgumentException`.
+- **Untrusted input can't escape the folder.** Table names and links are checked. Every length and pointer read from a file is bounded, and damaged or hostile files are built to fail with an explained error: 100,000 corrupted copies of the test files, thrown at every reader and writer, gave no crash, hang or runaway allocation (see [Testing](docs/testing.md#fuzzing)).
 - **Safer than the legacy drivers when things go wrong.** Writes are forced to disk in a crash-safe order, a write cut off by a crash is caught when the table next opens, and an opt-in journal finishes it exactly. You choose how much of that to trade for speed (see [Durability](docs/durability.md#choosing)).
 - **Tested on real files,** not only on files it wrote itself (see below).
 

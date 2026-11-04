@@ -148,7 +148,7 @@ public sealed class OpenIdConnectTests : IDisposable
         Assert.Contains("access profile", problem.GetProperty("detail").GetString());
     }
 
-    // ---- from the Codex security review ------------------------------------------------------
+    // ---- from an automated security review ---------------------------------------------------
 
     [Fact]
     public async Task An_ID_token_is_refused_even_when_its_audience_and_role_would_pass()

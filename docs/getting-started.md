@@ -72,11 +72,11 @@ That one call:
 - takes the record lock the legacy app would take
 - writes only the field that changed (other fields keep their exact bytes)
 - updates every tag of the production `.mdx` index
-- flushes the memo, record, index and header in a safe order
+- flushes the memo, record and index in a crash-safe order
 
 ## 6. When something goes wrong
 
-Every failure is a `DbfException` with a `Code`, a safe `Message`, a `Hint` saying what to do, and an `HttpStatus` for web layers:
+Every failure in the files, the folder or the data is a `DbfException` with a `Code`, a safe `Message`, a `Hint` saying what to do, and an `HttpStatus` for web layers; a bad argument from your own code is an ordinary `ArgumentException`:
 
 ```csharp
 try { db["CONTACT9"].ReadAll().ToList(); }

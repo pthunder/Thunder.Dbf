@@ -2,7 +2,7 @@
 //       ( () )====[=|=|=]      ProjectThunder :: Thunder.Dbf
 //        `--'                  hash-key: makes an API key and the SHA-256 hash that goes
 //                              in appsettings.json. The key goes to the client; the hash
-//                              goes in config; neither one can be turned back into the other.
+//                              goes in config; the hash can't be turned back into the key.
 
 namespace Thunder.Dbf.Server;
 

@@ -875,7 +875,7 @@ public sealed partial class DbfTable
                     }
                     catch (Exception undo) when (undo is IOException or UnauthorizedAccessException && !IsRefusal(undo))
                     {
-                        throw Phased(undo, path, "The table's structure couldn't be changed, and putting it back as it was didn't finish yet.",
+                        throw Phased(undo, path, "The table's structure couldn't be changed, and putting it back as it was hasn't finished yet.",
                             "Open the table with writable: true, exclusive: true, which puts the table back as it was.", DbfErrorCode.IncompleteTransaction);
                     }
                     hold.Dispose();
@@ -1038,7 +1038,7 @@ public sealed partial class DbfTable
                 return candidate;
             }
             if (attempt == 100)
-                throw new DbfException(DbfErrorCode.TableAlreadyExists, "Too many backup folders from earlier changes share this moment's name, and none is reused, since it may hold an earlier change's files.",
+                throw new DbfException(DbfErrorCode.TableAlreadyExists, "Too many earlier backup folders already use this timestamp, and none can be reused, since each may hold an earlier change's files.",
                     "Move the .restructured- folders beside the table away, then try again.", _path);
         }
     }

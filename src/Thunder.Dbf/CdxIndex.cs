@@ -15,8 +15,9 @@ namespace Thunder.Dbf;
 
 /// <summary>
 /// A FoxPro / Visual FoxPro compound index (.cdx) or compact single index (.idx). Also reads the
-/// .cdx files Clipper's SIx driver, Harbour and X# write. A table opened for writing keeps its
-/// .cdx and .idx files up to date (see docs/formats/cdx.md, "Writing").
+/// .cdx files Clipper's SIx driver, Harbour and X# write. With the <c>maintainFoxProIndexes</c>
+/// preview, a table opened for writing keeps its .cdx and .idx files up to date; without it, a table
+/// with a structural .cdx refuses writes (see docs/formats/cdx.md, "Writing").
 /// </summary>
 public sealed partial class CdxIndex : IDisposable
 {

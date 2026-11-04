@@ -5,7 +5,7 @@
 //
 //   dotnet run --project samples/AdoNet
 //
-// No Jet, no VFP OLE DB, no 32-bit process: a drop-in for reports, Dapper and DataTable.Load.
+// No Jet, no VFP OLE DB, no 32-bit process: single-table SQL for reports, Dapper and DataTable.Load.
 
 using System.Data;
 using System.Data.Common;
