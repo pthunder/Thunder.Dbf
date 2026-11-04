@@ -883,12 +883,11 @@ public sealed partial class DbfTable
         }
     }
 
-    // The change creates its lock; an open finishing one only ever takes a lock that's there, so it
-    // never leaves one in a backup whose change has ended.
     // Whether a file (or folder) is there: true or false only when that's known. File.Exists and
     // Directory.Exists also answer false when the look itself failed (access denied, a share gone),
     // and acting on that could undo a decided change or take a staged file for installed; so any
-    // failure but "not there" throws, and the step stops.
+    // failure but "not there" throws, as a DbfException naming no path (it's in FilePath), and
+    // the step stops.
     internal static bool FileThere(string file) => There(file, folder: false);
 
     internal static bool FolderThere(string folder) => There(folder, folder: true);
@@ -909,7 +908,17 @@ public sealed partial class DbfTable
         {
             return false;
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+        {
+            var known = DbfException.Translate(ex, path, FileAccess.Read);
+            throw new DbfException(known?.Code ?? DbfErrorCode.WriteFailed,
+                "Thunder.Dbf couldn't tell whether a file it needs beside the table is there, so it stopped rather than guess.",
+                known?.Hint ?? "Check that the folder can be read, then try again.", path, ex);
+        }
     }
+
+    // The change creates its lock; an open finishing one only ever takes a lock that's there, so it
+    // never leaves one in a backup whose change has ended.
 
     private static FileStream HoldRestructure(string backup, bool create = false) =>
         new(Path.Combine(backup, RestructureLockName), create ? FileMode.CreateNew : FileMode.Open, FileAccess.ReadWrite, FileShare.None);
@@ -1104,7 +1113,7 @@ public sealed partial class DbfTable
                 DeleteQuietly(inner);
             Directory.Delete(folder);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException { Code: DbfErrorCode.PathEscapesFolder })
         {
             // Nothing reads it; the next change or exclusive open tries again.
         }

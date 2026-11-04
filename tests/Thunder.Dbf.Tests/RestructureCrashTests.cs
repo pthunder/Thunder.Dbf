@@ -1354,4 +1354,30 @@ public sealed class RestructureCrashTests : IDisposable
             MdxIndex.DropTagPoint = null;
         }
     }
+
+    // The review of #47: looks outside recovery (an open's check for a change under way, MdxIndex.Open's
+    // for a before-image) that fail say so without the path.
+    [Fact]
+    public void A_failing_look_outside_recovery_is_explained_without_its_path()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        DbfTable.LookFails = file => file.EndsWith(".restructuring", StringComparison.Ordinal) || file.EndsWith(".droptag", StringComparison.Ordinal);
+        try
+        {
+            var shared = Assert.Throws<DbfException>(() => Open(path, exclusive: false));
+            Assert.Equal(DbfErrorCode.AccessDenied, shared.Code);
+            Assert.DoesNotContain(_dir.FullName, shared.Message);
+            Assert.DoesNotContain(_dir.FullName, shared.Hint);
+            Assert.Equal(path + ".restructuring", shared.FilePath);
+
+            var index = Assert.Throws<DbfException>(() => MdxIndex.Open(MdxIndex.FindFor(path)!));
+            Assert.DoesNotContain(_dir.FullName, index.Message);
+        }
+        finally
+        {
+            DbfTable.LookFails = null;
+        }
+        using var table = Open(path, exclusive: false); // and the file wasn't left open
+        Assert.Equal(4, table.RecordCount);
+    }
 }

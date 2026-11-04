@@ -289,8 +289,9 @@ public sealed partial class DbfTable : IDisposable
 
     // A dBASE IV table whose .mdx went missing looks just like a FoxPro 2 table, so a .cdx of the same
     // name only says "FoxPro 2" when it opens and every tag's expressions name nothing but this
-    // table's fields, or it has no tags at all. A stray .cdx (another table's, renamed or copied in) leaves dBASE's rules in
-    // force: the missing .mdx keeps blocking writes, and dBASE's lock positions stay in use.
+    // table's fields, or it has no tags at all. A stray .cdx (another table's, renamed or copied in)
+    // leaves dBASE's rules in force: the missing .mdx keeps blocking writes, and dBASE's lock
+    // positions stay in use.
     private static bool IsIndexOver(string cdxPath, DbfHeader header)
     {
         var fields = header.Fields.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
