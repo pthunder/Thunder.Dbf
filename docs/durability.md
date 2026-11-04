@@ -23,6 +23,7 @@ So after a crash or a power cut:
 - **An append that was cut short** is invisible: the header still has the old count, and dBASE ignores bytes past it.
 - **A memo** written before the cut, with no record yet pointing at it, is wasted space, never corruption.
 - **An index** can at worst be missing the entries for the last write. It never points at a record that doesn't exist. `table.RebuildIndex()` puts the missing entries back, and `Check()` reports an index it can't read.
+- **A dBASE `.mdx` node split** writes its new nodes first and gives up the moved keys last, so a writer killed partway never loses keys already in the tag. A scan can see some twice until the next write or a rebuild. When the split reaches an interior node, a cut in the middle can leave a page reached through both halves: the index then reports itself damaged rather than quietly missing keys, and `RebuildIndex()` puts it right.
 
 If an index update itself fails (a damaged `.mdx`, say), the changes already made to that index are undone and the write fails with `IndexDamaged`, naming the tag.
 
