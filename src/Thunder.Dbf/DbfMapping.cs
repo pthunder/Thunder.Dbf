@@ -150,8 +150,6 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
     }
 
     /// <summary>Converts a field value to a property type: numbers between numeric types, dates both ways, text trimmed.</summary>
-    [UnconditionalSuppressMessage("Trimming", "IL2067", Justification =
-        "Only value types get here, and a value type's default is its zeroed bytes: no constructor runs, so none needs keeping.")]
     internal static object? Convert(object? value, Type type, string property)
     {
         var target = Nullable.GetUnderlyingType(type) ?? type;
@@ -159,7 +157,7 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
         {
             if (!type.IsValueType || Nullable.GetUnderlyingType(type) is not null)
                 return null;
-            return RuntimeHelpers.GetUninitializedObject(type); // a blank field reads as the type's default
+            return DbfMapper.Blank(type); // a blank field reads as the type's default
         }
         if (target.IsInstanceOfType(value))
             return value;
@@ -190,6 +188,27 @@ internal static class DbfMapper
     // fields, and the constructor Read uses. Annotating T this way keeps both for the class used.
     public const DynamicallyAccessedMemberTypes Members =
         DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicParameterlessConstructor;
+
+    private static readonly ConcurrentDictionary<Type, ConstructorInfo?> Constructors = new();
+
+    /// <summary>
+    /// What a blank field reads as into a non-nullable value-type property: <c>new T()</c>, as
+    /// <see cref="Activator.CreateInstance(Type)"/> gave, so a struct's own parameterless constructor
+    /// runs; zeroed storage for a struct that has none (every built-in type), as always.
+    /// </summary>
+    /// <remarks>
+    /// A property's type can't carry trimming annotations, so a trimmed app keeps a struct's
+    /// parameterless constructor only when something else asks for it (a <c>[DynamicDependency]</c>,
+    /// say). When it's been trimmed away the struct reads as zeroed storage instead of failing.
+    /// </remarks>
+    [UnconditionalSuppressMessage("Trimming", "IL2070", Justification =
+        "The constructor is looked for, not required: when trimming removed it, the value is zeroed storage, which needs nothing kept.")]
+    [UnconditionalSuppressMessage("Trimming", "IL2067", Justification =
+        "Only value types get here, and GetUninitializedObject runs no constructor, so none needs keeping.")]
+    public static object Blank(Type valueType) =>
+        Constructors.GetOrAdd(valueType, t => t.GetConstructor(Type.EmptyTypes)) is { } constructor
+            ? constructor.Invoke(null)
+            : RuntimeHelpers.GetUninitializedObject(valueType);
 }
 
 /// <summary>Reading and writing records as plain C# objects.</summary>

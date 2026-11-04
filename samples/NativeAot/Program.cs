@@ -8,6 +8,7 @@
 //
 // Exits non-zero if anything reads back differently, so CI can run it.
 
+using System.Diagnostics.CodeAnalysis;
 using Thunder.Dbf;
 using Thunder.Dbf.Data;
 
@@ -65,6 +66,7 @@ try
         Check(people.Select(p => p.Name).SequenceEqual(["Ада Лавлейс", "Grace Hopper", "Алан Тьюринг"]), "ReadAll<Person>()");
         Check(people[2].Born is null && people[2].Recno == 3, "a blank date reads as null");
         Check(table.Read<Counted>(2).Born == default, "and as the default into a non-nullable property");
+        Check(Blanks.ReadCode(table, 2).Value == 7, "and as new Code() into a struct with its own constructor, kept for it");
 
         table.UpdateRecord(1, people[1] with { Active = true });
         Check(table.Read<Person>(1).Active, "UpdateRecord");
@@ -105,4 +107,22 @@ internal sealed record Person
 internal sealed class Counted
 {
     public DateTime Born { get; set; }
+}
+
+internal struct Code
+{
+    public Code() => Value = 7;
+    public int Value;
+}
+
+internal sealed class Coded
+{
+    public Code Born { get; set; }
+}
+
+internal static class Blanks
+{
+    // A property's type can't be annotated, so the constructor is kept for it here.
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicParameterlessConstructor, typeof(Code))]
+    public static Code ReadCode(DbfTable table, int index) => table.Read<Coded>(index).Born;
 }

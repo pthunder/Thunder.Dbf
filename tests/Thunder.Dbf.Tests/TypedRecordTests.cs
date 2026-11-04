@@ -203,7 +203,32 @@ public sealed class TypedRecordTests : IDisposable
         table.Append(null, null, null, null);
 
         var blank = table.Read<Blank>(0);
-        Assert.Equal((0, Severity.Info, default(DateTime), false, (int?)null), (blank.Id, blank.Level, blank.Seen, blank.Ok, blank.Maybe));
+        Assert.Equal((0, Severity.Info, default(DateTime), false), (blank.Id, blank.Level, blank.Seen, blank.Ok));
+        Assert.Null(blank.Maybe);
+    }
+
+    [Fact]
+    public void A_blank_field_into_a_struct_with_its_own_constructor_runs_it_as_before()
+    {
+        // 0.3.1 made the value with Activator.CreateInstance, so the struct's parameterless constructor ran.
+        var path = Path.Combine(_dir.FullName, "BLANKS.DBF");
+        using var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 4), DbfFieldDefinition.Numeric("CODE", 4)]);
+        table.Append(1, null);
+
+        var read = table.Read<WithCode>(0);
+        Assert.Equal((1, 7), (read.Id, read.Code.Value));
+    }
+
+    public struct Code
+    {
+        public Code() => Value = 7;
+        public int Value;
+    }
+
+    public sealed class WithCode
+    {
+        public int Id { get; set; }
+        public Code Code { get; set; }
     }
 
     public sealed class Blank
