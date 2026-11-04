@@ -368,6 +368,79 @@ public sealed class ModifyStructureTests : IDisposable
     }
 
     [Fact]
+    public void A_binary_character_field_keeps_its_bytes_when_resized()
+    {
+        var path = Path.Combine(_dir.FullName, "KEYS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Character("HASH", 6) with { Binary = true }]))
+        {
+            created.Append("abcdef");
+            created.Append("ab");
+        }
+        // Bytes no code page round-trips: 0x81 is unassigned in Windows-1252, and a NUL.
+        var bytes = File.ReadAllBytes(path);
+        var start = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(8)) + 1;
+        new byte[] { 0x81, 0x00, 0xFF, (byte)'x', 0x90, 0x9D }.CopyTo(bytes, start);
+        File.WriteAllBytes(path, bytes);
+
+        using var old = Open(path);
+        using var wider = old.AlterField("HASH", DbfFieldDefinition.Character("HASH", 10) with { Binary = true });
+        Assert.Equal(new byte[] { 0x81, 0x00, 0xFF, (byte)'x', 0x90, 0x9D, 32, 32, 32, 32 }, wider.Read(0).Raw.AsSpan(1, 10).ToArray());
+        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => wider.AlterField("HASH", DbfFieldDefinition.Character("HASH", 3) with { Binary = true })).Code);
+        using var narrower = wider.AlterField("HASH", DbfFieldDefinition.Character("HASH", 2) with { Binary = true }, allowLoss: true);
+        Assert.Equal(new byte[] { 0x81, 0x00 }, narrower.Read(0).Raw.AsSpan(1, 2).ToArray());
+        Assert.Equal("ab", narrower.Read(1)["HASH"]);
+        Assert.Equal(1, narrower.StructureValuesChanged);
+    }
+
+    [Fact]
+    public void Killed_before_the_table_is_swapped_a_memo_file_the_table_never_had_isnt_left_beside_it()
+    {
+        var path = Path.Combine(_dir.FullName, "PEOPLE.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CrashPoint = point => { if (point == "memo swapped") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.AddField(DbfFieldDefinition.Memo("NOTE")));
+        }
+        using (Open(path))
+        {
+        }
+        Assert.Equal(["PEOPLE.DBF"], Directory.GetFiles(_dir.FullName).Select(Path.GetFileName));
+        Assert.Empty(Leftovers());
+    }
+
+    [Fact]
+    public void A_change_that_adds_a_memo_file_finishes_with_it_in_place()
+    {
+        var path = Path.Combine(_dir.FullName, "PEOPLE.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CrashPoint = point => { if (point == "table swapped") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.AddField(DbfFieldDefinition.Memo("NOTE")));
+        }
+        using var reopened = Open(path);
+        reopened.Update(0, "Ada", "Countess of Lovelace");
+        Assert.Equal("Countess of Lovelace", reopened.Read(0)["NOTE"]);
+    }
+
+    [Fact]
+    public void An_index_another_reader_holds_open_stops_the_change_before_anything_moves()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        var dbf = File.ReadAllBytes(path);
+        using var old = Open(path);
+        using (old.OpenProductionIndex())
+            Assert.Equal(DbfErrorCode.FileInUse, Assert.Throws<DbfException>(() => old.AddField(DbfFieldDefinition.Logical("OK"))).Code);
+        Assert.Equal(dbf, File.ReadAllBytes(path));
+        Assert.Empty(Leftovers());
+        using var table = Open(path);
+        Assert.Equal(4, table.Fields.Count);
+    }
+
+    [Fact]
     public void A_table_in_a_Visual_FoxPro_database_is_refused()
     {
         var path = Table(DbfTableFormat.VisualFoxPro, tag: false);
@@ -403,7 +476,9 @@ public sealed class ModifyStructureTests : IDisposable
     {
         var path = Kinds();
         using var old = Open(path);
-        var tagsBefore = old.OpenStructuralIndex()!.Tags.Select(t => t.Name).Order().ToList();
+        List<string> tagsBefore;
+        using (var before = old.OpenStructuralIndex()!)
+            tagsBefore = before.Tags.Select(t => t.Name).Order().ToList();
         var notes = old.ReadAll().Select(r => r["NOTE"]).ToList();
 
         using var table = old.AlterField("NAME", DbfFieldDefinition.Character("NAME", 40));
@@ -474,7 +549,7 @@ public sealed class ModifyStructureTests : IDisposable
             table.CreateIndexTag("HIRED", "HIRED");
         }
         // What DropIndexTag("NAME") writes first: the entries after NAME's moved down a slot, the count not yet lowered.
-        var mdx = Path.ChangeExtension(path, ".mdx");
+        var mdx = MdxIndex.FindFor(path)!; // PEOPLE.MDX: Linux file names keep their case
         var bytes = File.ReadAllBytes(mdx);
         var entry = bytes[26];
         Array.Copy(bytes, 544 + entry, bytes, 544, entry * 2);

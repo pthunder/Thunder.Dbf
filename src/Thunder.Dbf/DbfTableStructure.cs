@@ -88,7 +88,11 @@ public sealed partial class DbfTable
     /// <returns>The table with its new structure. This table is closed: use the one returned.</returns>
     public DbfTable AddField(DbfFieldDefinition field) => ModifyStructure([.. FieldDefinitions, field]);
 
-    /// <summary>Drops a field and its values: <see cref="ModifyStructure"/> without it.</summary>
+    /// <summary>
+    /// Drops a field and its values: <see cref="ModifyStructure"/> without it. A dropped memo field's memos
+    /// stay in the memo file, which is copied whole, as unused space, and in the backup. To be rid of
+    /// sensitive text for good, copy the records you keep into a new table and delete the old files.
+    /// </summary>
     /// <returns>The table with its new structure. This table is closed: use the one returned.</returns>
     public DbfTable DropField(string name)
     {
@@ -348,6 +352,21 @@ public sealed partial class DbfTable
                     values[j] = wasNull && to.IsNullable ? null : block is { } pointer ? pointer : "";
                     continue;
                 }
+                if (from.Type == 'C' && to.Type == 'C' && from.Length != to.Length && (to.Length > from.Length || from.IsBinary) && !(wasNull && !to.IsNullable))
+                {
+                    // Text widened, or binary (NOCPTRANS) text resized: its bytes go across as they are, padded
+                    // with spaces as dBASE pads, never through the code page and back.
+                    var kept = Math.Min(from.Length, to.Length);
+                    raw.AsSpan(from.Offset, kept).CopyTo(buffer.AsSpan(to.Offset, kept));
+                    buffer.AsSpan(to.Offset + kept, to.Length - kept).Fill((byte)' ');
+                    if (raw.AsSpan(from.Offset + kept, from.Length - kept).IndexOfAnyExcept((byte)' ', (byte)0) >= 0)
+                        changed += Lost(record, from, to, allowLoss);
+                    values[j] = record[sources[j]];
+                    encode[j] = false;
+                    if (to.NullBit is { } bit)
+                        copiedNulls.Add((bit, wasNull));
+                    continue;
+                }
                 if (from.Type == to.Type && from.Length == to.Length && from.DecimalCount == to.DecimalCount && !(wasNull && !to.IsNullable))
                 {
                     // Stored the same way: the bytes go across untouched, as the legacy app wrote them.
@@ -580,21 +599,23 @@ public sealed partial class DbfTable
     private DbfTable SwapInRestructured(string ready, int changed, bool newHasMemo)
     {
         var path = _path!;
-        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
         var oldMemo = _memo is null ? null : DbfMemoFile.FindFor(path, Header);
         var staged = Directory.GetFiles(ready);
         var stagedMemo = staged.FirstOrDefault(f => Path.GetExtension(f).ToLowerInvariant() is ".dbt" or ".fpt");
         var stagedTable = staged.First(f => Path.GetFileName(f).Equals(Path.GetFileName(path), StringComparison.OrdinalIgnoreCase));
         var backup = NewRestructureBackup();
 
-        var hold = HoldRestructure(ready, backup);
-        try
+        using (var hold = HoldRestructure(ready, backup))
         {
             DisposeFiles(); // Windows won't rename a file that's open
             try
             {
-                if (stagedMemo is not null)
-                    SwapFile(stagedMemo, oldMemo ?? FindCompanion(path, Path.GetExtension(stagedMemo)) ?? Path.Combine(folder, Path.GetFileName(stagedMemo)), backup);
+                ThrowIfAnyInUse(path, staged, oldMemo);
+                // Before the .dbf only when it replaces the old table's own memo file, which the old .dbf
+                // reads just as well; a memo file the old table never had follows the .dbf instead, so
+                // giving up leaves nothing new beside it.
+                if (stagedMemo is not null && oldMemo is not null)
+                    SwapFile(stagedMemo, oldMemo, backup);
                 CrashPoint?.Invoke("memo swapped");
                 SwapFile(stagedTable, path, backup);
             }
@@ -615,10 +636,6 @@ public sealed partial class DbfTable
                 throw new DbfException(DbfErrorCode.IncompleteTransaction, "The table has its new structure, but its index couldn't be put in place beside it.",
                     "Open the table with writable: true, exclusive: true, which finishes the change.", path, ex);
             }
-        }
-        finally
-        {
-            hold.Dispose();
         }
         DeleteRestructureFolder(ready);
 
@@ -653,10 +670,27 @@ public sealed partial class DbfTable
         for (var attempt = 1; ; attempt++)
         {
             var candidate = attempt == 1 ? stem : $"{stem}-{attempt}";
-            if ((Directory.Exists(candidate) || File.Exists(candidate)) && attempt < 100)
-                continue;
-            Directory.CreateDirectory(candidate);
-            return candidate;
+            if (!Directory.Exists(candidate) && !File.Exists(candidate))
+            {
+                Directory.CreateDirectory(candidate);
+                return candidate;
+            }
+            if (attempt == 100)
+                throw new DbfException(DbfErrorCode.TableAlreadyExists, "Too many backup folders from earlier changes share this moment's name, and none is reused, since it may hold an earlier change's files.",
+                    "Move the .restructured- folders beside the table away, then try again.", _path);
+        }
+    }
+
+    // Every file the swap will replace, tried unshared now that this table's own handles are closed,
+    // so one another program holds open (an index opened to read, say) stops the change before the
+    // .dbf moves, rather than after it with the index left to follow.
+    private static void ThrowIfAnyInUse(string path, string[] staged, string? oldMemo)
+    {
+        var replaced = staged.Select(f => FindCompanion(path, Path.GetExtension(f))).Append(oldMemo).Append(path);
+        foreach (var file in replaced.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (File.Exists(file))
+                new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
         }
     }
 
@@ -675,7 +709,9 @@ public sealed partial class DbfTable
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
         foreach (var file in Directory.GetFiles(ready))
         {
-            if (Path.GetFileName(file).Equals(RestructureLockName, StringComparison.OrdinalIgnoreCase))
+            // Only what a change stages after its .dbf, named after this table: a stale or foreign folder can't put anything else in place.
+            if (Path.GetExtension(file).ToLowerInvariant() is not (".mdx" or ".cdx" or ".dbt" or ".fpt")
+                || !Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(path), StringComparison.OrdinalIgnoreCase))
                 continue;
             SwapFile(file, FindCompanion(path, Path.GetExtension(file)) ?? Path.Combine(folder, Path.GetFileName(file)), backup);
         }
@@ -729,8 +765,9 @@ public sealed partial class DbfTable
         try
         {
             using var hold = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-            using var reader = new StreamReader(hold, Encoding.UTF8);
-            backupName = reader.ReadToEnd().Trim();
+            var name = new byte[512]; // a backup folder's name is far shorter; a longer file isn't one this wrote
+            var read = hold.ReadAtLeast(name, name.Length, throwOnEndOfStream: false);
+            backupName = read == name.Length ? "" : Encoding.UTF8.GetString(name, 0, read).Trim();
         }
         catch (IOException ex) when (ex is not FileNotFoundException and not DirectoryNotFoundException)
         {
