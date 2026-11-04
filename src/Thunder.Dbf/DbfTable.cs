@@ -210,11 +210,14 @@ public sealed partial class DbfTable : IDisposable
                 stream.Dispose();
                 throw RestructureUnderWay(path);
             }
-            // Three tries: a swap finishes between two of them. A file whose times another program
-            // changes meanwhile can look replaced to the check, so the third is taken as it is.
-            if (IsFileAtPath(stream, path) || attempt == 3)
+            if (IsFileAtPath(stream, path))
                 return stream;
             stream.Dispose();
+            // Three tries: a swap finishes between two of them. One that never settles is refused,
+            // never taken on trust: the handle could be writing into a backup.
+            if (attempt == 3)
+                throw new DbfException(DbfErrorCode.IncompleteTransaction, "The table's .dbf was replaced each time it was opened, so it wasn't opened.",
+                    "Wait for whatever is changing the table to finish, then open it again.", path);
         }
     }
 

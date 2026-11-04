@@ -1048,10 +1048,13 @@ public sealed partial class DbfTable
         "Wait a moment and try again; if it persists, open the table with writable: true, exclusive: true, which finishes the change or puts the table back as it was.", path);
 
     // True when the open file is the one at the path now. A change of structure renames the old
-    // .dbf into its backup, and on Linux and macOS a handle opened just before keeps pointing at it;
-    // a file's creation time doesn't change with writes, and the new .dbf was created after the old.
+    // .dbf into its backup, and on Linux and macOS a handle opened just before keeps pointing at it.
+    // The device and inode say so exactly; where they can't be read, the creation time, which writes
+    // don't change, stands in (the new .dbf was created after the old).
     private static bool IsFileAtPath(FileStream stream, string path)
     {
+        if (FileIdentity.Same(stream, path) is { } same)
+            return same;
         try
         {
             return File.GetCreationTimeUtc(stream.SafeFileHandle) == File.GetCreationTimeUtc(path);

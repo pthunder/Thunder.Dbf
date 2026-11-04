@@ -348,6 +348,92 @@ public sealed class RestructureCrashTests : IDisposable
         }
     }
 
+    // ---- telling whether an open file is still the one at its path ------------------------------
+
+    [Fact]
+    public void A_handle_is_the_file_at_its_path_until_that_file_is_renamed_away()
+    {
+        var path = Path.Combine(_dir.FullName, "ID.DBF");
+        File.WriteAllText(path, "old");
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var same = FileIdentity.Same(stream, path);
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            Assert.True(same); // read from the device and inode, not left to the fallback
+        else
+            Assert.True(same ?? true);
+        if (OperatingSystem.IsWindows())
+            return; // a file .NET has open can't be renamed there, so the question doesn't arise
+
+        // The same bytes and times copied over, as a swap could leave them: only the inode tells them apart.
+        File.Move(path, path + ".aside");
+        File.Copy(path + ".aside", path);
+        File.SetCreationTimeUtc(path, File.GetCreationTimeUtc(path + ".aside"));
+        File.SetLastWriteTimeUtc(path, File.GetLastWriteTimeUtc(path + ".aside"));
+        Assert.False(FileIdentity.Same(stream, path));
+        File.Delete(path);
+        Assert.False(FileIdentity.Same(stream, path)); // nothing at the path at all
+    }
+
+    [Fact]
+    public void An_open_whose_dbf_never_matches_its_path_is_refused_not_taken_on_trust()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        var tries = 0;
+        FileIdentity.Override = (_, _) => { tries++; return false; };
+        try
+        {
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => Open(path, exclusive: false)).Code);
+            Assert.Equal(3, tries);
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => DbfTable.Open(path)).Code);
+        }
+        finally
+        {
+            FileIdentity.Override = null;
+        }
+        using var table = Open(path, exclusive: false); // and opens once the files settle
+        Assert.Equal(4, table.RecordCount);
+    }
+
+    [Fact]
+    public void Where_the_inode_cant_be_read_the_creation_time_stands_in()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        FileIdentity.Override = (_, _) => null;
+        try
+        {
+            using var table = Open(path, exclusive: false);
+            Assert.Equal(4, table.RecordCount);
+        }
+        finally
+        {
+            FileIdentity.Override = null;
+        }
+    }
+
+    // ---- a decision that didn't reach the disk ---------------------------------------------------
+
+    // The decision's contents are forced to disk, but .NET can't force the folder entry naming it.
+    // After a power cut that lost the entry while keeping the moves after it, the change must be
+    // undone whole: every old file comes back from the backup, not just the memo.
+    [Theory]
+    [InlineData("table moved in")]
+    [InlineData("index moved in")]
+    public void A_lost_decision_undoes_the_change_with_every_old_file_back(string step)
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        var before = Files();
+        using (var table = Open(path))
+            ModifyStructureTests.KillingAt(step, () => table.AddField(DbfFieldDefinition.Logical("OK")));
+        File.Delete(Path.Combine(path + ".restructuring", "restructure.commit"));
+
+        using (var table = Open(path))
+            Assert.Equal(3, table.Fields.Count);
+        Assert.Equal(before.Keys.Order(), Files().Keys.Order());
+        foreach (var (file, bytes) in Files())
+            Assert.Equal(before[file], bytes);
+        Assert.Empty(Folders());
+    }
+
     // ---- the note naming the backup -------------------------------------------------------------
 
     [Theory]
