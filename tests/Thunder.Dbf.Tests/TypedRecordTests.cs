@@ -2,6 +2,9 @@
 //      LINQ    ->  .Where(c => c.Id == 2)  -->  seek ID_TAG              Typed records and LINQ: the same answer
 //                  .Where(c => c.Level > 0) -->  scan                    whether an index helps or not.
 
+using System.Diagnostics.CodeAnalysis;
+using System.Reflection;
+
 namespace Thunder.Dbf.Tests;
 
 public sealed class TypedRecordTests : IDisposable
@@ -189,5 +192,45 @@ public sealed class TypedRecordTests : IDisposable
         using var table = DbfTable.Open(_path);
         int[] first = table.AsQueryable<Change>().Select(c => new[] { c.Id }).First();
         Assert.Equal([table.Read<Change>(0).Id], first);
+    }
+
+    [Fact]
+    public void Blank_fields_read_as_the_default_into_value_type_properties()
+    {
+        var path = Path.Combine(_dir.FullName, "BLANKS.DBF");
+        using var table = DbfTable.Create(path,
+            [DbfFieldDefinition.Numeric("ID", 4), DbfFieldDefinition.Numeric("LEVEL", 1), DbfFieldDefinition.Date("SEEN"), DbfFieldDefinition.Logical("OK")]);
+        table.Append(null, null, null, null);
+
+        var blank = table.Read<Blank>(0);
+        Assert.Equal((0, Severity.Info, default(DateTime), false, (int?)null), (blank.Id, blank.Level, blank.Seen, blank.Ok, blank.Maybe));
+    }
+
+    public sealed class Blank
+    {
+        public int Id { get; set; }
+        public Severity Level { get; set; }
+        public DateTime Seen { get; set; }
+        public bool Ok { get; set; }
+        [DbfField("ID")] public int? Maybe { get; set; }
+    }
+
+    [Fact]
+    public void Trimmed_apps_are_told_what_typed_records_need_and_that_LINQ_needs_more()
+    {
+        // These attributes are what a trimmed or Native AOT app's build reads: typed records keep the
+        // class's properties, and AsQueryable warns there instead of failing at run time.
+        var typed = typeof(DbfTypedRecords);
+        foreach (var name in new[] { nameof(DbfTypedRecords.Read), nameof(DbfTypedRecords.ReadAll), nameof(DbfTypedRecords.AppendRecord), nameof(DbfTypedRecords.UpdateRecord), nameof(DbfTypedRecords.AsQueryable) })
+        {
+            var t = typed.GetMethod(name)!.GetGenericArguments()[0];
+            var kept = t.GetCustomAttribute<DynamicallyAccessedMembersAttribute>()!.MemberTypes;
+            Assert.True(kept.HasFlag(DynamicallyAccessedMemberTypes.PublicProperties), name);
+        }
+
+        var queryable = typed.GetMethod(nameof(DbfTypedRecords.AsQueryable))!;
+        Assert.Contains("ReadAll<T>()", queryable.GetCustomAttribute<RequiresUnreferencedCodeAttribute>()!.Message);
+        Assert.NotNull(queryable.GetCustomAttribute<RequiresDynamicCodeAttribute>());
+        Assert.Null(typed.GetMethod(nameof(DbfTypedRecords.ReadAll))!.GetCustomAttribute<RequiresUnreferencedCodeAttribute>());
     }
 }

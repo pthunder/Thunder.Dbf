@@ -7,6 +7,7 @@
 //     ProjectThunder :: Thunder.Dbf           make it faster, never change the answer.
 
 using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -31,6 +32,18 @@ internal interface IDbfQueryProvider
     string Plan(Expression expression);
 }
 
+internal static class DbfQueryProvider
+{
+    public const string WhyNot =
+        "LINQ queries over a table run through LINQ's queryable operators, which find their in-memory versions by reflection and may build code at run time, so trimming or Native AOT can break them. " +
+        "Use ReadAll<T>() with ordinary LINQ, Read(index), or an index tag's Seek/SeekExact instead.";
+
+    // Outside DbfQueryProvider<T>, whose requirements cover its own static members but not the
+    // visitors nested in it, which only compare references.
+    public static bool IsRootOf<T>(ConstantExpression node, IQueryProvider provider) =>
+        node.Value is DbfQueryable<T> root && ReferenceEquals(root.Provider, provider);
+}
+
 internal sealed class DbfQueryable<TElement>(IQueryProvider provider, Expression? expression = null) : IOrderedQueryable<TElement>
 {
     public Type ElementType => typeof(TElement);
@@ -50,7 +63,9 @@ internal sealed class DbfQueryable<TElement>(IQueryProvider provider, Expression
 /// Runs LINQ over one table. The root of every query is a placeholder; at run time it's replaced by
 /// the candidate records (from a seek or a scan) as LINQ to Objects, and the query runs unchanged on top.
 /// </summary>
-internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbfQueryProvider where T : class, new()
+[RequiresUnreferencedCode(DbfQueryProvider.WhyNot)]
+[RequiresDynamicCode(DbfQueryProvider.WhyNot)]
+internal sealed class DbfQueryProvider<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(DbfTable table) : IQueryProvider, IDbfQueryProvider where T : class, new()
 {
     private readonly DbfMapper<T> _mapper = DbfMapper<T>.For(table);
 
@@ -290,15 +305,12 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
         _ => value.ToString() ?? "",
     };
 
-    private static bool IsRootOf(ConstantExpression node, IQueryProvider provider) =>
-        node.Value is DbfQueryable<T> root && ReferenceEquals(root.Provider, provider);
-
     // Swaps this table's root for the candidates. Another table's root stays as it is and runs
     // through its own provider when LINQ to Objects enumerates it.
     private sealed class ReplaceRoot(IQueryProvider provider, IQueryable<T> source) : ExpressionVisitor
     {
         protected override Expression VisitConstant(ConstantExpression node) =>
-            IsRootOf(node, provider) ? Expression.Constant(source, typeof(IQueryable<T>)) : node;
+            DbfQueryProvider.IsRootOf<T>(node, provider) ? Expression.Constant(source, typeof(IQueryable<T>)) : node;
     }
 
     private sealed class RootCounter(IQueryProvider provider) : ExpressionVisitor
@@ -314,7 +326,7 @@ internal sealed class DbfQueryProvider<T>(DbfTable table) : IQueryProvider, IDbf
 
         protected override Expression VisitConstant(ConstantExpression node)
         {
-            if (IsRootOf(node, provider))
+            if (DbfQueryProvider.IsRootOf<T>(node, provider))
                 _count++;
             return node;
         }

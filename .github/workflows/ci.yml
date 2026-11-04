@@ -1,9 +1,9 @@
 #        .-----.
 #       /     /      ProjectThunder :: Thunder.Dbf
 #      /     /__     Every push and pull request: build and test on all three
-#     /__      /     operating systems, pack the NuGet packages and check them,
-#       /    /       then the editorial and security gates.
-#      /   /
+#     /__      /     operating systems, publish the Native AOT sample, pack the
+#       /    /       NuGet packages and check them, then the editorial and
+#      /   /         security gates.
 #     /  /
 #    //
 #   '
@@ -44,6 +44,25 @@ jobs:
         with:
           name: test-results-${{ matrix.os }}
           path: test-results
+
+  native-aot:
+    # What an iOS app does to the library: trim it and compile it ahead of time. The sample fails to
+    # publish on any trim or AOT warning, then checks that a table it writes reads back the same.
+    name: Native AOT (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet publish samples/NativeAot -c Release -o artifacts/native-aot
+      - run: artifacts/native-aot/NativeAot
 
   pack:
     name: Pack
