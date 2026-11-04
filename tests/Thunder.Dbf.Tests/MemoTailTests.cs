@@ -12,6 +12,10 @@ public sealed class MemoTailTests : IDisposable
 
     public void Dispose() => _dir.Delete(recursive: true);
 
+    // The memo file beside the table, whatever case its extension was written in (Linux tells them apart).
+    private static string MemoFile(string table, string extension) =>
+        Directory.GetFiles(Path.GetDirectoryName(table)!).Single(f => Path.GetExtension(f).Equals(extension, StringComparison.OrdinalIgnoreCase));
+
     [Theory]
     [InlineData(DbfTableFormat.VisualFoxPro, ".FPT", 64, true)]
     [InlineData(DbfTableFormat.DbaseIV, ".DBT", 512, false)]
@@ -25,7 +29,7 @@ public sealed class MemoTailTests : IDisposable
         }
 
         // The header's next free block moves two blocks on, and the blocks never reach the disk.
-        var memoPath = Path.ChangeExtension(path, extension);
+        var memoPath = MemoFile(path, extension);
         var bytes = File.ReadAllBytes(memoPath);
         var next = bigEndian ? BinaryPrimitives.ReadUInt32BigEndian(bytes) : BinaryPrimitives.ReadUInt32LittleEndian(bytes);
         Assert.Equal(bytes.Length, (long)next * blockSize);
@@ -60,7 +64,7 @@ public sealed class MemoTailTests : IDisposable
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");
         using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]))
             table.Append("one");
-        var memoPath = Path.ChangeExtension(path, ".FPT");
+        var memoPath = MemoFile(path, ".FPT");
         var bytes = File.ReadAllBytes(memoPath);
         BinaryPrimitives.WriteUInt32BigEndian(bytes, BinaryPrimitives.ReadUInt32BigEndian(bytes) + 1);
         File.WriteAllBytes(memoPath, bytes);
