@@ -1,6 +1,7 @@
 //      36 29 95 00 ..   Jet           ProjectThunder :: Thunder.Dbf tests
-//      36 09 95 00 ..   dBASE         The same 95, three ways. A number key carries a digit count,
-//      36 09 95 00 ..   Thunder.Dbf   and Jet steps from match to match by bytes: write its form.
+//      36 09 95 00 ..   dBASE         The same 95, two ways. A number key carries a digit count, and
+//          [ 95 ]                     Jet goes down by interior keys and steps by bytes: write its
+//       /        \                    form, and keep every interior key on its child's last key.
 
 using System.Buffers.Binary;
 
@@ -13,103 +14,203 @@ public sealed class MdxDigitCountTests : IDisposable
 
     public void Dispose() => _dir.Delete(recursive: true);
 
+    // ---- the two rules ----------------------------------------------------------------------
+
     [Fact]
-    public void Keys_count_significant_digits_as_dBASE_writes_them()
+    public void Keys_count_digits_as_dBASE_and_Jet_write_them()
     {
-        // Every numeric key SIMATIC Manager's dBASE engine wrote is the key Thunder.Dbf would write.
+        // dBASE: every numeric key SIMATIC Manager's engine wrote is the key Thunder.Dbf writes.
         var checkedKeys = 0;
         foreach (var mdx in Directory.EnumerateFiles(Path.Combine(FixtureRoot, "siemens-step7"), "*.MDX", SearchOption.AllDirectories))
         {
-            foreach (var (_, key, _) in NumericKeys(mdx).Where(k => k.Leaf))
+            foreach (var key in NumericKeys(mdx).Where(k => k.Leaf).Select(k => k.Key))
             {
-                var value = MdxKeys.DecodeNumeric(key.Bytes);
-                Assert.Equal(Convert.ToHexString(key.Bytes), Convert.ToHexString(MdxKeys.EncodeNumeric((decimal)value)));
+                Assert.Equal(Convert.ToHexString(key.Bytes), Convert.ToHexString(MdxKeys.EncodeNumeric((decimal)MdxKeys.DecodeNumeric(key.Bytes), NumericKeyStyle.Dbase)));
                 checkedKeys++;
             }
         }
         Assert.True(checkedKeys > 40, $"only {checkedKeys} numeric keys found");
+        Assert.Equal(4, MdxKeys.DigitCount(MdxKeys.EncodeNumeric(15940m, NumericKeyStyle.Dbase)));
 
-        Assert.Equal(4, MdxKeys.DigitCount(MdxKeys.EncodeNumeric(15940m))); // SIMATIC's SYMLISTS.MDX holds this one
-        Assert.Equal(1, MdxKeys.DigitCount(MdxKeys.EncodeNumeric(100m)));
-        Assert.Equal(1, MdxKeys.DigitCount(MdxKeys.EncodeNumeric(0.05m)));
-        Assert.Equal(MdxKeys.EncodeNumeric(15940m), MdxKeys.EncodeNumeric(15940d));
+        // Jet, as measured on Windows: whole numbers 10, anything else its significant digits, zero 0.
+        foreach (var (value, digits) in new[] { (1m, 10), (95m, 10), (12345m, 10), (-3m, 10), (100m, 10), (0.5m, 1), (1.25m, 3), (-2.5m, 2), (1234567.89m, 9), (0.00001m, 1), (0m, 0) })
+            Assert.Equal(digits, MdxKeys.DigitCount(MdxKeys.EncodeNumeric(value, NumericKeyStyle.Jet)));
+        Assert.Equal(MdxKeys.EncodeNumeric(95m, NumericKeyStyle.Jet), MdxKeys.EncodeNumeric(95d, NumericKeyStyle.Jet));
+        Assert.Equal("362995", Convert.ToHexString(MdxKeys.EncodeNumeric(95m, NumericKeyStyle.Jet))[..6]);
     }
 
     [Fact]
-    public void A_tag_Jet_wrote_keeps_Jets_digit_count()
+    public void A_tag_dBASE_wrote_keeps_dBASEs_counts()
     {
-        var path = JetStyleTable(rows: 400);
+        foreach (var file in new[] { "SYMLISTS.DBF", "SYMLISTS.MDX" })
+            File.Copy(Path.Combine(FixtureRoot, "siemens-step7/YDBs", file), Path.Combine(_dir.FullName, file));
+        var path = Path.Combine(_dir.FullName, "SYMLISTS.DBF");
 
-        // The repro from the Windows PC: delete #95, and give #351 the number 95.
-        using (var table = DbfTable.Open(path, writable: true))
+        using (var table = Writable(path))
+            table.UpdateFields(0, new Dictionary<string, object?> { ["_ID"] = 300m }); // 15940 says dBASE: 300 counts 1
+
+        var key = Assert.Single(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => k.Leaf && MdxKeys.DecodeNumeric(k.Key.Bytes) is 300m).Key;
+        Assert.Equal(1, MdxKeys.DigitCount(key.Bytes));
+    }
+
+    [Fact]
+    public void A_new_tag_counts_as_Jet_does()
+    {
+        var path = Table(DbfFieldDefinition.Numeric("AMT", 12, 2), Enumerable.Range(1, 300).Select(i => i / 4m));
+        Assert.All(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => Assert.Equal(JetCount(k.Key.Bytes), MdxKeys.DigitCount(k.Key.Bytes)));
+    }
+
+    // ---- what Jet finds -------------------------------------------------------------------
+
+    [Fact]
+    public void Jet_finds_the_record_after_a_deleted_holder_of_its_key()
+    {
+        // The repro from the Windows PC, on a table Jet indexed: delete #95, give #351 the number 95.
+        var path = JetTable(rows: 400);
+        using (var table = Writable(path))
         {
             table.Delete(94);
             table.UpdateFields(350, new Dictionary<string, object?> { ["ID"] = 95m });
-            table.Append(401m, "new");
         }
-
-        var keys = NumericKeys(Path.ChangeExtension(path, ".MDX")).Select(k => k.Key).ToList();
-        Assert.All(keys, k => Assert.Equal(JetDigits, MdxKeys.DigitCount(k.Bytes)));
-        var nineFives = keys.Where(k => MdxKeys.DecodeNumeric(k.Bytes) is 95m).Select(k => Convert.ToHexString(k.Bytes)).Distinct();
-        Assert.Single(nineFives); // the deleted 95 and the live one are the same bytes, as Jet compares them
-
-        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
-            table.RebuildIndex();
-        Assert.All(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => Assert.Equal(JetDigits, MdxKeys.DigitCount(k.Key.Bytes)));
+        Assert.True(JetFinds(path, 95m));
+        AssertJetFindsEveryLiveRecord(path);
     }
 
     [Fact]
-    public void Keys_earlier_versions_left_in_a_Jet_tag_dont_hide_its_count()
+    public void Jet_finds_fractions_after_a_deleted_holder()
     {
-        var path = JetStyleTable(rows: 400);
+        // Jet counts 3.25 as 3 digits and 7.5 as 2: padding them to 10, as Jet does whole numbers, hides them.
+        var path = JetTable(rows: 400, field: DbfFieldDefinition.Numeric("ID", 10, 2), value: i => i / 4m);
+        using (var table = Writable(path))
+        {
+            table.Delete(12); // 3.25
+            table.Delete(29); // 7.5
+            table.UpdateFields(300, new Dictionary<string, object?> { ["ID"] = 3.25m });
+            table.UpdateFields(301, new Dictionary<string, object?> { ["ID"] = 7.5m });
+        }
+        Assert.True(JetFinds(path, 3.25m));
+        Assert.True(JetFinds(path, 7.5m));
+        AssertJetFindsEveryLiveRecord(path);
+    }
+
+    [Fact]
+    public void Interior_keys_follow_a_leaf_whose_last_key_moves_out()
+    {
+        // The PC's second repro: the last key of several leaves moves far away, then one comes back.
+        var path = JetTable(rows: 2_000);
+        var lasts = InteriorValues(path).Take(4).ToList();
+        using (var table = Writable(path))
+        {
+            foreach (var value in lasts)
+                table.UpdateFields((int)value - 1, new Dictionary<string, object?> { ["ID"] = value + 900_000m });
+            table.UpdateFields(1_499, new Dictionary<string, object?> { ["ID"] = lasts[0] });
+        }
+        AssertInteriorKeysMatchTheirChildren(path);
+        Assert.True(JetFinds(path, lasts[0]));
+        AssertJetFindsEveryLiveRecord(path);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Jet_finds_every_live_record_after_mixed_writes(bool exclusive)
+    {
+        // As the PC's power-cut writer does: updates, deletes, recalls and appends, many keys repeated.
+        var path = JetTable(rows: 3_000);
+        var random = new Random(7);
+        using (var table = Writable(path, exclusive))
+        {
+            for (var i = 0; i < 2_000; i++)
+            {
+                var record = random.Next(table.RecordCount);
+                switch (random.Next(4))
+                {
+                    case 0: table.Delete(record); break;
+                    case 1: table.Recall(record); break;
+                    case 2: table.Append((decimal)random.Next(1, 3_500), "appended"); break;
+                    default: table.UpdateFields(record, new Dictionary<string, object?> { ["ID"] = (decimal)random.Next(1, 3_500) }); break;
+                }
+            }
+        }
+        AssertInteriorKeysMatchTheirChildren(path);
+        AssertJetFindsEveryLiveRecord(path);
+    }
+
+    [Fact]
+    public void Jet_finds_every_record_in_a_tag_Thunder_Dbf_made_after_deletes_and_appends()
+    {
+        // The PC's case 4: a deleted record holds each of these keys first.
+        var path = Table(DbfFieldDefinition.Numeric("ID", 10, 0), Enumerable.Range(1, 2_000).Select(i => (decimal)i));
+        using (var table = Writable(path))
+        {
+            for (var i = 0; i < 200; i++)
+            {
+                table.Delete(i);
+                table.Append((decimal)(i + 1), "again");
+            }
+        }
+        AssertJetFindsEveryLiveRecord(path);
+    }
+
+    [Fact]
+    public void A_rebuild_puts_keys_earlier_versions_wrote_into_Jets_form()
+    {
+        var path = JetTable(rows: 400);
         // As if 0.4.0 had written some of them: its printed-digit count for 10, 20 ... 400.
         Patch(path, key => MdxKeys.DecodeNumeric(key) is decimal d && d % 10 == 0 ? MdxKeys.PrintedDigits(key) : null);
 
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
             table.RebuildIndex();
 
-        Assert.All(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => Assert.Equal(JetDigits, MdxKeys.DigitCount(k.Key.Bytes)));
+        Assert.All(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => Assert.Equal(JetCount(k.Key.Bytes), MdxKeys.DigitCount(k.Key.Bytes)));
+        AssertJetFindsEveryLiveRecord(path);
     }
 
     [Fact]
-    public void A_tag_earlier_versions_wrote_moves_to_significant_digits()
+    public void Thunder_Dbfs_own_lookups_find_keys_in_any_form()
     {
-        var path = JetStyleTable(rows: 400);
-        Patch(path, key => MdxKeys.PrintedDigits(key)); // every key as 0.4.0 wrote it: nothing here is a fixed width
-
-        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
-            table.RebuildIndex();
-
-        Assert.All(NumericKeys(Path.ChangeExtension(path, ".MDX")), k => Assert.Equal(MdxKeys.SignificantDigits(k.Key.Bytes), MdxKeys.DigitCount(k.Key.Bytes)));
-    }
-
-    [Fact]
-    public void Lookups_find_every_key_whatever_its_count()
-    {
-        var path = JetStyleTable(rows: 400);
+        var path = JetTable(rows: 400);
+        Patch(path, key => MdxKeys.DecodeNumeric(key) is decimal d && d % 3 == 0 ? MdxKeys.SignificantDigits(key) : null);
         using var table = DbfTable.Open(path);
         using var mdx = table.OpenProductionIndex()!;
-        foreach (var id in new[] { 1m, 95m, 100m, 400m })
+        foreach (var id in new[] { 1m, 3m, 95m, 99m, 100m, 400m })
             Assert.Equal(id, Assert.Single(mdx["ID"].SeekExact(id)).Key);
     }
 
-    // ---- a table whose ID tag Jet might have written ----------------------------------------
+    // ---- tables ---------------------------------------------------------------------------
 
-    private const int JetDigits = 10; // what Jet wrote for every key of an N(20,5) on the Windows PC
-
-    private string JetStyleTable(int rows)
+    // A table with a tag on its number field, made by Thunder.Dbf.
+    private string Table(DbfFieldDefinition numberField, IEnumerable<decimal> values)
     {
-        var path = Path.Combine(_dir.FullName, $"P{Guid.NewGuid():N}"[..8] + ".DBF");
-        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 20, 5), DbfFieldDefinition.Character("NAME", 20)]))
+        var path = Path.Combine(_dir.FullName, $"T{Guid.NewGuid():N}"[..8] + ".DBF");
+        using (var table = DbfTable.Create(path, [numberField, DbfFieldDefinition.Character("NAME", 20)]))
         {
-            for (var i = 1; i <= rows; i++)
-                table.Append((decimal)i, $"name{i}");
+            table.FlushWritesToDisk = false;
+            foreach (var value in values)
+                table.Append(value, "row");
         }
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
-            table.CreateIndexTag("ID", "id");
-        Patch(path, _ => JetDigits);
+            table.CreateIndexTag("ID", numberField.Name.ToLowerInvariant());
         return path;
     }
+
+    // Writes aren't forced to disk here: it changes no byte, only the time the tests take.
+    private static DbfTable Writable(string path, bool exclusive = false)
+    {
+        var table = DbfTable.Open(path, writable: true, exclusive: exclusive);
+        table.FlushWritesToDisk = false;
+        return table;
+    }
+
+    // A table whose tag Jet might have written: every key in Jet's form.
+    private string JetTable(int rows, DbfFieldDefinition? field = null, Func<int, decimal>? value = null)
+    {
+        var path = Table(field ?? DbfFieldDefinition.Numeric("ID", 20, 5), Enumerable.Range(1, rows).Select(value ?? (i => i)));
+        Patch(path, key => JetCount(key));
+        return path;
+    }
+
+    private static int JetCount(byte[] key) => MdxKeys.DigitCount(MdxKeys.EncodeNumeric((decimal)MdxKeys.DecodeNumeric(key), NumericKeyStyle.Jet));
 
     // Rewrites the digit count of every numeric key, leaf and interior, as another writer would have.
     private static void Patch(string path, Func<byte[], int?> count)
@@ -124,7 +225,108 @@ public sealed class MdxDigitCountTests : IDisposable
         File.WriteAllBytes(mdx, bytes);
     }
 
+    // ---- Jet, as the Windows PC measured it --------------------------------------------------
+
+    // Down the tree to the first child whose key is at or above the value (the last child past them
+    // all), never on to the next leaf; there, from the first key at or above it, every key whose bytes
+    // equal Jet's own key for the value. True if one of those records is live.
+    private static bool JetFinds(string path, decimal value) => new JetView(path).Finds(value);
+
+    private static void AssertJetFindsEveryLiveRecord(string path)
+    {
+        var jet = new JetView(path);
+        var live = jet.LiveValues();
+        var missed = live.Where(v => !jet.Finds(v)).ToList();
+        Assert.True(missed.Count == 0, $"Jet would miss {missed.Count} of {live.Count}: {string.Join(", ", missed.Take(10))}");
+    }
+
+    // The .mdx and which records are deleted, read once.
+    private sealed class JetView
+    {
+        private readonly byte[] _mdx;
+        private readonly int _header, _itemLength;
+        private readonly bool[] _deleted;
+        private readonly decimal[] _values;
+
+        public JetView(string path)
+        {
+            _mdx = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+            (_header, _itemLength) = Tag(_mdx);
+            using var table = DbfTable.Open(path);
+            var records = table.ReadAll().ToList();
+            _deleted = [.. records.Select(r => r.IsDeleted)];
+            _values = [.. records.Select(r => Convert.ToDecimal(r[0]))];
+        }
+
+        public List<decimal> LiveValues() => [.. _values.Where((_, i) => !_deleted[i]).Distinct()];
+
+        public bool Finds(decimal value)
+        {
+            var probe = MdxKeys.EncodeNumeric(value, NumericKeyStyle.Jet);
+            var page = BinaryPrimitives.ReadInt32LittleEndian(_mdx.AsSpan(_header));
+            while (true)
+            {
+                var node = page * 512;
+                var count = BinaryPrimitives.ReadInt32LittleEndian(_mdx.AsSpan(node));
+                var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(_mdx.AsSpan(node + 8 + count * _itemLength));
+                var at = 0;
+                while (at < count && MdxKeys.CompareNumeric(KeyAt(_mdx, node, at, _itemLength), probe) < 0)
+                    at++;
+                if (lastPointer != 0)
+                {
+                    page = at < count ? BinaryPrimitives.ReadInt32LittleEndian(_mdx.AsSpan(node + 8 + at * _itemLength)) : lastPointer;
+                    continue;
+                }
+                for (var i = at; i < count && KeyAt(_mdx, node, i, _itemLength).SequenceEqual(probe); i++)
+                {
+                    if (!_deleted[BinaryPrimitives.ReadInt32LittleEndian(_mdx.AsSpan(node + 8 + i * _itemLength)) - 1])
+                        return true;
+                }
+                return false;
+            }
+        }
+    }
+
+    private static void AssertInteriorKeysMatchTheirChildren(string path)
+    {
+        var mdx = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var (header, itemLength) = Tag(mdx);
+        var wrong = new List<string>();
+        LastKey(BinaryPrimitives.ReadInt32LittleEndian(mdx.AsSpan(header)));
+        Assert.True(wrong.Count == 0, $"{wrong.Count} interior keys aren't their child's last key: {string.Join("; ", wrong.Take(5))}");
+
+        byte[] LastKey(int page)
+        {
+            var node = page * 512;
+            var count = BinaryPrimitives.ReadInt32LittleEndian(mdx.AsSpan(node));
+            var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(mdx.AsSpan(node + 8 + count * itemLength));
+            if (lastPointer == 0)
+                return KeyAt(mdx, node, count - 1, itemLength).ToArray();
+            for (var i = 0; i < count; i++)
+            {
+                var childLast = LastKey(BinaryPrimitives.ReadInt32LittleEndian(mdx.AsSpan(node + 8 + i * itemLength)));
+                if (!KeyAt(mdx, node, i, itemLength).SequenceEqual(childLast))
+                    wrong.Add($"page {page} key {i} = {MdxKeys.DecodeNumeric(KeyAt(mdx, node, i, itemLength))}, child ends at {MdxKeys.DecodeNumeric(childLast)}");
+            }
+            return LastKey(lastPointer);
+        }
+    }
+
+    // The values of the interior keys, smallest first: each is the last key of a leaf (or subtree).
+    private static IEnumerable<decimal> InteriorValues(string path) =>
+        NumericKeys(Path.ChangeExtension(path, ".MDX")).Where(k => !k.Leaf).Select(k => Convert.ToDecimal(MdxKeys.DecodeNumeric(k.Key.Bytes))).Order();
+
+    // ---- raw pages ------------------------------------------------------------------------
+
     private readonly record struct RawKey(int Offset, byte[] Bytes);
+
+    private static (int Header, int ItemLength) Tag(byte[] mdx)
+    {
+        var header = BinaryPrimitives.ReadInt32LittleEndian(mdx.AsSpan(544)) * 512;
+        return (header, BinaryPrimitives.ReadUInt16LittleEndian(mdx.AsSpan(header + 18)));
+    }
+
+    private static ReadOnlySpan<byte> KeyAt(byte[] mdx, int node, int i, int itemLength) => mdx.AsSpan(node + 8 + i * itemLength + 4, MdxKeys.NumericKeyLength);
 
     // Every numeric key in the file, read straight from the pages: (tag, key, whether it's in a leaf).
     private static IEnumerable<(string Tag, RawKey Key, bool Leaf)> NumericKeys(string mdx)

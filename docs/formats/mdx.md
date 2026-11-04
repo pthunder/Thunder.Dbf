@@ -100,10 +100,14 @@ A process killed between any two leaves a tree that finds every tag still counte
   - Compare by decoded value: Xbase64's byte compare sorts zero wrongly.
   - **The digit count depends on the writer:**
     - dBASE's engine (SIMATIC's files) counts significant digits. 15940 counts 4 and 100 counts 1.
-    - Jet gives every key of a field one count, whatever its value: 10 for an N(20,5), as measured on Windows.
+    - Jet counts 10 for every whole number, whatever the field. Anything else counts its significant digits (10 at most): 3.25 counts 3 and 0.5 counts 1. Zero counts 0. Measured on Windows for N(5,0), N(10,2), N(12,0) and N(20,5).
     - Xbase64, and Thunder.Dbf 0.4.0 and earlier, count the digits printed. 15940 counts 5.
   - **Jet compares the bytes** when it steps from one match to the next. If a key with the same value but a different count follows a deleted one, Jet can't find that live record (`WHERE ID = 95` returns nothing).
-  - **So Thunder.Dbf writes a tag's own count:**
-    - It reads the first and last leaf of the tag.
-    - If their keys share one count that is neither their significant nor their printed digits, that's a fixed width (Jet's). Thunder.Dbf writes every key with it, through updates and rebuilds.
-    - Otherwise it counts significant digits, as dBASE does. Every numeric key in the SIMATIC files re-encodes to the same bytes.
+  - **So Thunder.Dbf follows the tag's writer:**
+    - It reads the whole-number keys in the tag's first and last leaf.
+    - A count of 10 on a number with fewer significant digits means Jet. A whole number with trailing zeros counted by its significant digits (15940 as 4) means dBASE.
+    - A tag that shows neither uses Jet's rule. That covers a new tag, one holding only small whole numbers, and one Thunder.Dbf 0.4.0 wrote. Jet is the reader known to compare bytes.
+    - A rebuild uses the same rule, so it also repairs keys that earlier versions left in a Jet tag.
+- **Interior keys equal their child's last key.** dBASE and Jet keep them that way, and Jet goes down by them without moving on to the next leaf:
+  - When a leaf's last key goes, Thunder.Dbf lowers the keys above it.
+  - A new key equal to an interior key goes into the child that key covers, unless the next child already starts with that key (equal keys stay in record order).
