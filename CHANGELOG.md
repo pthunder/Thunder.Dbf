@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `samples/Maui`: an iPhone CRM built with .NET MAUI. It opens any dBASE or FoxPro table from Files, with its memo and index files, and works out which fields hold the name, phone, follow-up date and so on from their names. Edits keep the `.cdx` or `.mdx` index up to date, and Share sends the files back out in their original format. Tested on the iOS 27 simulator.
+
 ## [0.4.0] - 2026-11-03
 
 Changing a table's structure (preview), dBASE `.mdx` splits that keep their keys through a killed writer and keep their order through a power cut, and a library that trims and compiles ahead of time for iOS and Android. Checked by four release audits before shipping.

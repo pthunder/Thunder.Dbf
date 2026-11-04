@@ -93,6 +93,7 @@ Then work through [Getting started](docs/getting-started.md), or run the [sample
 | [LiveBridge](samples/LiveBridge) | Changes flowing both ways between a live DBF and SQL |
 | [AdoNet](samples/AdoNet) | Plain ADO.NET over DBF files: parameterized SQL, readers, writes |
 | [NativeAot](samples/NativeAot) | The core API trimmed and compiled ahead of time, as in an iOS app |
+| [Maui](samples/Maui) | An iPhone CRM: open a FoxPro or dBASE table from Files, edit it, share it back |
 
 ## What people build with it
 
