@@ -43,6 +43,12 @@ public sealed class ContactPage : ContentPage
             form.Add(input);
         }
         form.Add(_error);
+        if (table.ReadOnly)
+        {
+            form.Add(new Label { Text = $"Read-only: this table's {table.MissingIndex} index wasn't opened with it, and saving would leave the index out of date for FoxPro or dBASE.", Margin = new Thickness(0, 12, 0, 0) });
+            Content = new ScrollView { Content = form };
+            return;
+        }
 
         var save = new Button { Text = "Save", AutomationId = "SaveContact", Margin = new Thickness(0, 12, 0, 0) };
         save.Clicked += OnSave;
@@ -82,13 +88,9 @@ public sealed class ContactPage : ContentPage
             _table.Save(_index, texts);
             await Navigation.PopAsync();
         }
-        catch (FormatException ex)
-        {
-            ShowError($"A value isn't in the right form: {ex.Message}");
-        }
         catch (Exception ex)
         {
-            ShowError(ex.Message);
+            ShowError(MainPage.Safe(ex));
         }
     }
 

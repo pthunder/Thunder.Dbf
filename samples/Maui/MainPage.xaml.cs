@@ -3,6 +3,8 @@
 //     |_______|   The contact list. Open a dBASE or FoxPro table from Files, work on it here,
 //      [=====]    and share it back: it's still the same table, in the same format.
 
+using Thunder.Dbf;
+
 namespace ThunderDbfMaui;
 
 public partial class MainPage : ContentPage
@@ -15,19 +17,32 @@ public partial class MainPage : ContentPage
 
     private static string TablesFolder => Path.Combine(FileSystem.AppDataDirectory, "tables");
 
+    // iOS can move the app's data folder on an update or reinstall, so the current table is kept
+    // relative to it: an absolute path would quietly fall back to the sample.
+    private static string? SavedTable =>
+        Preferences.Get(CurrentTableKey, null) is { } saved && Path.Combine(TablesFolder, saved) is var path && File.Exists(path) ? path : null;
+
+    /// <summary>A message safe to show: Thunder.Dbf's own never hold paths; anything else might.</summary>
+    internal static string Safe(Exception ex) => ex switch
+    {
+        DbfException or InvalidOperationException => ex.Message,
+        FormatException => $"A value isn't in the right form: {ex.Message}",
+        _ => "Something went wrong reading or writing the table files.",
+    };
+
     protected override void OnAppearing()
     {
         base.OnAppearing();
         try
         {
-            _table ??= Preferences.Get(CurrentTableKey, null) is { } saved && File.Exists(saved)
+            _table ??= SavedTable is { } saved
                 ? CrmTable.Open(saved)
                 : CrmTable.CreateSample(Path.Combine(TablesFolder, "sample"));
             Refresh();
         }
         catch (Exception ex)
         {
-            TableInfo.Text = $"Couldn't open the table: {ex.Message}";
+            TableInfo.Text = $"Couldn't open the table: {Safe(ex)}";
         }
     }
 
@@ -37,7 +52,7 @@ public partial class MainPage : ContentPage
             return;
         var rows = _table.List(Search.Text, _dueOnly);
         Contacts.ItemsSource = rows;
-        TableInfo.Text = $"{_table.Name} · {rows.Count:N0} shown{(_dueOnly ? " (follow-ups due)" : "")}";
+        TableInfo.Text = $"{_table.Name} · {rows.Count:N0} shown{(_dueOnly ? " (follow-ups due)" : "")}{(_table.ReadOnly ? " · read-only" : "")}";
         AllButton.Opacity = _dueOnly ? 0.6 : 1;
         DueButton.Opacity = _dueOnly ? 1 : 0.6;
     }
@@ -66,8 +81,14 @@ public partial class MainPage : ContentPage
 
     private async void OnAddClicked(object? sender, EventArgs e)
     {
-        if (_table is not null)
-            await Navigation.PushAsync(new ContactPage(_table, index: null));
+        if (_table is null)
+            return;
+        if (_table.ReadOnly)
+        {
+            await DisplayAlertAsync("Read-only", $"This table's {_table.MissingIndex} index wasn't opened with it. Open it again and pick that file too.", "OK");
+            return;
+        }
+        await Navigation.PushAsync(new ContactPage(_table, index: null));
     }
 
     // The feature: pick a .dbf (with its .fpt/.dbt memo and .cdx/.mdx index) from Files. The app
@@ -84,13 +105,23 @@ public partial class MainPage : ContentPage
                 await DisplayAlertAsync("No table", "Pick the .dbf file too (and its memo and index files, if it has them).", "OK");
                 return;
             }
-            var folder = Path.Combine(TablesFolder, Path.GetFileNameWithoutExtension(dbf) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
-            Directory.CreateDirectory(folder);
-            foreach (var file in picked)
-                File.Copy(file, Path.Combine(folder, Path.GetFileName(file)));
-            var table = CrmTable.Open(Path.Combine(folder, Path.GetFileName(dbf)));
+            var folder = Path.Combine(TablesFolder, Path.GetFileNameWithoutExtension(dbf) + "-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff"));
+            CrmTable table;
+            try
+            {
+                Directory.CreateDirectory(folder);
+                foreach (var file in picked)
+                    File.Copy(file, Path.Combine(folder, Path.GetFileName(file)));
+                table = CrmTable.Open(Path.Combine(folder, Path.GetFileName(dbf)));
+            }
+            catch
+            {
+                if (Directory.Exists(folder))
+                    Directory.Delete(folder, recursive: true); // don't leave half a table behind
+                throw;
+            }
             _table = table;
-            Preferences.Set(CurrentTableKey, table.Path);
+            Preferences.Set(CurrentTableKey, Path.GetRelativePath(TablesFolder, table.Path));
             _dueOnly = false; // a search or filter left over from the last table would hide this one
             Search.Text = "";
             Refresh();
@@ -98,7 +129,7 @@ public partial class MainPage : ContentPage
         }
         catch (Exception ex)
         {
-            await DisplayAlertAsync("Couldn't open it", ex.Message, "OK");
+            await DisplayAlertAsync("Couldn't open it", Safe(ex), "OK");
         }
     }
 

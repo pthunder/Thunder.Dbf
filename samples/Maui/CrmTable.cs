@@ -19,10 +19,11 @@ public sealed record ContactRow(int Index, string Title, string Subtitle, string
 /// </summary>
 public sealed class CrmTable
 {
-    private CrmTable(string path, DbfFieldMap map)
+    private CrmTable(string path, DbfFieldMap map, string? missingIndex)
     {
         Path = path;
         Map = map;
+        MissingIndex = missingIndex;
     }
 
     public string Path { get; }
@@ -31,10 +32,23 @@ public sealed class CrmTable
 
     public string Name => System.IO.Path.GetFileName(Path);
 
+    /// <summary>
+    /// ".cdx" or ".mdx" when the table's header says it has that index but the file didn't come
+    /// with it. Thunder.Dbf refuses to write then (the index would go stale for the legacy app),
+    /// so the table is read-only until it's opened again with its index.
+    /// </summary>
+    public string? MissingIndex { get; }
+
+    public bool ReadOnly => MissingIndex is not null;
+
     public static CrmTable Open(string path)
     {
         using var table = DbfTable.Open(path);
-        return new CrmTable(path, DbfFieldMap.Guess(table.Fields));
+        var companions = Companions(path).Select(f => System.IO.Path.GetExtension(f).ToLowerInvariant()).ToHashSet();
+        var missing = table.Header.HasStructuralCdx && !companions.Contains(".cdx") ? ".cdx"
+            : table.Header.HasProductionMdx && !companions.Contains(".mdx") ? ".mdx"
+            : null;
+        return new CrmTable(path, DbfFieldMap.Guess(table.Fields), missing);
     }
 
     /// <summary>The sample: a dBASE IV table with a memo for notes and an index on the name.</summary>
@@ -115,6 +129,7 @@ public sealed class CrmTable
     /// <summary>Saves edited text into a record (or appends one when index is null); returns its index.</summary>
     public int Save(int? index, IReadOnlyDictionary<string, string> texts)
     {
+        EnsureWritable();
         using var table = DbfTable.Open(Path, writable: true, maintainFoxProIndexes: true);
         var values = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
         foreach (var field in table.Fields.Where(f => !f.IsSystem))
@@ -133,8 +148,15 @@ public sealed class CrmTable
 
     public void Delete(int index)
     {
+        EnsureWritable();
         using var table = DbfTable.Open(Path, writable: true, maintainFoxProIndexes: true);
         table.Delete(index);
+    }
+
+    private void EnsureWritable()
+    {
+        if (MissingIndex is { } ext)
+            throw new InvalidOperationException($"This table's {ext} index wasn't opened with it, so it's read-only. Open it again and pick the {ext} file too.");
     }
 
     /// <summary>What the table is: format, size, and the files that travel with it.</summary>
@@ -146,14 +168,17 @@ public sealed class CrmTable
         return $"{Name}: {format}, {live:N0} contacts, {table.Fields.Count(f => !f.IsSystem)} fields\n"
             + $"Files: {string.Join(", ", Companions().Select(System.IO.Path.GetFileName))}\n"
             + $"Name: {Map.Name ?? "?"}, company: {Map.Company ?? "-"}, phone: {Map.Phone ?? "-"}, email: {Map.Email ?? "-"}, "
-            + $"follow-up: {Map.FollowUp ?? "-"}, notes: {Map.Notes ?? "-"}";
+            + $"follow-up: {Map.FollowUp ?? "-"}, notes: {Map.Notes ?? "-"}"
+            + (MissingIndex is { } ext ? $"\n\nRead-only: its {ext} index wasn't picked with it." : "");
     }
 
     /// <summary>The table and the memo and index files beside it, which share its name.</summary>
-    public List<string> Companions()
+    public List<string> Companions() => Companions(Path);
+
+    private static List<string> Companions(string path)
     {
-        var folder = System.IO.Path.GetDirectoryName(Path)!;
-        var stem = System.IO.Path.GetFileNameWithoutExtension(Path);
+        var folder = System.IO.Path.GetDirectoryName(path)!;
+        var stem = System.IO.Path.GetFileNameWithoutExtension(path);
         string[] extensions = [".dbf", ".dbt", ".fpt", ".mdx", ".cdx"];
         return [.. Directory.GetFiles(folder).Where(f => string.Equals(System.IO.Path.GetFileNameWithoutExtension(f), stem, StringComparison.OrdinalIgnoreCase)
             && extensions.Contains(System.IO.Path.GetExtension(f), StringComparer.OrdinalIgnoreCase))];
@@ -163,27 +188,39 @@ public sealed class CrmTable
 /// <summary>Which of a table's fields play which part in a contact, guessed from their names.</summary>
 public sealed record DbfFieldMap(string? Name, string? First, string? Last, string? Company, string? Phone, string? Email, string? FollowUp, string? Notes)
 {
+    // Exact names win; then a name that starts with one (TEL finds TELNO, never HOTEL). Each field
+    // plays one part, so the company is taken first and the name can't be the same field.
     public static DbfFieldMap Guess(IReadOnlyList<DbfField> fields)
     {
-        string? Find(Func<DbfField, bool> type, params string[] names) =>
-            names.Select(n => fields.FirstOrDefault(f => !f.IsSystem && type(f) && f.Name.Equals(n, StringComparison.OrdinalIgnoreCase)))
-                .Concat(names.Select(n => fields.FirstOrDefault(f => !f.IsSystem && type(f) && f.Name.Contains(n, StringComparison.OrdinalIgnoreCase))))
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? Find(Func<DbfField, bool> type, params string[] names)
+        {
+            var open = fields.Where(f => !f.IsSystem && type(f) && !taken.Contains(f.Name)).ToList();
+            var found = names.Select(n => open.FirstOrDefault(f => f.Name.Equals(n, StringComparison.OrdinalIgnoreCase)))
+                .Concat(names.Select(n => open.FirstOrDefault(f => f.Name.StartsWith(n, StringComparison.OrdinalIgnoreCase))))
                 .FirstOrDefault(f => f is not null)?.Name;
+            if (found is not null)
+                taken.Add(found);
+            return found;
+        }
         static bool Text(DbfField f) => f.Type is 'C' or 'V';
         static bool Date(DbfField f) => f.Type is 'D' or 'T';
         static bool Memo(DbfField f) => f.Type is 'M';
 
-        var first = Find(Text, "FIRST", "FNAME", "FIRSTNAME");
-        var last = Find(Text, "LAST", "LNAME", "LASTNAME", "SURNAME");
-        var name = Find(Text, "NAME", "CONTACT", "FULLNAME", "CUSTNAME", "CUSTOMER");
-        var company = Find(Text, "COMPANY", "COMPNAME", "FIRM", "ORG", "BUSINESS");
-        if (name == company)
+        var company = Find(Text, "COMPANY", "COMPNAME", "COMP_NAME", "FIRM", "ORGANIZATION", "ORG", "BUSINESS");
+        var name = Find(Text, "NAME", "CONTACT", "FULLNAME", "CUSTNAME", "CUST_NAME", "CUSTOMER");
+        var first = Find(Text, "FIRSTNAME", "FIRST", "FNAME");
+        var last = Find(Text, "LASTNAME", "LAST", "LNAME", "SURNAME");
+        if (name is null && first is null && last is null)
+        {
+            // No person: the company is the title (and isn't repeated under it), else the first text field.
+            name = company ?? fields.FirstOrDefault(f => !f.IsSystem && Text(f))?.Name;
             company = null;
-        name ??= first is null && last is null ? company ?? fields.FirstOrDefault(f => !f.IsSystem && Text(f))?.Name : null;
+        }
         return new DbfFieldMap(name, first, last, company,
-            Find(Text, "PHONE", "TEL", "PHONE1", "MOBILE", "CELL"),
-            Find(Text, "EMAIL", "E_MAIL", "MAIL"),
-            Find(Date, "FOLLOWUP", "NEXTCALL", "CALLBACK", "NEXT", "REMIND", "DUE"),
+            Find(Text, "PHONE", "TELEPHONE", "TEL", "MOBILE", "CELL"),
+            Find(Text, "EMAIL", "E_MAIL"),
+            Find(Date, "FOLLOWUP", "FOLLOW_UP", "NEXTCALL", "NEXT_CALL", "CALLBACK", "REMIND", "DUE"),
             Find(Memo, "NOTES", "NOTE", "COMMENTS", "COMMENT", "REMARKS", "MEMO"));
     }
 

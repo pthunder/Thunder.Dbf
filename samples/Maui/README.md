@@ -11,6 +11,8 @@ The rest is a basic CRM:
 - a form with a field for every column the table has (memo fields get a multi-line box)
 - add, edit and delete; delete marks the record deleted, as dBASE does
 
+If the table has an index but you didn't pick the index file, the app opens it read-only. Thunder.Dbf won't write a table whose index it can't update, because the index would then be wrong for FoxPro or dBASE.
+
 When nothing has been opened yet, the app creates a sample dBASE IV table with 60 contacts, a memo field and an index on the name.
 
 ## Run it
@@ -24,7 +26,11 @@ dotnet build -f net10.0-ios -p:RuntimeIdentifier=iossimulator-arm64
 
 Then install the app from `bin/Debug/net10.0-ios/iossimulator-arm64/` on a simulator (`xcrun simctl install booted <app>`), or press Run in your IDE.
 
-The app references `src/Thunder.Dbf` directly, so it always runs the library's code from your checkout. It isn't part of `Thunder.Dbf.slnx`, so the repository's CI doesn't build it.
+The app references `src/Thunder.Dbf` directly, so it always runs the library's code from your checkout. It isn't part of `Thunder.Dbf.slnx`, so the repository's CI doesn't build it. CI does run [`samples/Maui.Tests`](../Maui.Tests), which builds `CrmTable.cs` for plain .NET and tests the field guessing, the parsing of text into values, and the read-only rule:
+
+```bash
+dotnet test samples/Maui.Tests
+```
 
 ## Files
 
@@ -33,4 +39,7 @@ The app references `src/Thunder.Dbf` directly, so it always runs the library's c
 | `CrmTable.cs` | Opens a table and guesses which fields are which. Lists, reads, saves and deletes contacts. |
 | `MainPage.xaml(.cs)` | The contact list: search, filter, Open, Share and add |
 | `ContactPage.cs` | The contact form, built from the table's own fields |
+| `../Maui.Tests` | Tests for `CrmTable.cs`, run in CI |
 | `TablePicker.cs` | Picks several files from Files. On iOS it uses the system picker directly, because MAUI's multi-file picker returns nothing for file types iOS doesn't know. |
+
+The app icon, splash screen, styles and Open Sans fonts come from the .NET MAUI app template. Open Sans is under the SIL Open Font License.
