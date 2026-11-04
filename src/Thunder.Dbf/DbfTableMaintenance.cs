@@ -8,6 +8,8 @@
 //     ProjectThunder :: Thunder.Dbf          +-----+-----+-----+
 //     The two maintenance commands dBASE users reach for: INDEX ON and PACK.
 
+using System.Diagnostics.CodeAnalysis;
+
 namespace Thunder.Dbf;
 
 public sealed partial class DbfTable
@@ -272,6 +274,7 @@ public sealed partial class DbfTable
     }
 
     /// <summary>
+    /// Preview (THDBF001): back up tables you can't afford to lose before using it.
     /// Removes a tag from the production .mdx, or from the structural .cdx of a FoxPro or Visual FoxPro
     /// table, like dBASE's and Visual FoxPro's <c>DELETE TAG name</c>. The index file stays, with its
     /// other tags, even when it was the last one.
@@ -282,11 +285,13 @@ public sealed partial class DbfTable
     /// <c>maintainFoxProIndexes</c>, so the .cdx is one this table keeps.
     /// </remarks>
     /// <exception cref="DbfException">The index has no such tag (<see cref="DbfErrorCode.InvalidValue"/>), or the table can't be written.</exception>
+    [Experimental(PreviewDiagnostic, UrlFormat = PreviewDocs)]
     public void DropIndexTag(string name)
     {
-        using var forced = ForceEveryWrite();
         try
         {
+            // Inside: writing out a deferred batch first can fail on a file too.
+            using var forced = ForceEveryWrite();
             DropIndexTagCore(name);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException && _path is not null)

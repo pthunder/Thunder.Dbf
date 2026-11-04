@@ -13,6 +13,7 @@
 //   plus blocks for memos the change made, so the old .dbf reads it as well as the new one does; the
 //   decision is a file forced to disk, and from it on the change is only ever finished.
 
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Text;
 
@@ -20,6 +21,10 @@ namespace Thunder.Dbf;
 
 public sealed partial class DbfTable
 {
+    // Changing a table's structure is a preview: callers opt in by suppressing this diagnostic.
+    internal const string PreviewDiagnostic = "THDBF001";
+    internal const string PreviewDocs = "https://github.com/pthunder/Thunder.Dbf/blob/main/docs/reading-and-writing.md#changing-a-tables-structure";
+
     private const string RestructurePartialSuffix = ".restructure-partial";
     internal const string RestructureReadySuffix = ".restructuring";
     private const string RestructureLockName = "restructure.lock";
@@ -53,6 +58,7 @@ public sealed partial class DbfTable
     public int StructureValuesChanged { get; private set; }
 
     /// <summary>
+    /// Preview (THDBF001): back up tables you can't afford to lose before using it.
     /// Changes the table's fields, like dBASE's and FoxPro's <c>MODIFY STRUCTURE</c>: adds, drops, renames,
     /// widens, narrows or retypes them. A new table is written beside this one with every record (deleted
     /// ones too, still deleted) and its values carried across by field name, and the production .mdx or
@@ -79,6 +85,7 @@ public sealed partial class DbfTable
     /// decided, or, before that, puts the table back byte for byte. Each file moves in two renames around
     /// a decision forced to disk; see docs/reading-and-writing.md for the steps.
     /// </remarks>
+    [Experimental(PreviewDiagnostic, UrlFormat = PreviewDocs)]
     public DbfTable ModifyStructure(IReadOnlyList<DbfFieldDefinition> fields, IReadOnlyDictionary<string, string>? renames = null, bool allowLoss = false)
     {
         using var forced = ForceEveryWrite();
@@ -94,16 +101,18 @@ public sealed partial class DbfTable
         }
     }
 
-    /// <summary>Adds a field after the others: <see cref="ModifyStructure"/> with one more field. Existing records get it blank.</summary>
+    /// <summary>Preview (THDBF001). Adds a field after the others: <see cref="ModifyStructure"/> with one more field. Existing records get it blank.</summary>
     /// <returns>The table with its new structure. This table is closed: use the one returned.</returns>
+    [Experimental(PreviewDiagnostic, UrlFormat = PreviewDocs)]
     public DbfTable AddField(DbfFieldDefinition field) => ModifyStructure([.. FieldDefinitions, field]);
 
     /// <summary>
-    /// Drops a field and its values: <see cref="ModifyStructure"/> without it. A dropped memo field's memos
+    /// Preview (THDBF001). Drops a field and its values: <see cref="ModifyStructure"/> without it. A dropped memo field's memos
     /// stay in the memo file, which is copied whole, as unused space, and in the backup. To be rid of
     /// sensitive text for good, copy the records you keep into a new table and delete the old files.
     /// </summary>
     /// <returns>The table with its new structure. This table is closed: use the one returned.</returns>
+    [Experimental(PreviewDiagnostic, UrlFormat = PreviewDocs)]
     public DbfTable DropField(string name)
     {
         var definitions = FieldDefinitions;
@@ -113,10 +122,11 @@ public sealed partial class DbfTable
     }
 
     /// <summary>
-    /// Replaces one field's definition, keeping its place and its values (converted where the types allow):
+    /// Preview (THDBF001). Replaces one field's definition, keeping its place and its values (converted where the types allow):
     /// widen it, change its type, or rename it by giving <paramref name="field"/> another name.
     /// </summary>
     /// <returns>The table with its new structure. This table is closed: use the one returned.</returns>
+    [Experimental(PreviewDiagnostic, UrlFormat = PreviewDocs)]
     public DbfTable AlterField(string name, DbfFieldDefinition field, bool allowLoss = false)
     {
         var definitions = FieldDefinitions.ToList();
@@ -224,6 +234,7 @@ public sealed partial class DbfTable
         }
         var manifest = new RestructureManifest(Path.GetFileName(backup), tableName,
             Staged([".dbt", ".fpt"], memoOriginal), memoOriginal, Staged([".mdx", ".cdx"], indexOriginal), indexOriginal);
+        KeepFileModes(partial, manifest);
         WriteRecord(Path.Combine(backup, RestructureManifestName), manifest.Write());
         WriteRecord(Path.Combine(partial, RestructureIdName), manifest.Id);
         return manifest;
@@ -530,6 +541,10 @@ public sealed partial class DbfTable
         if (wasNull)
             return (null, to.IsNullable);
         var (converted, exact) = Converted(value, to);
+        // A blank can't be stored in Visual FoxPro's binary integer, double and currency fields: they
+        // have no blank, only zero, and a nullable one's .NULL. isn't a blank either.
+        if (converted is null && to.Type is 'I' or 'B' or 'Y')
+            return (null, false);
         if (converted is null || DbfValueCodec.IsMemoField(to))
             return (converted, exact);
 
@@ -728,10 +743,42 @@ public sealed partial class DbfTable
     // The files a change moves, as plain names in the table's folder. Memo and index are null when the
     // new table has none; their originals are null when the old table had none. Nothing is ever
     // picked by looking for whatever exists.
+    // On Linux and macOS a new file gets the process's default mode (0644 under umask 022), so a table
+    // shared through its group (0660, say) would lose that: each new file takes its old file's mode,
+    // or the .dbf's where it had none. Done before the folder is renamed ready, so a mode that can't be
+    // kept stops the change before anything moves. Windows files inherit their folder's permissions,
+    // as the old ones did.
+    private void KeepFileModes(string partial, RestructureManifest manifest)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        var folder = Path.GetDirectoryName(Path.GetFullPath(_path!))!;
+        var tableMode = File.GetUnixFileMode(Path.Combine(folder, manifest.Table));
+        void Keep(string? staged, string? original)
+        {
+            if (staged is null)
+                return;
+            var mode = original is not null && FileThere(Path.Combine(folder, original)) ? File.GetUnixFileMode(Path.Combine(folder, original)) : tableMode;
+            File.SetUnixFileMode(Path.Combine(partial, staged), mode);
+        }
+        Keep(manifest.Table, manifest.Table);
+        Keep(manifest.Memo, manifest.MemoOriginal);
+        Keep(manifest.Index, manifest.IndexOriginal);
+        RestructurePoint?.Invoke("modes kept");
+    }
+
     private sealed record RestructureManifest(string Id, string Table, string? Memo, string? MemoOriginal, string? Index, string? IndexOriginal)
     {
-        public string Write() => string.Join('\n',
-            $"id={Id}", $"table={Table}", $"memo={Memo}", $"memo.original={MemoOriginal}", $"index={Index}", $"index.original={IndexOriginal}");
+        // The last line is the SHA-256 of all the others: a manifest cut short anywhere (even right after
+        // a field whose value is empty) has none, or the wrong one.
+        public string Write()
+        {
+            var body = string.Join('\n',
+                $"id={Id}", $"table={Table}", $"memo={Memo}", $"memo.original={MemoOriginal}", $"index={Index}", $"index.original={IndexOriginal}");
+            return $"{body}\nsha256={Hash(body)}";
+        }
+
+        private static string Hash(string body) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(body)));
 
         private static readonly string[] Keys = ["id", "table", "memo", "memo.original", "index", "index.original"];
 
@@ -740,6 +787,10 @@ public sealed partial class DbfTable
         // a path: it comes from a file.
         public static RestructureManifest? Read(string text, string tablePath)
         {
+            var end = text.LastIndexOf("\nsha256=", StringComparison.Ordinal);
+            if (end < 0 || !text[(end + "\nsha256=".Length)..].Trim().Equals(Hash(text[..end]), StringComparison.Ordinal))
+                return null;
+            text = text[..end];
             var lines = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var line in text.Split('\n'))
             {
@@ -800,16 +851,19 @@ public sealed partial class DbfTable
                 PublishDecision(backup);
                 phase = RestructurePhase.Decided;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && !IsRefusal(ex))
             {
-                if (phase == RestructurePhase.Publishing && DecisionState(backup) is not false)
+                // Looked at once: what it says decides, and nothing after it looks again.
+                var decided = phase == RestructurePhase.Publishing ? DecisionState(backup) : false;
+                if (decided is null)
                 {
-                    // Published after all (the rename went through) or can't be told: the change may be decided,
-                    // so it's left to finish, never undone.
-                    if (DecisionState(backup) is null)
-                        throw FileFailure(ex, path, "The table's new structure may or may not have been decided: publishing the decision failed partway.",
-                            "Open the table with writable: true, exclusive: true, which finishes the change or puts the table back, as the files on disk say.",
-                            DbfErrorCode.IncompleteTransaction);
+                    throw Phased(ex, path, "The table's new structure may or may not have been decided: publishing the decision failed partway.",
+                        "Open the table with writable: true, exclusive: true, which finishes the change or puts the table back, as the files on disk say.",
+                        DbfErrorCode.IncompleteTransaction);
+                }
+                if (decided is true)
+                {
+                    // Published after all (the rename went through): the change is decided, and only finished.
                     phase = RestructurePhase.Decided;
                 }
                 else
@@ -819,14 +873,14 @@ public sealed partial class DbfTable
                         Undo(path, ready, backup, manifest);
                         Retire(path, ready);
                     }
-                    catch (Exception undo) when (undo is IOException or UnauthorizedAccessException && undo is not DbfException)
+                    catch (Exception undo) when (undo is IOException or UnauthorizedAccessException && !IsRefusal(undo))
                     {
-                        throw FileFailure(undo, path, "The table's structure couldn't be changed, and putting it back as it was didn't finish yet.",
+                        throw Phased(undo, path, "The table's structure couldn't be changed, and putting it back as it was didn't finish yet.",
                             "Open the table with writable: true, exclusive: true, which puts the table back as it was.", DbfErrorCode.IncompleteTransaction);
                     }
                     hold.Dispose();
                     DeleteAbandoned(backup);
-                    throw FileFailure(ex, path, "The table's structure couldn't be changed, so it was left as it was.",
+                    throw Phased(ex, path, "The table's structure couldn't be changed, so it was left as it was.",
                         "Close any other program using the table, open it exclusively again and repeat the change.");
                 }
             }
@@ -836,9 +890,9 @@ public sealed partial class DbfTable
                 RestructurePoint?.Invoke("committed");
                 RollForward(path, ready, backup, manifest);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && !IsRefusal(ex))
             {
-                throw FileFailure(ex, path, "The table's new structure is decided, but not every file could be put in place yet.",
+                throw Phased(ex, path, "The table's new structure is decided, but not every file could be put in place yet.",
                     "Open the table with writable: true, exclusive: true, which finishes the change.", DbfErrorCode.IncompleteTransaction);
             }
             phase = RestructurePhase.Retiring;
@@ -846,9 +900,9 @@ public sealed partial class DbfTable
             {
                 Retire(path, ready);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && !IsRefusal(ex))
             {
-                throw FileFailure(ex, path, "The table has its new structure, but the folder its new files came from couldn't be cleared away, and writes wait until it is.",
+                throw Phased(ex, path, "The table has its new structure, but the folder its new files came from couldn't be cleared away, and writes wait until it is.",
                     "Close any other program using the table's folder, then open the table with writable: true, exclusive: true.", DbfErrorCode.IncompleteTransaction);
             }
 
@@ -1321,6 +1375,20 @@ public sealed partial class DbfTable
         "A change of this table's structure was cut off, and its record of which files go where can't be read.",
         $"Compare the table's files with those in the {RestructureReadySuffix} folder and the newest .restructured- folder beside it, put the right ones in place by hand, then delete the {RestructureReadySuffix} folder.",
         path, diagnostic: ready);
+
+    // What the swap's steps refuse on purpose (a link, two old copies of one file), which say what to
+    // do themselves; any other failure, a DbfException from a look included, is reported by phase.
+    private static bool IsRefusal(Exception ex) =>
+        ex is DbfException { Code: DbfErrorCode.PathEscapesFolder or DbfErrorCode.IncompleteTransaction };
+
+    // A failure reported for the phase the change was in, its own explanation kept as the reason.
+    private static DbfException Phased(Exception ex, string path, string what, string hint, DbfErrorCode? code = null)
+    {
+        if (ex is not DbfException known)
+            return FileFailure(ex, path, what, hint, code);
+        var reason = known.Message.EndsWith(known.Hint, StringComparison.Ordinal) ? known.Message[..^known.Hint.Length].TrimEnd() : known.Message;
+        return new DbfException(code ?? known.Code, $"{what} The reason: {reason}", hint, path, ex);
+    }
 
     // A filesystem failure in a change of structure, explained without the paths it names (they go to
     // the log through FilePath and the inner exception).

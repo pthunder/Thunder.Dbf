@@ -179,8 +179,11 @@ public sealed partial class MdxIndex
                 before.Flush(flushToDisk: true);
             }
             DropTagPoint?.Invoke("image written");
+            // Pending before the rename: one that publishes the image but reports failing (a network
+            // share can) must still stop this index until a reopen.
+            _dropPending = true;
+            DropTagPoint?.Invoke("publishing");
             File.Move(temporary, imagePath);
-            _dropPending = true; // from here until the image is gone, this index reads and writes nothing
             DropTagPoint?.Invoke("before-image");
         }
 
@@ -222,7 +225,7 @@ public sealed partial class MdxIndex
         ReloadTags();
     }
 
-    // Set while a DELETE TAG's before-image is beside the file. A drop that failed partway (an image
+    // Set from just before a DELETE TAG's before-image is published until it's gone. A drop that failed partway (an image
     // that couldn't be deleted, a write that failed) leaves it set: the table this index belongs to
     // must be reopened exclusively, which writes the image back, before it's used again. Writing
     // through it meanwhile would keep only the tags the half-done drop left, and the restore would

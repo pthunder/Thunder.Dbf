@@ -5,6 +5,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <!-- Changing a table's structure is a preview (THDBF001); these test it. -->
+    <NoWarn>$(NoWarn);THDBF001</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
