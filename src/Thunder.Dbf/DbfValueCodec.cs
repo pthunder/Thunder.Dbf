@@ -244,7 +244,7 @@ internal static class DbfValueCodec
     }
 
     // True when two numeric strings hold the same value: same sign, significant digits and magnitude.
-    private static bool SameDigits(string a, string b) => Normalize(a) == Normalize(b);
+    internal static bool SameDigits(string a, string b) => Normalize(a) == Normalize(b);
 
     private static (bool Negative, string Digits, int Exponent) Normalize(string text)
     {

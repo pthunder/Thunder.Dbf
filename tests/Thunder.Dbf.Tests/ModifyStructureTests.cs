@@ -17,6 +17,20 @@ public sealed class ModifyStructureTests : IDisposable
 
     private sealed class Killed : Exception;
 
+    // A kill in this process: the hook throws at the step, and nothing that catches only file errors runs.
+    internal static void KillingAt(string step, Action action)
+    {
+        DbfTable.RestructurePoint = point => { if (point == step) throw new Killed(); };
+        try
+        {
+            Assert.Throws<Killed>(action);
+        }
+        finally
+        {
+            DbfTable.RestructurePoint = null;
+        }
+    }
+
     public static TheoryData<DbfTableFormat> Formats() =>
         [DbfTableFormat.DbaseIII, DbfTableFormat.DbaseIV, DbfTableFormat.FoxPro2, DbfTableFormat.VisualFoxPro];
 
@@ -216,8 +230,7 @@ public sealed class ModifyStructureTests : IDisposable
         var files = Directory.GetFiles(_dir.FullName).ToDictionary(f => f, File.ReadAllBytes);
         using (var table = Open(path))
         {
-            table.CrashPoint = point => { if (point == "copying") throw new Killed(); };
-            Assert.Throws<Killed>(() => table.AddField(DbfFieldDefinition.Character("CITY", 20)));
+            KillingAt("copying", () => table.AddField(DbfFieldDefinition.Character("CITY", 20)));
         }
         foreach (var (file, bytes) in files)
             Assert.Equal(bytes, File.ReadAllBytes(file));
@@ -244,19 +257,24 @@ public sealed class ModifyStructureTests : IDisposable
     [Theory]
     [InlineData(DbfTableFormat.DbaseIII, "staged")]
     [InlineData(DbfTableFormat.DbaseIV, "staged")]
-    [InlineData(DbfTableFormat.DbaseIV, "memo swapped")]
-    [InlineData(DbfTableFormat.FoxPro2, "memo swapped")]
+    [InlineData(DbfTableFormat.DbaseIV, "memo moved in")]
+    [InlineData(DbfTableFormat.FoxPro2, "memo moved aside")]
     [InlineData(DbfTableFormat.VisualFoxPro, "staged")]
-    [InlineData(DbfTableFormat.VisualFoxPro, "memo swapped")]
+    [InlineData(DbfTableFormat.VisualFoxPro, "closed")]
     public void Killed_before_the_table_is_swapped_the_next_exclusive_open_puts_the_old_table_back(DbfTableFormat format, string step)
     {
         var path = Table(format);
         KilledAt(path, step);
 
-        // Until an exclusive open settles it, shared writes refuse.
-        using (var shared = Open(path, exclusive: false))
-            Assert.Equal(DbfErrorCode.IncompleteTransaction,
-                Assert.Throws<DbfException>(() => shared.Append("Kay", 50m, "", new DateOnly(1950, 1, 1))).Code);
+        // Until an exclusive open settles it, shared writers are turned away; readers see the old table.
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => Open(path, exclusive: false)).Code);
+        if (step == "memo moved aside") // killed between the memo file's two renames: readers are told why it's missing
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => DbfTable.Open(path)).Code);
+        else
+        {
+            using var reader = DbfTable.Open(path);
+            Assert.Equal(4, reader.RecordCount);
+        }
 
         using (var table = Open(path))
         {
@@ -272,17 +290,22 @@ public sealed class ModifyStructureTests : IDisposable
 
     [Theory]
     [InlineData("staged")]
-    [InlineData("memo swapped")]
-    public void Killed_before_the_table_is_swapped_the_dbf_is_byte_for_byte_the_old_one(string step)
+    [InlineData("memo moved aside")]
+    [InlineData("memo moved in")]
+    public void Killed_before_the_decision_the_table_comes_back_byte_for_byte(string step)
     {
         var path = Table(DbfTableFormat.VisualFoxPro);
-        var dbf = File.ReadAllBytes(path);
+        var before = Directory.GetFiles(_dir.FullName).ToDictionary(Path.GetFileName, File.ReadAllBytes);
         KilledAt(path, step);
-        Assert.Equal(dbf, File.ReadAllBytes(path));
+        Assert.Equal(before[Path.GetFileName(path)], File.ReadAllBytes(path)); // the .dbf never moves before the decision
         using (Open(path))
         {
         }
-        Assert.Equal(dbf, File.ReadAllBytes(path));
+        // The memo file too: the old one comes back from the backup over the copy.
+        Assert.Equal(before.Keys.Order(), Directory.GetFiles(_dir.FullName).Select(Path.GetFileName).Order());
+        foreach (var (file, bytes) in before)
+            Assert.Equal(bytes, File.ReadAllBytes(Path.Combine(_dir.FullName, file!)));
+        Assert.Empty(Directory.EnumerateDirectories(_dir.FullName));
     }
 
     [Theory]
@@ -290,7 +313,7 @@ public sealed class ModifyStructureTests : IDisposable
     public void Killed_after_the_table_is_swapped_the_next_exclusive_open_finishes_the_change(DbfTableFormat format)
     {
         var path = Table(format);
-        KilledAt(path, "table swapped");
+        KilledAt(path, "table moved in");
 
         using (var table = Open(path))
         {
@@ -312,11 +335,10 @@ public sealed class ModifyStructureTests : IDisposable
     private static void KilledAt(string path, string step)
     {
         using var table = Open(path);
-        table.CrashPoint = point => { if (point == step) throw new Killed(); };
         var fields = table.FieldDefinitions.ToList();
         fields[0] = DbfFieldDefinition.Character("NAME", 20); // the tag's keys widen too
         fields.Add(DbfFieldDefinition.Character("CITY", 20));
-        Assert.Throws<Killed>(() => table.ModifyStructure(fields));
+        KillingAt(step, () => table.ModifyStructure(fields));
     }
 
     // ---- Visual FoxPro --------------------------------------------------------------------
@@ -400,8 +422,7 @@ public sealed class ModifyStructureTests : IDisposable
             created.Append("Ada");
         using (var table = Open(path))
         {
-            table.CrashPoint = point => { if (point == "memo swapped") throw new Killed(); };
-            Assert.Throws<Killed>(() => table.AddField(DbfFieldDefinition.Memo("NOTE")));
+            KillingAt("closed", () => table.AddField(DbfFieldDefinition.Memo("NOTE")));
         }
         using (Open(path))
         {
@@ -418,8 +439,7 @@ public sealed class ModifyStructureTests : IDisposable
             created.Append("Ada");
         using (var table = Open(path))
         {
-            table.CrashPoint = point => { if (point == "table swapped") throw new Killed(); };
-            Assert.Throws<Killed>(() => table.AddField(DbfFieldDefinition.Memo("NOTE")));
+            KillingAt("table moved in", () => table.AddField(DbfFieldDefinition.Memo("NOTE")));
         }
         using var reopened = Open(path);
         reopened.Update(0, "Ada", "Countess of Lovelace");
@@ -491,6 +511,319 @@ public sealed class ModifyStructureTests : IDisposable
             index["UNAME"].Entries().Select(e => e.RecordNumber));
     }
 
+    // ---- numbers that don't survive the trip ----------------------------------------------
+
+    private DbfTable VfpTable(string name, params DbfFieldDefinition[] fields)
+    {
+        var path = Path.Combine(_dir.FullName, name + ".DBF");
+        DbfTable.Create(path, DbfTableFormat.VisualFoxPro, fields).Dispose();
+        return Open(path);
+    }
+
+    [Fact]
+    public void A_double_too_small_for_an_integer_is_a_loss_not_zero()
+    {
+        using (var table = VfpTable("TINY", DbfFieldDefinition.Double("X")))
+        {
+            table.Append(1e-100);
+            Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.AlterField("X", DbfFieldDefinition.Integer("X"))).Code);
+            using var lossy = table.AlterField("X", DbfFieldDefinition.Integer("X"), allowLoss: true);
+            Assert.Equal(0, lossy.Read(0)["X"]);
+            Assert.Equal(1, lossy.StructureValuesChanged);
+        }
+    }
+
+    [Fact]
+    public void Text_holding_1E_100_keeps_its_value_in_a_numeric_field()
+    {
+        using var table = VfpTable("TEXT", DbfFieldDefinition.Character("X", 10));
+        table.Append("1e-100");
+        using var number = table.AlterField("X", DbfFieldDefinition.Numeric("X", 10, 2));
+        Assert.Equal(1e-100, Convert.ToDouble(number.Read(0)["X"]));
+        Assert.Equal(0, number.StructureValuesChanged);
+    }
+
+    [Theory]
+    [InlineData(0.12345678901234567, 20, 18)] // 17 significant digits: decimal keeps only 15
+    [InlineData(1234567.8901234567, 20, 10)]
+    [InlineData(0.1 + 0.2, 20, 18)]
+    public void A_double_with_more_digits_than_the_field_writes_is_a_loss(double value, int length, int decimals)
+    {
+        using var table = VfpTable("DIGITS", DbfFieldDefinition.Double("X"));
+        table.Append(value);
+        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.AlterField("X", DbfFieldDefinition.Numeric("X", length, decimals))).Code);
+    }
+
+    [Fact]
+    public void A_double_the_field_holds_exactly_is_carried()
+    {
+        using var table = VfpTable("EXACT", DbfFieldDefinition.Double("X"));
+        table.Append(0.1);
+        table.Append(-2.5);
+        using var number = table.AlterField("X", DbfFieldDefinition.Numeric("X", 10, 4));
+        Assert.Equal([0.1m, -2.5m], number.ReadAll().Select(r => Convert.ToDecimal(r["X"])));
+    }
+
+    [Theory]
+    [InlineData("1.005", 5, 2, true)]   // rounds at the boundary: a loss
+    [InlineData("1.004", 5, 2, true)]
+    [InlineData("1.000", 5, 2, false)]  // trailing zeros only
+    [InlineData("99.99", 4, 1, true)]   // rounds up and no longer fits
+    public void Rounding_to_fewer_decimals_is_a_loss(string text, int length, int decimals, bool lost)
+    {
+        using var table = VfpTable("ROUND", DbfFieldDefinition.Numeric("X", 8, 3));
+        table.Append(decimal.Parse(text, System.Globalization.CultureInfo.InvariantCulture));
+        var narrower = DbfFieldDefinition.Numeric("X", length, decimals);
+        if (lost)
+        {
+            Assert.Throws<DbfException>(() => table.AlterField("X", narrower));
+            using var lossy = table.AlterField("X", narrower, allowLoss: true);
+            Assert.Equal(1, lossy.StructureValuesChanged);
+        }
+        else
+        {
+            using var exact = table.AlterField("X", narrower);
+            Assert.Equal(0, exact.StructureValuesChanged);
+        }
+    }
+
+    [Fact]
+    public void A_17_digit_number_is_a_loss_in_a_double_and_a_16_digit_one_isnt()
+    {
+        using var table = VfpTable("BIG", DbfFieldDefinition.Numeric("X", 20));
+        table.Append(1234567890123456m);
+        using (var exact = table.AlterField("X", DbfFieldDefinition.Double("X")))
+            Assert.Equal(1234567890123456d, exact.Read(0)["X"]);
+        using var again = VfpTable("BIG2", DbfFieldDefinition.Numeric("X", 20));
+        again.Append(12345678901234567m);
+        Assert.Throws<DbfException>(() => again.AlterField("X", DbfFieldDefinition.Double("X")));
+    }
+
+    // ---- Visual FoxPro nulls --------------------------------------------------------------
+
+    [Fact]
+    public void Resizing_a_nullable_number_keeps_blank_blank_and_null_null()
+    {
+        var path = Path.Combine(_dir.FullName, "NULLS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Numeric("X", 5, 2) with { Nullable = true }]))
+        {
+            created.Append(1.5m);
+            created.Append((object?)null);
+            created.Append((object?)null);
+        }
+        // Record 3: blank but not .NULL. (its null bit cleared, its digits left as spaces).
+        var bytes = File.ReadAllBytes(path);
+        var header = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(8));
+        var recordLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(10));
+        bytes[header + recordLength * 2 + recordLength - 1] = 0;
+        File.WriteAllBytes(path, bytes);
+
+        using var old = Open(path);
+        Assert.False(old.Read(2).IsNull(0));
+        using var table = old.AlterField("X", DbfFieldDefinition.Numeric("X", 8, 2) with { Nullable = true });
+        Assert.Equal(1.5m, table.Read(0)["X"]);
+        Assert.True(table.Read(1).IsNull(0));
+        Assert.False(table.Read(2).IsNull(0)); // still blank, not made .NULL.
+        Assert.Null(table.Read(2)["X"]);
+        Assert.Equal(0, table.StructureValuesChanged);
+    }
+
+    [Fact]
+    public void Null_bits_follow_their_fields_when_fields_move_across_bytes()
+    {
+        var fields = Enumerable.Range(0, 10).Select(i => DbfFieldDefinition.Character($"F{i}", 2) with { Nullable = true }).ToArray();
+        var path = Path.Combine(_dir.FullName, "BITS.DBF");
+        var rows = new[] { new[] { 0, 3, 8, 9 }, new[] { 1, 2, 7 }, Array.Empty<int>() }; // which fields are .NULL.
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, fields))
+        {
+            foreach (var nulls in rows)
+                created.Append(Enumerable.Range(0, 10).Select(i => nulls.Contains(i) ? null : (object)$"v{i}").ToArray());
+        }
+        using var old = Open(path);
+        // F9 to the front, F0 and F1 dropped, a new nullable field last: bits shift across the byte boundary.
+        var changed = old.FieldDefinitions.Where(f => f.Name is not ("F0" or "F1")).ToList();
+        var f9 = changed.Single(f => f.Name == "F9");
+        changed.Remove(f9);
+        changed.Insert(0, f9);
+        changed.Add(DbfFieldDefinition.Character("NEW", 2) with { Nullable = true });
+        using var table = old.ModifyStructure(changed);
+        for (var r = 0; r < rows.Length; r++)
+        {
+            var record = table.Read(r);
+            foreach (var field in changed.Where(f => f.Name != "NEW"))
+            {
+                var i = int.Parse(field.Name[1..], System.Globalization.CultureInfo.InvariantCulture);
+                var at = table.Fields.ToList().FindIndex(f => f.Name == field.Name);
+                Assert.Equal(rows[r].Contains(i), record.IsNull(at));
+                if (!rows[r].Contains(i))
+                    Assert.Equal($"v{i}", record[at]);
+            }
+            Assert.True(record.IsNull(table.Fields.ToList().FindIndex(f => f.Name == "NEW")));
+        }
+    }
+
+    // ---- autoincrement --------------------------------------------------------------------
+
+    [Fact]
+    public void A_new_autoincrement_field_that_would_run_out_of_numbers_is_refused_with_nothing_changed()
+    {
+        var path = Table(DbfTableFormat.VisualFoxPro, tag: false);
+        var before = File.ReadAllBytes(path);
+        using (var old = Open(path))
+        {
+            var ex = Assert.Throws<DbfException>(() => old.ModifyStructure(
+                [DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, AutoIncrementNext = int.MaxValue - 150, AutoIncrementStep = 100 }, .. old.FieldDefinitions]));
+            Assert.Equal(DbfErrorCode.InvalidValue, ex.Code);
+            Assert.Contains("Record 2", ex.Message);
+        }
+        Assert.Equal(before, File.ReadAllBytes(path));
+        Assert.Empty(Directory.EnumerateDirectories(_dir.FullName));
+    }
+
+    [Fact]
+    public void An_autoincrement_field_with_a_step_keeps_counting_by_it()
+    {
+        var path = Path.Combine(_dir.FullName, "STEP.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+            [DbfFieldDefinition.Integer("ID") with { AutoIncrement = true, AutoIncrementNext = 7, AutoIncrementStep = 3 }, DbfFieldDefinition.Character("NAME", 5)]))
+        {
+            created.Append(null, "a");
+            created.Append(null, "b");
+        }
+        using var old = Open(path);
+        using var table = old.AlterField("NAME", DbfFieldDefinition.Character("NAME", 10));
+        Assert.Equal(13, table.Header.NextAutoIncrement(0));
+        Assert.Equal(3, table.Fields[0].AutoIncrementStep);
+        table.Append(null, "c");
+        Assert.Equal([7, 10, 13], table.ReadAll().Select(r => (int)r["ID"]!));
+    }
+
+    // ---- memo files coming and going ------------------------------------------------------
+
+    [Theory]
+    [InlineData(DbfTableFormat.DbaseIII, 0x03, 0x83)]
+    [InlineData(DbfTableFormat.DbaseIV, 0x03, 0x83)] // no .mdx: dBASE III's memo file, which every dialect opens
+    [InlineData(DbfTableFormat.FoxPro2, 0x03, 0x83)] // without memos or a .cdx nothing in the file says FoxPro 2: it's read as dBASE
+    [InlineData(DbfTableFormat.VisualFoxPro, 0x30, 0x30)]
+    public void Adding_the_first_memo_field_and_dropping_the_last(DbfTableFormat format, byte without, byte with)
+    {
+        var path = Path.Combine(_dir.FullName, "PEOPLE.DBF");
+        using (var created = DbfTable.Create(path, format, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+
+        using (var old = Open(path))
+        using (var memo = old.AddField(DbfFieldDefinition.Memo("NOTE")))
+        {
+            Assert.Equal(with, memo.Header.Version);
+            Assert.True(memo.Header.HasMemo);
+            memo.Update(0, "Ada", "Countess of Lovelace");
+            Assert.Single(Directory.GetFiles(_dir.FullName, "PEOPLE.*").Where(f => Path.GetExtension(f).ToLowerInvariant() is ".dbt" or ".fpt"));
+
+            using var none = memo.DropField("NOTE");
+            Assert.Equal(without, none.Header.Version);
+            Assert.False(none.Header.HasMemo);
+            Assert.Equal("Ada", none.Read(0)["NAME"]);
+            // No memo file is left beside it; the old one, with its text, went to the backup.
+            Assert.DoesNotContain(Directory.GetFiles(_dir.FullName), f => Path.GetExtension(f).ToLowerInvariant() is ".dbt" or ".fpt");
+            Assert.Contains(Directory.GetFiles(none.StructureBackupPath!), f => Path.GetExtension(f).ToLowerInvariant() is ".dbt" or ".fpt");
+        }
+    }
+
+    [Fact]
+    public void A_visual_foxpro_table_gains_autoincrement_s_version_byte()
+    {
+        using var table = VfpTable("AUTO", DbfFieldDefinition.Character("NAME", 5));
+        Assert.Equal(0x30, table.Header.Version);
+        using var numbered = table.ModifyStructure([DbfFieldDefinition.Integer("ID") with { AutoIncrement = true }, .. table.FieldDefinitions]);
+        Assert.Equal(0x31, numbered.Header.Version);
+        using var plain = numbered.DropField("ID");
+        Assert.Equal(0x30, plain.Header.Version);
+    }
+
+    [Fact]
+    public void A_backlink_naming_a_database_is_refused_even_without_the_database_bit()
+    {
+        var path = Table(DbfTableFormat.VisualFoxPro, tag: false);
+        var bytes = File.ReadAllBytes(path);
+        var header = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(8));
+        "people.dbc"u8.CopyTo(bytes.AsSpan(header - 263));
+        Assert.Equal(0, bytes[28] & 0x04);
+        File.WriteAllBytes(path, bytes);
+        using var table = Open(path);
+        Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK"))).Code);
+    }
+
+    [Fact]
+    public void A_varchar_table_is_refused()
+    {
+        var path = Table(DbfTableFormat.VisualFoxPro, tag: false);
+        var bytes = File.ReadAllBytes(path);
+        bytes[0] = 0x32;
+        File.WriteAllBytes(path, bytes);
+        using var table = Open(path);
+        Assert.Equal(DbfErrorCode.UnsupportedFormat, Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK"))).Code);
+    }
+
+    // ---- filesystem failures, explained without paths -------------------------------------
+
+    [Fact]
+    public void A_folder_that_cant_be_written_is_explained_without_its_path()
+    {
+        if (OperatingSystem.IsWindows() || Environment.UserName == "root")
+            return; // the permission bits below are Unix's, and root ignores them
+        var path = Table(DbfTableFormat.DbaseIV);
+        using var table = Open(path);
+        File.SetUnixFileMode(_dir.FullName, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Equal(DbfErrorCode.AccessDenied, ex.Code);
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+            Assert.DoesNotContain(_dir.FullName, ex.Hint);
+            Assert.Equal("Ada", table.Read(0)["NAME"]); // still open, still the old table
+        }
+        finally
+        {
+            File.SetUnixFileMode(_dir.FullName, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public void A_leftover_folder_that_cant_be_cleared_is_explained_without_its_path()
+    {
+        if (OperatingSystem.IsWindows() || Environment.UserName == "root")
+            return;
+        var path = Table(DbfTableFormat.DbaseIV);
+        var stuck = Path.Combine(path + ".restructure-partial", "inner");
+        Directory.CreateDirectory(stuck);
+        File.WriteAllText(Path.Combine(stuck, "x"), "x");
+        File.SetUnixFileMode(stuck, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            using var table = Open(path);
+            var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Equal(DbfErrorCode.AccessDenied, ex.Code);
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+        }
+        finally
+        {
+            File.SetUnixFileMode(stuck, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public void An_index_held_open_is_explained_as_in_use_without_its_path()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using var old = Open(path);
+        using (old.OpenProductionIndex())
+        {
+            var ex = Assert.Throws<DbfException>(() => old.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Equal(DbfErrorCode.FileInUse, ex.Code);
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+        }
+    }
+
     // ---- DELETE TAG -----------------------------------------------------------------------
 
     [Theory]
@@ -537,6 +870,93 @@ public sealed class ModifyStructureTests : IDisposable
         Assert.Contains(index.Tags, t => t.Name == "CODEWHEN");
         reopened.Append(201, "C00001", "Zed", 1m, 1m, new DateOnly(2026, 1, 1), new DateTime(2026, 1, 1), true, 1d, 1m, "A", "", "x");
         Assert.Equal(201, index["CODEWHEN"].Entries().Count());
+    }
+
+    // dBASE finds a tag by walking the name tree from the anchor (byte 17 of the slot before the
+    // table), comparing names; it never scans the table. Every tag listed must be found that way.
+    private static bool NameTreeFinds(byte[] mdx, string name)
+    {
+        var entryLength = mdx[26] == 0 ? 32 : mdx[26];
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(mdx.AsSpan(28));
+        var slot = (int)mdx[544 - entryLength + 17];
+        var seen = new HashSet<int>();
+        while (slot != 0)
+        {
+            if (slot > count || !seen.Add(slot))
+                return false;
+            var entry = 544 + entryLength * (slot - 1);
+            var here = System.Text.Encoding.ASCII.GetString(mdx, entry + 4, 11).TrimEnd('\0', ' ');
+            var order = string.CompareOrdinal(name.ToUpperInvariant(), here.ToUpperInvariant());
+            if (order == 0)
+                return true;
+            slot = order < 0 ? mdx[entry + 16] : mdx[entry + 17];
+        }
+        return false;
+    }
+
+    [Theory]
+    [InlineData("entries")]
+    [InlineData("count")]
+    [InlineData("cleared")]
+    [InlineData(null)]
+    public void After_every_write_of_a_DELETE_TAG_dBASE_s_name_tree_finds_every_tag_left(string? killedAfter)
+    {
+        var path = Table(DbfTableFormat.DbaseIV, tag: false);
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("B", "NAME");
+            table.CreateIndexTag("A", "AGE");
+            table.CreateIndexTag("C", "HIRED");
+            MdxIndex.DropTagPoint = point => { if (point == killedAfter) throw new Killed(); };
+            try
+            {
+                if (killedAfter is null)
+                    table.DropIndexTag("B");
+                else
+                    Assert.Throws<Killed>(() => table.DropIndexTag("B"));
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+        }
+        var mdx = File.ReadAllBytes(MdxIndex.FindFor(path)!);
+        Assert.True(NameTreeFinds(mdx, "A"));
+        Assert.True(NameTreeFinds(mdx, "C"));
+        Assert.False(NameTreeFinds(mdx, "B"));
+        using var reopened = Open(path);
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(["A", "C"], index.Tags.Select(t => t.Name));
+    }
+
+    [Theory]
+    [InlineData("A")]
+    [InlineData("M")]
+    [InlineData("Z")]
+    public void Dropping_any_tag_of_several_leaves_a_name_tree_that_finds_the_rest(string dropped)
+    {
+        var path = Table(DbfTableFormat.DbaseIV, tag: false);
+        var names = new[] { "M", "D", "T", "A", "G", "Z", "P" };
+        using (var table = Open(path))
+        {
+            foreach (var name in names)
+                table.CreateIndexTag(name, "NAME");
+            table.DropIndexTag(dropped);
+        }
+        var mdx = File.ReadAllBytes(MdxIndex.FindFor(path)!);
+        foreach (var name in names)
+            Assert.Equal(name != dropped, NameTreeFinds(mdx, name));
+    }
+
+    [Fact]
+    public void Dropping_the_only_tag_leaves_an_empty_name_tree()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using (var table = Open(path))
+            table.DropIndexTag("NAME");
+        var mdx = File.ReadAllBytes(MdxIndex.FindFor(path)!);
+        Assert.Equal(0, BinaryPrimitives.ReadUInt16LittleEndian(mdx.AsSpan(28)));
+        Assert.Equal(0, mdx[544 - 32 + 17]);
     }
 
     [Fact]

@@ -126,11 +126,18 @@ public sealed partial class MdxIndex
     }
 
     /// <summary>
-    /// Takes a tag out of the tag table, like dBASE's <c>DELETE TAG</c>. The entries after it move down a
-    /// slot in one write (whole 32-byte entries, so a torn write leaves each slot old or new), which
-    /// leaves the last tag listed twice until the smaller count follows; <see cref="LoadTags"/> reads one
-    /// tag per header block, so meanwhile it's still one tag. Then the name tree is rebuilt over the
-    /// rest. The tag's blocks are left unused, never freed: nothing points at them any more.
+    /// Takes a tag out of the tag table, like dBASE's <c>DELETE TAG</c>, in three writes that each leave
+    /// dBASE's name tree whole, so a kill between any two loses nothing a lookup by name needs:
+    /// <list type="number">
+    /// <item>The remaining entries, moved down over the dropped one, each with its links in the name
+    /// tree rebuilt over the remaining tags, and the tree's anchor, all in one write. The tree now
+    /// reaches only them; the count still includes the last slot, which keeps its old entry (the last
+    /// tag again, so a reader walking the table lists it twice until the next write; Thunder.Dbf reads
+    /// one tag per header block).</item>
+    /// <item>The smaller count.</item>
+    /// <item>The slot past it cleared, as dBASE leaves unused slots.</item>
+    /// </list>
+    /// The tag's blocks are left unused, never freed: nothing points at them any more.
     /// </summary>
     internal void DropTag(MdxTag tag)
     {
@@ -138,34 +145,55 @@ public sealed partial class MdxIndex
         var headerArea = ReadHeaderArea(_stream);
         var entryLength = headerArea[26] == 0 ? 32 : headerArea[26];
         var count = Tags.Count;
-        var at = Tags.ToList().FindIndex(t => t.HeaderPage == tag.HeaderPage);
-        if (at < 0)
+        if (!Tags.Any(t => t.HeaderPage == tag.HeaderPage))
             throw new InvalidOperationException($"The index has no tag named {tag.Name}.");
 
-        if (at < count - 1)
-        {
-            _stream.Position = TagTableOffset + (long)entryLength * at;
-            _stream.Write(headerArea.AsSpan(TagTableOffset + entryLength * (at + 1), entryLength * (count - at - 1)));
-            DbfTable.FlushToDisk(_stream);
-        }
+        // The table as listed, one entry per tag, the dropped one taken out.
+        var kept = Enumerable.Range(0, count)
+            .Select(i => headerArea.AsSpan(TagTableOffset + entryLength * i, entryLength).ToArray())
+            .Where(entry => BinaryPrimitives.ReadInt32LittleEndian(entry) != tag.HeaderPage)
+            .ToList();
+        var tree = NameTree(Tags.Where(t => t.HeaderPage != tag.HeaderPage).Select(t => t.Name).ToList());
 
+        // 1. The anchor's slot and the kept entries with their new links, as one write.
+        var anchorAt = TagTableOffset - entryLength;
+        var block = headerArea.AsSpan(anchorAt, entryLength * (1 + kept.Count)).ToArray();
+        block[17] = kept.Count > 0 ? (byte)1 : (byte)0;
+        for (var i = 0; i < kept.Count; i++)
+        {
+            kept[i].CopyTo(block, entryLength * (1 + i));
+            block[entryLength * (1 + i) + 16] = tree.Left[i];
+            block[entryLength * (1 + i) + 17] = tree.Right[i];
+            block[entryLength * (1 + i) + 18] = tree.Parent[i];
+        }
+        _stream.Position = anchorAt;
+        _stream.Write(block);
+        DbfTable.FlushToDisk(_stream);
+        DropTagPoint?.Invoke("entries");
+
+        // 2. The count.
         _stream.Position = 28;
         Span<byte> tagCount = stackalloc byte[2];
         BinaryPrimitives.WriteUInt16LittleEndian(tagCount, (ushort)(count - 1));
         _stream.Write(tagCount);
         DbfTable.FlushToDisk(_stream);
+        DropTagPoint?.Invoke("count");
 
-        // The slot past the new count is cleared, as dBASE leaves unused slots.
+        // 3. The slot past the new count.
         _stream.Position = TagTableOffset + (long)entryLength * (count - 1);
         _stream.Write(new byte[entryLength]);
-        WriteNameTree(Tags.Where(t => t.HeaderPage != tag.HeaderPage).Select(t => t.Name).ToList(), entryLength);
         DbfTable.FlushToDisk(_stream);
+        DropTagPoint?.Invoke("cleared");
         ReloadTags();
     }
 
-    // Rebuilds the left / right / parent slots (1-based, 0 = none) as a binary search tree over the
-    // tag names, inserted in table order: the same tree dBASE IV builds.
-    private void WriteNameTree(IReadOnlyList<string> names, int entryLength)
+    /// <summary>For the tests: called after each of DropTag's writes.</summary>
+    [ThreadStatic]
+    internal static Action<string>? DropTagPoint;
+
+    // The left / right / parent slots (1-based, 0 = none) of a binary search tree over the tag names,
+    // inserted in table order: the same tree dBASE IV builds.
+    private static (byte[] Left, byte[] Right, byte[] Parent) NameTree(IReadOnlyList<string> names)
     {
         var left = new byte[names.Count];
         var right = new byte[names.Count];
@@ -186,7 +214,12 @@ public sealed partial class MdxIndex
                 at = next - 1;
             }
         }
+        return (left, right, parent);
+    }
 
+    private void WriteNameTree(IReadOnlyList<string> names, int entryLength)
+    {
+        var (left, right, parent) = NameTree(names);
         for (var i = 0; i < names.Count; i++)
         {
             _stream.Position = TagTableOffset + (long)entryLength * i + 16;

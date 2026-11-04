@@ -16,6 +16,7 @@
     <Project Path="src/Thunder.Dbf/Thunder.Dbf.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Thunder.Dbf.CrashChild/Thunder.Dbf.CrashChild.csproj" />
     <Project Path="tests/Thunder.Dbf.Server.Tests/Thunder.Dbf.Server.Tests.csproj" />
     <Project Path="tests/Thunder.Dbf.Sql.Tests/Thunder.Dbf.Sql.Tests.csproj" />
     <Project Path="tests/Thunder.Dbf.Tests/Thunder.Dbf.Tests.csproj" />

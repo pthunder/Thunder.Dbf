@@ -85,11 +85,12 @@ Every failure is a `DbfException`. `Message` and `Hint` are safe to show anyone;
 | `ReadOnlyConnection` | 409 | Opened read-only | Open writable |
 | `ReadOnlyLocation` | 409 | The file, share or volume is read-only | Clear the attribute or get write access |
 | `FileInUse` | 409 | Another program holds the file exclusively, or has it open while this one asks for exclusive use | Close it, or open read-only |
-| `ExclusiveUseRequired` | 409 | `PACK`, a rebuild or `INDEX ON` on a table not opened exclusively | Close the legacy app, open with `exclusive: true` |
+| `ExclusiveUseRequired` | 409 | `PACK`, a rebuild, `INDEX ON`, `DELETE TAG` or a change of structure on a table not opened exclusively | Close the legacy app, open with `exclusive: true` |
 | `TableAlreadyExists` | 409 | Creating would overwrite or adopt existing files | Choose another name |
 | `IndexWouldGoStale` | 409 | Writing would leave an index out of date | Put the `.mdx` next to the table, name the index with `MaintainIndex`, or see the reason in `Diagnostic` |
-| `IncompleteTransaction` | 409 | dBASE IV left a transaction unfinished | Let the legacy app roll it back |
+| `IncompleteTransaction` | 409 | dBASE IV left a transaction unfinished, or a `PACK` or change of structure was cut off (or is under way) | Let the legacy app roll it back; for a change of structure, open with `writable: true, exclusive: true` |
 | `RecordLocked`, `TableLocked` | 423 | Another program holds the lock | Retry shortly, or raise `LockTimeout` |
+| `WriteFailed` | 500 | A file couldn't be written, moved or deleted for another reason (a full disk, a failed device or share) | Free space or fix the share, then try again |
 | `NotADbfFile`, `UnsupportedFormat` | 500 | Not a table, or dBASE II/7 | Check the file; save as dBASE III/IV or FoxPro |
 | `MemoFileMissing`, `MemoFileDamaged`, `IndexDamaged` | 500 | A companion file is missing or corrupt | Restore it, or rebuild the index |
 | `LockingUnsupported` | 500 | `RequireLocks` is on where locks can't be taken | Run on Windows or Linux |

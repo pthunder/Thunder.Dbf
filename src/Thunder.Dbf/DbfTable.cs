@@ -132,17 +132,19 @@ public sealed partial class DbfTable : IDisposable
     {
         var access = writable ? FileAccess.ReadWrite : FileAccess.Read;
         var share = FileShare.ReadWrite;
-        // Every program has to open the .dbf to use the table, so holding it unshared is enough.
-        var stream = DbfException.OpenFile(path, FileMode.Open, access, exclusive ? FileShare.None : share);
+        // A change of structure cut off partway is finished or undone before any of the table's files
+        // is opened: its .dbf may be in the backup, between its two renames.
+        var restructureBackup = writable && exclusive ? FinishRestructure(path) : null;
+        var stream = OpenTableFile(path, writable, access, exclusive ? FileShare.None : share);
         FileStream? memoStream = null;
         try
         {
             stream.Position = 0;
             var header = ReadHeader(stream, encoding: null, path);
-            // A change of structure cut off partway is finished or undone before the memo and index are opened.
-            var restructureBackup = writable && exclusive ? FinishRestructure(path, header) : null;
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
                 memoStream = DbfException.OpenFile(memoPath, FileMode.Open, access, share);
+            else if (header.Fields.Any(DbfValueCodec.IsMemoField) && Directory.Exists(path + RestructureReadySuffix))
+                throw RestructureUnderWay(path); // the memo file is between its two renames
 
             var cpg = FindCompanion(path, ".cpg");
             var table = Open(stream, encoding ?? (cpg is null ? null : DbfEncoding.FromCpgFile(cpg)), leaveOpen: false,
@@ -181,6 +183,38 @@ public sealed partial class DbfTable : IDisposable
             memoStream?.Dispose();
             stream.Dispose();
             throw;
+        }
+    }
+
+    // Every program has to open the .dbf to use the table, so holding it unshared is enough. While a
+    // change of structure is under way the files are a mix of old and new, so a writer is turned
+    // away; and the .dbf it opened must be the one at the path once it has looked, since on Linux and
+    // macOS a handle opened just before the swap keeps pointing at the old file, by then the backup.
+    private static FileStream OpenTableFile(string path, bool writable, FileAccess access, FileShare share)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            FileStream stream;
+            try
+            {
+                stream = DbfException.OpenFile(path, FileMode.Open, access, share);
+            }
+            catch (DbfException ex) when (ex.Code == DbfErrorCode.TableNotFound && Directory.Exists(path + RestructureReadySuffix))
+            {
+                throw new DbfException(DbfErrorCode.IncompleteTransaction, "The table's .dbf is being swapped for one with a new structure.",
+                    "Wait a moment and try again; if it persists, open the table with writable: true, exclusive: true, which finishes the change.", path, ex);
+            }
+            RestructurePoint?.Invoke("table file opened");
+            if (writable && Directory.Exists(path + RestructureReadySuffix))
+            {
+                stream.Dispose();
+                throw RestructureUnderWay(path);
+            }
+            // Three tries: a swap finishes between two of them. A file whose times another program
+            // changes meanwhile can look replaced to the check, so the third is taken as it is.
+            if (IsFileAtPath(stream, path) || attempt == 3)
+                return stream;
+            stream.Dispose();
         }
     }
 
