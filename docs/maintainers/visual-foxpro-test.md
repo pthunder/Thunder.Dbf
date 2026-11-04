@@ -43,27 +43,45 @@ $env:THUNDER_VFP = "C:\Program Files (x86)\Microsoft Visual FoxPro 9\vfp9.exe"
 dotnet test tests/Thunder.Dbf.Tests --filter VisualFoxPro --logger "console;verbosity=normal"
 ```
 
-Two tests run, one per table:
+Eight tests run. Each works in its own temporary folder, and VFP's window stays hidden throughout.
+
+**Indexes on tables VFP made** (`VisualFoxProRoundTripTests`, two tests):
 
 | Table | Comes from | What it exercises |
 |---|---|---|
 | `calls.dbf` | written by Visual FoxPro | VFP's own `.cdx`, a candidate key (`CALL_ID`), memos |
 | `TEST10K.DBF` | written by X# (FoxPro 2 format) | 10,000 records, seven tags; the case-blind tags are taken over and rebuilt in byte order first |
 
-Each test, in a temporary folder:
-
 1. Thunder.Dbf appends 400 records, updates 60, deletes 40 and recalls one: enough to split index pages.
-2. VFP runs hidden, walks every tag in order and writes the record order to a file. It must match the order Thunder.Dbf's index holds.
-3. VFP appends 150 records and edits and deletes others, through its own indexes and locks.
+2. VFP walks every tag in order and writes the record order to a file. It must match the order Thunder.Dbf's index holds.
+3. VFP appends 150 records and edits and deletes others, memos included, through its own indexes and locks.
 4. Thunder.Dbf checks that every tag holds exactly what a fresh rebuild would. UNIQUE tags are skipped here, since they only match a rebuild right after one.
 
-Each test takes from a few seconds to a couple of minutes. VFP's window stays hidden.
+**What Thunder.Dbf writes since 0.3.0** (`VisualFoxProWritingTests`, six tests). VFP last checked Thunder.Dbf at 0.2.0; these cover what's been added to FoxPro writing since:
+
+| Test | Table | What it exercises |
+|---|---|---|
+| `..._reads_and_edits_a_table_Thunder_creates` (Visual FoxPro, FoxPro 2) | made by `DbfTable.Create`, 40 records | the header, field descriptors and `.fpt` Thunder.Dbf writes; integer, numeric, float, currency, date, datetime, logical and memo values; nullable fields (Visual FoxPro) |
+| `..._walks_and_keeps_a_cdx_Thunder_creates` (Visual FoxPro, FoxPro 2) | the same, 450 records | a structural `.cdx` made from nothing by `CreateIndexTag`: an `UPPER(name)` tag, a compound key, a descending tag, a `FOR` filter, currency, datetime and nullable keys, and a candidate tag (Visual FoxPro) |
+| `..._sees_the_nulls_of_records_written_without_NullFlags` | `kinds.DBF`, written by VFP 9 | `Append`, `AppendRange` and `Update` given values for the declared fields only, leaving `_NullFlags` to Thunder.Dbf (#37); a tag on the nullable field |
+| `..._opens_and_keeps_a_table_after_ModifyStructure` | `kinds.DBF` with eight tags | the `ModifyStructure` preview: `DropIndexTag`, then a field dropped, one in a tag widened, a nullable field and a memo field added |
+
+Each of these, depending on the test:
+
+- VFP lists every value of every record, deleted ones too, and it must be exactly what Thunder.Dbf reads. A difference names the record and shows both readings.
+- VFP walks every tag, and edits through them, as steps 2 to 4 above.
+- VFP appends and edits, setting `.NULL.` in nullable fields, and Thunder.Dbf must read what VFP wrote. For a new table, Thunder.Dbf then writes again on top and VFP reads it once more.
+- After `ModifyStructure`, every kept value and memo must read as before the change, and the dropped tag must be gone.
+
+The whole run takes about five minutes. `TEST10K.DBF` is the slowest, up to a couple of minutes; the others take seconds each, mostly VFP starting up.
 
 ## 4. What the results mean
 
 | Result | Meaning | Next |
 |---|---|---|
-| Both pass | VFP reads what Thunder.Dbf writes, and the other way round | Report it. `.cdx` writing can come out of preview in the next release |
+| All pass | VFP reads what Thunder.Dbf writes, and the other way round | Report it. `.cdx` writing can come out of preview in the next release |
+| `<step>: VFP reads record N as ... but Thunder.Dbf reads ...` | A value written by one side reads differently on the other | A real bug in writing or reading that kind of value. Report it with the full output |
+| `Record N: VFP reads OPT=..., but null was given` | `_NullFlags` worked out wrongly for values given without it | A real bug. Report it |
 | `Tag X: VFP walks ... but the index holds ...` | VFP reads a tag in a different order than Thunder.Dbf wrote it | A real bug in the writer. Report it with the full output |
 | `Tag X after VFP's edits: the file holds ..., a rebuild gives ...` | VFP's own writes left something Thunder.Dbf reads differently | A reader bug, or VFP behaving differently from Harbour's notes. Report it |
 | `VFP reported: <number> <message>` | VFP hit an error running the script | The message says what. Error 1705 ("File access is denied") usually means a file is still open: close any VFP windows |
@@ -78,7 +96,7 @@ Open an issue at https://github.com/pthunder/Thunder.Dbf/issues titled "Visual F
 - the full `dotnet test` output. A failure names the tag and the first record numbers that differ, which is usually enough to find the bug.
 - Windows version, and VFP's version (`? VERSION()` in VFP's command window)
 
-The test works in a temporary folder that it deletes afterwards, and it only ever uses the repository's test fixtures, so nothing private is involved.
+The tests work in temporary folders that they delete afterwards, and they only ever use the repository's test fixtures and tables they make themselves, so nothing private is involved.
 
 ## Also worth checking by hand
 

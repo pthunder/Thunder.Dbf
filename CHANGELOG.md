@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. They haven't run against VFP yet; the [checklist](docs/maintainers/visual-foxpro-test.md) says how.
+
 ## [0.4.0] - 2026-11-03
 
 Changing a table's structure (preview), dBASE `.mdx` splits that keep their keys through a killed writer and keep their order through a power cut, and a library that trims and compiles ahead of time for iOS and Android. Checked by four release audits before shipping.
