@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Thunder.Dbf.Tests" />
+    <InternalsVisibleTo Include="Thunder.Dbf.CrashChild" />
   </ItemGroup>
 
 </Project>

@@ -83,6 +83,9 @@ public enum DbfErrorCode
 
     /// <summary>The operation (PACK, a rebuild, INDEX ON) needs the table opened exclusively, as dBASE and FoxPro require.</summary>
     ExclusiveUseRequired,
+
+    /// <summary>A file couldn't be written, moved or deleted for a reason the others don't name: the disk is full, or the device or share failed.</summary>
+    WriteFailed,
 }
 
 /// <summary>

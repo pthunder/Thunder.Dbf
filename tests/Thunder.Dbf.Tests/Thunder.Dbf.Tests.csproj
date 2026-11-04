@@ -20,6 +20,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thunder.Dbf\Thunder.Dbf.csproj" />
+    <!-- The process the crash tests kill for real; copied beside the tests. -->
+    <ProjectReference Include="..\Thunder.Dbf.CrashChild\Thunder.Dbf.CrashChild.csproj" />
   </ItemGroup>
 
 </Project>

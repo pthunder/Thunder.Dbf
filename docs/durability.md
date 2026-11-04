@@ -55,6 +55,8 @@ Visual FoxPro and its OLE DB driver, for comparison, never force writes to disk,
 
 Imports (`DbfImport.FromCsv`) build the new table under temporary names and move it into place only when everything succeeded, so a failed import leaves nothing behind. Exports write a temporary file and rename it.
 
+Changing a table's structure (`ModifyStructure`) writes the new table beside the old one and swaps it in as a transaction, every file moving in two renames around a decision file (see [Reading and writing](reading-and-writing.md#what-a-crash-can-leave)). Against a **killed process** that's exact: the next exclusive open finishes the change once the decision is on disk, and puts the old table back byte for byte before. Against a **power cut** it rests on the filesystem: every file's contents are forced to disk before it's renamed, and the decision's contents before the `.dbf` moves, but .NET can't force a folder's entries, so the renames and the decision's name are only as durable as the filesystem makes them. Journaling filesystems (NTFS, APFS, ext4) generally replay them in the order they were made. If a power cut kept the moves but lost the decision, the next exclusive open undoes the change whole: every old file comes back from the backup.
+
 ## What it doesn't guarantee
 
 - **No transactions.** A crash between writing the record and updating the index can leave the index missing that change. dBASE has the same window. Two cases of it are caught:
