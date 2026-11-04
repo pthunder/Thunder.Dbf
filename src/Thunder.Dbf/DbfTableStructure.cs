@@ -160,7 +160,7 @@ public sealed partial class DbfTable
 
             // Left by a change killed while it was being written, or while its folder was being
             // deleted (nothing reads either), and finished changes' bookkeeping.
-            ClearLeftovers(_path);
+            ClearLeftoversHeld(_path); // this table holds itself unshared: it's open exclusively
             if (Directory.Exists(partial))
             {
                 RequireRealFolder(partial);
@@ -1197,9 +1197,29 @@ public sealed partial class DbfTable
     }
 
     // With no change under way: folders left by kills, which nothing reads, and the bookkeeping of
-    // finished changes (once nobody holds their lock).
+    // finished changes (once nobody holds their lock). A change being written holds the table
+    // unshared from before its partial folder exists until after it's renamed ready, so the table
+    // is held unshared here for the whole of it: when that fails, whatever is there belongs to
+    // whoever holds the table, and is left alone; while it's held, no change can start.
     private static void ClearLeftovers(string path)
     {
+        FileStream held;
+        try
+        {
+            held = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return; // missing, or in use: the open that follows says which
+        }
+        using (held)
+            ClearLeftoversHeld(path);
+    }
+
+    // Only ever called holding the table unshared: by ClearLeftovers, and by a change before it stages.
+    private static void ClearLeftoversHeld(string path)
+    {
+        RestructurePoint?.Invoke("clearing leftovers");
         DeleteQuietly(path + RestructurePartialSuffix);
         DeleteQuietly(path + RestructureRetiredSuffix);
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;

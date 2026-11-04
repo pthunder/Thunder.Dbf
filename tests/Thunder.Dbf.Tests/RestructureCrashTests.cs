@@ -83,6 +83,63 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal(step, File.ReadAllText(marker)); // killed there, not after finishing
     }
 
+    // Starts the crash child, waits until it reaches the step, and leaves it waiting there; disposing
+    // the result lets it carry on and waits for it to finish.
+    private sealed class Paused(Process process, string marker) : IDisposable
+    {
+        public void Dispose()
+        {
+            File.WriteAllText(marker + ".go", "");
+            if (!process.WaitForExit(60_000))
+                process.Kill(entireProcessTree: true);
+            Assert.Equal(0, process.ExitCode);
+            Assert.Equal("finished", File.ReadAllText(marker));
+            process.Dispose();
+        }
+    }
+
+    private Paused PausedAt(string mode, string path, string step)
+    {
+        var marker = Path.Combine(_markers.FullName, Guid.NewGuid().ToString("N"));
+        var child = Path.Combine(AppContext.BaseDirectory, "Thunder.Dbf.CrashChild.dll");
+        var dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") is { Length: > 0 } host ? host : "dotnet";
+        var process = Process.Start(new ProcessStartInfo(dotnet, [child, mode, path, step, marker]) { RedirectStandardError = true, RedirectStandardOutput = true })!;
+        var clock = Stopwatch.StartNew();
+        while (!File.Exists(marker) || new FileInfo(marker).Length == 0)
+        {
+            if (process.HasExited)
+                Assert.Fail($"The crash child ended (exit {process.ExitCode}) before reaching '{step}': {process.StandardError.ReadToEnd()}");
+            if (clock.Elapsed > TimeSpan.FromSeconds(60))
+            {
+                process.Kill(entireProcessTree: true);
+                Assert.Fail($"The crash child didn't reach '{step}' within a minute.");
+            }
+            Thread.Sleep(10);
+        }
+        return new Paused(process, marker);
+    }
+
+    // The review's case: another process's exclusive open, while a change is still writing its new
+    // table, must leave the change's partial folder alone, and the change then finishes.
+    [Theory]
+    [InlineData("copying")]
+    [InlineData("manifest")]
+    public void An_exclusive_open_in_another_process_leaves_a_change_being_written_alone(string step)
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using (var change = PausedAt("widen", path, step))
+        {
+            Assert.True(Directory.Exists(path + ".restructure-partial"));
+            Assert.Equal(DbfErrorCode.FileInUse, Assert.Throws<DbfException>(() => Open(path)).Code);
+            Assert.True(Directory.Exists(path + ".restructure-partial"));
+            Assert.Equal(DbfErrorCode.FileInUse, Assert.Throws<DbfException>(() => Open(path)).Code);
+        }
+        using var table = Open(path);
+        Assert.Equal(20, table.Fields[0].Length);
+        Assert.Equal("CITY", table.Fields.Last(f => !f.IsSystem).Name);
+        Assert.Equal("note about Hedy", table.Read(2)["NOTE"]);
+    }
+
     public static TheoryData<DbfTableFormat, string> BeforeTheDecision() =>
         Steps(["copying", "manifest", "staged", "closed", "memo moved aside", "memo moved in", "deciding"]);
 
@@ -872,6 +929,39 @@ public sealed class RestructureCrashTests : IDisposable
     // Twenty tags, so the first write of dropping T00 spans two sectors (bytes 512 to 1151). A power
     // cut can keep the sector from 1024 and lose the one before: T15 would then be gone from the
     // table. The before-image beside the .mdx puts the whole tag table back.
+    [Fact]
+    public void While_a_DELETE_TAG_s_before_image_is_beside_the_mdx_readers_are_told_why_and_a_new_drop_waits()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("A", "NAME");
+            table.CreateIndexTag("B", "NAME");
+            MdxIndex.DropTagPoint = point => { if (point == "entries") throw new IOException("power cut"); };
+            try
+            {
+                Assert.ThrowsAny<IOException>(() => table.DropIndexTag("A"));
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+            // The same open, dropping again with the image still there: told what to do, not a raw IOException.
+            var again = Assert.Throws<DbfException>(() => table.DropIndexTag("B"));
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, again.Code);
+            Assert.DoesNotContain(_dir.FullName, again.Message);
+        }
+        using (var reader = DbfTable.Open(path))
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => reader.OpenProductionIndex()).Code);
+        using (var table = Open(path))
+        {
+            using var index = table.OpenProductionIndex()!;
+            Assert.Equal(["A", "B"], index.Tags.Select(t => t.Name));
+        }
+    }
+
     [Fact]
     public void A_DELETE_TAG_torn_across_sectors_is_put_back_from_its_before_image()
     {

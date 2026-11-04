@@ -55,7 +55,7 @@ dBASE finds a tag by name through the left, right and parent slots of each entry
 4. The slot past it, cleared.
 5. The before-image, deleted.
 
-A process killed between any two leaves a tree that finds every tag still counted. A power cut can tear write 2, which spans several sectors with 16 or more tags, so the before-image is what makes it safe: a writable exclusive open that finds it writes it back over the header (the tag isn't dropped after all) and deletes it, and other Thunder.Dbf writes wait for that. The dropped tag's blocks are left unused.
+A process killed between any two leaves a tree that finds every tag still counted. A power cut can tear write 2, which spans several sectors with 16 or more tags, so the before-image is what makes it safe: a writable exclusive open that finds it writes it back over the header (the tag isn't dropped after all) and deletes it, and until then other Thunder.Dbf writers are turned away, `MdxIndex.Open` (and so `OpenProductionIndex`) refuses to read the torn table, and a further drop in the same open refuses too, each with `IncompleteTransaction`. The dropped tag's blocks are left unused.
 
 ## Tag header (one block at the tag header page)
 

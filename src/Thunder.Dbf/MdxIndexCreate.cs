@@ -159,6 +159,9 @@ public sealed partial class MdxIndex
         // can tear the writes below sector by sector, losing a tag, and the next exclusive open puts
         // this back (see RestoreDropTag).
         var imagePath = _stream is FileStream file ? file.Name + DropTagImageSuffix : null;
+        if (imagePath is not null && File.Exists(imagePath))
+            throw new DbfException(DbfErrorCode.IncompleteTransaction, "An earlier DELETE TAG on this .mdx was cut off, and its copy of the tag table is still beside it.",
+                "Close the table and open it again with writable: true, exclusive: true, which puts the tag table back; then drop the tag again.", imagePath);
         if (imagePath is not null)
         {
             var image = new byte[HeaderAreaSize];
