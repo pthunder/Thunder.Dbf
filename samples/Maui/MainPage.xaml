@@ -1,0 +1,51 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:local="clr-namespace:ThunderDbfMaui"
+             x:Class="ThunderDbfMaui.MainPage"
+             x:DataType="local:MainPage"
+             Title="Contacts">
+
+    <ContentPage.ToolbarItems>
+        <ToolbarItem Text="Open" Clicked="OnOpenClicked" AutomationId="OpenTable" />
+        <ToolbarItem Text="Share" Clicked="OnShareClicked" AutomationId="ShareTable" />
+        <ToolbarItem Text="+" Clicked="OnAddClicked" AutomationId="AddContact" />
+    </ContentPage.ToolbarItems>
+
+    <Grid RowDefinitions="Auto,Auto,Auto,*" Padding="12,8" RowSpacing="8">
+        <Label x:Name="TableInfo" Grid.Row="0" FontSize="12" TextColor="{AppThemeBinding Light=#555, Dark=#bbb}" AutomationId="TableInfo" />
+
+        <SearchBar x:Name="Search" Grid.Row="1" Placeholder="Search name, company, phone, email"
+                   TextChanged="OnSearchChanged" AutomationId="Search" />
+
+        <HorizontalStackLayout Grid.Row="2" Spacing="8">
+            <Button x:Name="AllButton" Text="All" Clicked="OnAllClicked" AutomationId="ShowAll" />
+            <Button x:Name="DueButton" Text="Follow-ups due" Clicked="OnDueClicked" AutomationId="ShowDue" />
+        </HorizontalStackLayout>
+
+        <CollectionView x:Name="Contacts" Grid.Row="3" SelectionMode="Single"
+                        SelectionChanged="OnContactSelected" AutomationId="ContactList">
+            <CollectionView.EmptyView>
+                <Label Text="No contacts match." HorizontalOptions="Center" Margin="0,24" />
+            </CollectionView.EmptyView>
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="local:ContactRow">
+                    <Grid ColumnDefinitions="*,Auto" Padding="4,10">
+                        <VerticalStackLayout>
+                            <Label Text="{Binding Title}" FontSize="16" FontAttributes="Bold" />
+                            <Label Text="{Binding Subtitle}" FontSize="12" TextColor="{AppThemeBinding Light=#555, Dark=#bbb}" />
+                        </VerticalStackLayout>
+                        <Label Grid.Column="1" Text="{Binding FollowUp}" FontSize="12" VerticalOptions="Center">
+                            <Label.Triggers>
+                                <DataTrigger TargetType="Label" Binding="{Binding Due}" Value="True">
+                                    <Setter Property="TextColor" Value="#C0392B" />
+                                    <Setter Property="FontAttributes" Value="Bold" />
+                                </DataTrigger>
+                            </Label.Triggers>
+                        </Label>
+                    </Grid>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+    </Grid>
+</ContentPage>
