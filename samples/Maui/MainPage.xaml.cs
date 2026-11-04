@@ -91,6 +91,8 @@ public partial class MainPage : ContentPage
             var table = CrmTable.Open(Path.Combine(folder, Path.GetFileName(dbf)));
             _table = table;
             Preferences.Set(CurrentTableKey, table.Path);
+            _dueOnly = false; // a search or filter left over from the last table would hide this one
+            Search.Text = "";
             Refresh();
             await DisplayAlertAsync("Opened", table.Describe(), "OK");
         }
