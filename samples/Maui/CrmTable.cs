@@ -8,6 +8,9 @@ using Thunder.Dbf;
 
 namespace ThunderDbfMaui;
 
+/// <summary>A write refused because the table is read-only; its message is safe to show.</summary>
+public sealed class ReadOnlyTableException(string message) : InvalidOperationException(message);
+
 /// <summary>One row of the contact list: its record index and what the list shows.</summary>
 public sealed record ContactRow(int Index, string Title, string Subtitle, string FollowUp, bool Due);
 
@@ -156,7 +159,7 @@ public sealed class CrmTable
     private void EnsureWritable()
     {
         if (MissingIndex is { } ext)
-            throw new InvalidOperationException($"This table's {ext} index wasn't opened with it, so it's read-only. Open it again and pick the {ext} file too.");
+            throw new ReadOnlyTableException($"This table's {ext} index wasn't opened with it, so it's read-only. Open it again and pick the {ext} file too.");
     }
 
     /// <summary>What the table is: format, size, and the files that travel with it.</summary>

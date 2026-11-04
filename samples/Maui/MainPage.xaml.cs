@@ -19,31 +19,43 @@ public partial class MainPage : ContentPage
 
     // iOS can move the app's data folder on an update or reinstall, so the current table is kept
     // relative to it: an absolute path would quietly fall back to the sample.
-    private static string? SavedTable =>
-        Preferences.Get(CurrentTableKey, null) is { } saved && Path.Combine(TablesFolder, saved) is var path && File.Exists(path) ? path : null;
+    private static string? SavedTable => Preferences.Get(CurrentTableKey, null);
 
     /// <summary>A message safe to show: Thunder.Dbf's own never hold paths; anything else might.</summary>
     internal static string Safe(Exception ex) => ex switch
     {
-        DbfException or InvalidOperationException => ex.Message,
+        DbfException or ReadOnlyTableException => ex.Message,
         FormatException => $"A value isn't in the right form: {ex.Message}",
         _ => "Something went wrong reading or writing the table files.",
     };
 
-    protected override void OnAppearing()
+    protected override async void OnAppearing()
     {
         base.OnAppearing();
+        if (_table is not null)
+        {
+            Refresh();
+            return;
+        }
+        var gone = false;
         try
         {
-            _table ??= SavedTable is { } saved
-                ? CrmTable.Open(saved)
-                : CrmTable.CreateSample(Path.Combine(TablesFolder, "sample"));
+            if (SavedTable is { } saved && Path.Combine(TablesFolder, saved) is var path && File.Exists(path))
+                _table = CrmTable.Open(path);
+            else
+            {
+                gone = SavedTable is not null; // opened before, but its files are no longer there
+                Preferences.Remove(CurrentTableKey);
+                _table = CrmTable.CreateSample(Path.Combine(TablesFolder, "sample"));
+            }
             Refresh();
         }
         catch (Exception ex)
         {
             TableInfo.Text = $"Couldn't open the table: {Safe(ex)}";
         }
+        if (gone)
+            await DisplayAlertAsync("Table not found", "The table you last opened isn't on this phone any more, so this is the sample. Open it again from Files.", "OK");
     }
 
     private void Refresh()

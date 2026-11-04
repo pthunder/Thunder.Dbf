@@ -94,6 +94,18 @@ public sealed class CrmTableTests : IDisposable
         var index = crm.Save(null, new Dictionary<string, string> { ["NAME"] = "Hanna Moos", ["FOLLOWUP"] = "2000-01-01" });
         Assert.Contains(crm.List("hanna", dueOnly: true), r => r.Index == index && r.Due);
 
+        crm.Save(index, new Dictionary<string, string> { ["NAME"] = "Hanna Moos-Berg" });
+        using (var table = DbfTable.Open(crm.Path))
+        using (var mdx = table.OpenProductionIndex()!)
+        {
+            // The .mdx dBASE reads must have followed both writes: the new key in, the old one out.
+            var keys = mdx["NAME"].Entries().Select(e => ((string)e.Key!).TrimEnd()).ToList();
+            Assert.Equal(61, keys.Count);
+            Assert.Contains("Hanna Moos-Berg", keys);
+            Assert.DoesNotContain("Hanna Moos", keys);
+            Assert.Equal(keys.Order(StringComparer.Ordinal), keys);
+        }
+
         crm.Delete(index);
         Assert.DoesNotContain(crm.List("hanna", dueOnly: false), r => r.Index == index);
     }
@@ -112,7 +124,7 @@ public sealed class CrmTableTests : IDisposable
 
         Assert.Equal(".cdx", crm.MissingIndex);
         Assert.Single(crm.List(null, dueOnly: false));
-        Assert.Throws<InvalidOperationException>(() => crm.Save(0, new Dictionary<string, string> { ["CONTACT"] = "Changed" }));
-        Assert.Throws<InvalidOperationException>(() => crm.Delete(0));
+        Assert.Throws<ReadOnlyTableException>(() => crm.Save(0, new Dictionary<string, string> { ["CONTACT"] = "Changed" }));
+        Assert.Throws<ReadOnlyTableException>(() => crm.Delete(0));
     }
 }
