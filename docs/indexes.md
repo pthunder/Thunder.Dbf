@@ -62,6 +62,14 @@ table.CreateIndexTag("NAMED", "name", descending: true);
 
 Each tag is laid out as Visual FoxPro 9 lays one out (its header, then its root on the next page, the expressions in the header's pool, the same options bits), and filled with the keys VFP would build: the tests make every tag of a VFP-built table again, one of each kind (character, `UPPER()`, joined keys, numbers, currency, double, dates, datetimes, logicals, nullable, UNIQUE, CANDIDATE, FOR, DESCENDING), and compare them key for key with the ones VFP 9 wrote. A key the `.cdx` writer can't build exactly (anything past fields, `UPPER()`, `DTOS()` and `STR()` of whole numbers joined with `+`; numbers past a bare field; the GENERAL collation) is refused with nothing written, and so is a CANDIDATE tag the records would give a key twice. Visual FoxPro's statistics for its query optimiser are set to the key counts; VFP brings the rest up to date on REINDEX.
 
+## Removing tags (DELETE TAG)
+
+```csharp
+table.DropIndexTag("LASTNAME");   // DELETE TAG LASTNAME
+```
+
+It takes the tag out of the production `.mdx`, or the structural `.cdx` of a FoxPro table (with `maintainFoxProIndexes: true`), and needs `exclusive: true` like `CreateIndexTag`. The index file stays, with its other tags, even when it held only this one. In a `.cdx`, the tag's name leaves the tag directory first and its pages then go on the free list, for FoxPro to reuse; in an `.mdx`, its blocks are left unused. `ModifyStructure` (see [Reading and writing](reading-and-writing.md#changing-a-tables-structure)) refuses a tag over a field it drops or renames, so this is the step before such a change.
+
 ## Rebuilding
 
 ```csharp

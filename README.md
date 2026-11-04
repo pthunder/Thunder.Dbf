@@ -184,6 +184,7 @@ Done:
 16. ~~Write speed: `FlushWritesToDisk`, cached `.cdx` pages, and `DeferIndexWrites` for bulk loads~~
 17. ~~Fuzzed: every reader and writer against 100,000 corrupted files~~
 18. ~~Creating tables in dBASE III, dBASE IV, FoxPro 2 or Visual FoxPro format~~
+19. ~~`MODIFY STRUCTURE` (`ModifyStructure`) and `DELETE TAG` (`DropIndexTag`)~~
 
 Next:
 

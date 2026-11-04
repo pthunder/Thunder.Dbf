@@ -94,6 +94,42 @@ It's built not to lose data:
 
 If the process dies halfway, every write to that table is refused until it's restored. Replace the `.dbf` with the `.packing` copy, delete the copy, then call `RebuildIndex()`.
 
+## Changing a table's structure
+
+```csharp
+using var old = DbfTable.Open(path, writable: true, exclusive: true);    // like USE ... EXCLUSIVE
+var fields = old.FieldDefinitions.ToList();                              // the fields as they are
+fields[0] = DbfFieldDefinition.Character("NAME", 40);                    // widen NAME
+fields.Add(DbfFieldDefinition.Date("JOINED"));                           // add JOINED
+using var table = old.ModifyStructure(fields);                           // like MODIFY STRUCTURE
+```
+
+`ModifyStructure` adds, drops, renames, widens, narrows and retypes fields, as dBASE's and FoxPro's `MODIFY STRUCTURE` do. It returns the table with its new structure, opened the same way, and closes the one you called it on. `AddField(field)`, `DropField(name)` and `AlterField(name, field)` are shortcuts for one field; `AlterField` with a new name renames, and so does `renames: new Dictionary<string, string> { ["OLD"] = "NEW" }`.
+
+- **Values follow their field by name** (or through the rename) and convert where the types allow: text holding a number to a numeric field, numbers, dates and logicals to text (dates as `YYYYMMDD`, like `DTOS()`), a date to a datetime and back when no time of day is lost, text to a memo and back. A field stored the same way as before keeps its bytes exactly. New fields start blank, a Visual FoxPro `.NULL.` where they're `Nullable`; a new `AutoIncrement` field numbers the existing records, and one that was already counting carries on from its next number.
+- **A change that would lose a value is refused**, naming the first record it would change: text too long for its new width, a number too wide or with too many decimals, text that isn't a number or date, a `.NULL.` in a field that can't hold one. Nothing is written. `allowLoss: true` shortens, rounds or blanks such values instead, and `table.StructureValuesChanged` says how many it changed.
+- **Every record is carried across**, deleted ones too (still deleted), in the same order, so record numbers don't change.
+- **Memos stay where they are.** The new memo file is a copy of the old one with blocks added for new memos, so memos of a dropped field stay as unused space, as dBASE leaves them; `Pack` doesn't reclaim it either. That includes their text: dropping a memo field doesn't erase what it held, from the new memo file or from the backup. To be rid of sensitive text for good, copy the records you keep into a new table and delete the old files.
+- **The production `.mdx` or structural `.cdx` is rebuilt** with the same tags over the new fields (on a FoxPro table, open with `maintainFoxProIndexes: true`). A tag whose expression names a field the change drops or renames is refused: take it out first with `DropIndexTag(name)` and create it again afterwards. Other indexes (`.ndx`, `.ntx`, `.idx`) are refused too, since their key widths are fixed: open the table without them and recreate them in the legacy app.
+- **The format stays the same**: the version byte, code page mark and memo block size are kept. A Visual FoxPro table in a database container (`.dbc`) is refused, since the `.dbc` keeps its own record of the fields: change it in Visual FoxPro, or `REMOVE TABLE` it first. Field types Thunder.Dbf can't create (General, Picture, Varchar and the like) can be dropped but not kept.
+
+Like `PACK`, it needs the table to itself (`exclusive: true`, or it throws `ExclusiveUseRequired`).
+
+### It rewrites the whole table
+
+There's no way to add a field in place: every record gets wider, so dBASE and FoxPro write a new file too, and so does `ModifyStructure`. It reads every record (and every memo, for a field changing to or from memo), writes it into a new table, copies the memo file whole and builds every tag again. The time and the disk space grow with the table:
+
+- **Time.** It grows in step with the record count. Widening one field of a dBASE IV table with 68-byte records, a memo field and two tags took 1.4 s for 100,000 records (6.8 MB) and 16 s for 1,000,000 (68 MB), on a Mac with Apple silicon and an SSD; a Visual FoxPro table took about the same. Allow about 15 seconds per million records on a fast local disk, and more on a network share or a slower disk, or with more tags or long memos. Nothing reports progress meanwhile, and nobody can use the table, so run it when the legacy app is closed, as you would `PACK`.
+- **Disk space.** While it runs, the new table, memo file and index sit beside the old ones, so allow the table's size again, plus the change in record width. Afterwards the old files are kept (below), so the space isn't given back until you delete them.
+
+### What a crash can leave
+
+The new table is written into a folder beside the old one (`NAME.DBF.restructure-partial`), renamed `NAME.DBF.restructuring` once every byte of it is on disk, and only then swapped in: the memo file first (when the table had one), then the `.dbf`, then the index (and a memo file the table didn't have before). The old files go into `NAME.DBF.restructured-<UTC time>`, named in `table.StructureBackupPath`; delete it once you're happy with the change.
+
+- **Killed before the new `.dbf` is in place**, the old table is whole: the memo file beside it is either its own or the copy, which holds every memo it had, and nothing new is left beside it. The next `writable: true, exclusive: true` open throws the new files away.
+- **Killed after**, the next exclusive open moves the rest of the new files in, so the change is finished.
+- Until then, shared writes refuse with `IncompleteTransaction`. A `.restructure-partial` folder left by a kill is ignored, and cleared by the next change.
+
 `Update` writes the whole record you pass, so a change another program made between your `Read` and your `Update` is overwritten. `UpdateFields` avoids that: it locks the record, re-reads it, changes only the named fields and writes it back in one step, and returns the record before and after. Prefer it whenever the legacy app may be editing the same records; the SQL `UPDATE`, the web service's `PATCH` and the SQL bridge all use it.
 
 ## Typed records and LINQ
