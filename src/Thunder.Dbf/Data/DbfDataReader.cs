@@ -9,6 +9,7 @@
 using System.Collections;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 namespace Thunder.Dbf.Data;
@@ -166,12 +167,15 @@ public sealed class DbfDataReader : DbDataReader
     }
 
     /// <summary>The .NET type of the column's values, decided by its dBASE type (see the class remarks).</summary>
+    [return: DynamicallyAccessedMembers(DbfReaderColumn.ReflectedMembers)]
     public override Type GetFieldType(int ordinal) => Column(ordinal).ClrType;
 
     /// <summary>The dBASE type, like Character, Numeric, Date or Memo.</summary>
     public override string GetDataTypeName(int ordinal) => Column(ordinal).TypeName;
 
     /// <inheritdoc />
+    [UnconditionalSuppressMessage("Trimming", "IL2111", Justification =
+        "DataColumn keeps the public properties of its type, and System.Type's TypeInitializer has requirements of its own. The DataType columns only hold Type values; nothing reflects on System.Type's own members.")]
     public override DataTable GetSchemaTable()
     {
         var table = new DataTable("SchemaTable") { Locale = CultureInfo.InvariantCulture };

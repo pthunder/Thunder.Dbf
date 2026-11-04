@@ -12,6 +12,15 @@
     <!-- IntelliSense for package users; a public member without docs fails the build. -->
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <WarningsAsErrors>$(WarningsAsErrors);CS1591;CS1573</WarningsAsErrors>
+    <!--
+      Safe to trim and compile ahead of time (Native AOT, iOS, Android): turns on the trim, AOT and
+      single-file analyzers, so a change that would break a trimmed app fails the build here.
+      The reflection-based APIs say what they need with [DynamicallyAccessedMembers] or [Requires...].
+      The analyzers' warnings are errors here: an unannotated reflection call, a call to a member
+      marked [Requires...], and annotations that don't match.
+    -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2046;IL2057;IL2067;IL2070;IL2072;IL2075;IL2087;IL2090;IL2091;IL2093;IL2111;IL3050;IL3051</WarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup>

@@ -91,6 +91,7 @@ Then work through [Getting started](docs/getting-started.md), or run the [sample
 | [MigrateToSqlite](samples/MigrateToSqlite) | Copy a whole legacy folder into SQLite |
 | [LiveBridge](samples/LiveBridge) | Changes flowing both ways between a live DBF and SQL |
 | [AdoNet](samples/AdoNet) | Plain ADO.NET over DBF files: parameterized SQL, readers, writes |
+| [NativeAot](samples/NativeAot) | The core API trimmed and compiled ahead of time, as in an iOS app |
 
 ## What people build with it
 
