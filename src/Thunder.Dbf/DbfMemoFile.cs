@@ -228,6 +228,35 @@ internal abstract class DbfMemoFile : IDisposable
     protected abstract DbfMemo ReadAt(long remaining);
     protected abstract byte[] Frame(ReadOnlySpan<byte> data, int blockType);
 
+    /// <summary>
+    /// How many bytes the file falls short of the end its header names (its next free block), or null
+    /// when it doesn't. A power cut can keep the header's new end and lose the blocks before it, and
+    /// Visual FoxPro then won't open the table (error 41) though no record names a block past the end.
+    /// A file shorter than its header holds no memos yet (SIMATIC writes those) and is left alone.
+    /// </summary>
+    public long? MissingTail()
+    {
+        DbfTable.DiscardReadBuffer(Stream);
+        if (Stream.Length < HeaderSize || EndBlock() is not { } end)
+            return null;
+        var named = (long)end * BlockSize;
+        return named > Stream.Length ? named - Stream.Length : null;
+    }
+
+    /// <summary>Pads the file with zeros to the end its header names, so every block it promises is there.</summary>
+    public void PadMissingTail()
+    {
+        if (MissingTail() is not { } missing)
+            return;
+        Stream.Position = Stream.Length;
+        Stream.Write(new byte[missing]);
+        Stream.Flush();
+        DbfTable.FlushToDisk(Stream);
+    }
+
+    /// <summary>The block the header (or, for dBASE IV, its free chain) says the file ends at; null if it can't tell.</summary>
+    protected virtual int? EndBlock() => ReadUInt32(0, BigEndian);
+
     /// <summary>Records that the file now ends at <paramref name="newEnd"/> instead of <paramref name="oldEnd"/>.</summary>
     protected virtual void MoveEndOfFile(int oldEnd, int newEnd) => WriteUInt32(0, newEnd, BigEndian);
 
@@ -340,6 +369,24 @@ internal abstract class DbfMemoFile : IDisposable
             BinaryPrimitives.WriteUInt32LittleEndian(framed.AsSpan(4), (uint)framed.Length);
             data.CopyTo(framed.AsSpan(BlockHeaderSize));
             return framed;
+        }
+
+        // The free chain's last link points at the end of the file: the first link at or past the
+        // blocks the file holds. A chain that goes backwards is damaged, and says nothing.
+        protected override int? EndBlock()
+        {
+            var inFile = (Stream.Length + BlockSize - 1) / BlockSize;
+            var current = ReadUInt32(0, bigEndian: false);
+            for (var steps = 0; steps <= inFile; steps++)
+            {
+                if (current < FirstDataBlock || current >= inFile)
+                    return current;
+                var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
+                if (next <= current)
+                    return null;
+                current = next;
+            }
+            return null;
         }
 
         // Walk the free chain to the link that points at the old end of file and move it.

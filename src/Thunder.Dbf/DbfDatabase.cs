@@ -168,6 +168,32 @@ public sealed class DbfDatabase : IDisposable
         }
     }
 
+    private static long? MemoMissingTail(DbfTable table)
+    {
+        try
+        {
+            return table.MemoMissingTail;
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
+        {
+            return null; // an unreadable memo file is reported where it's read
+        }
+    }
+
+    // A key expression that can't be worked out here is reported elsewhere; it isn't a mismatch.
+    private static string? OutOfStep(MdxIndex index, DbfTable table)
+    {
+        try
+        {
+            return index.OutOfStep(table);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
+                                       or FormatException or ArgumentException or ArithmeticException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>Opens a separate instance of a table that the caller owns and disposes.</summary>
     public DbfTable OpenTable(string name) => OpenTableAt(ResolveTablePath(name));
 
@@ -324,6 +350,10 @@ public sealed class DbfDatabase : IDisposable
             if (table.Header.HasIncompleteTransaction)
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
+            if (MemoMissingTail(table) is { } missing)
+                problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
+                    $"The memo file is {missing:N0} bytes shorter than its header says: a power cut kept the header and lost the end of the file. Visual FoxPro won't open the table (error 41), though no memo is lost.",
+                    "Open the table with exclusive: true (writable), which pads the memo file back to its full length.", path));
             if (table.Header.HasProductionMdx)
             {
                 try
@@ -332,7 +362,17 @@ public sealed class DbfDatabase : IDisposable
                     if (index is null)
                         warnings.Add("The header says there's a production .mdx index, but no .mdx file is next to the table.");
                     else
+                    {
                         tags = index.Tags.Select(t => $"{t.Name} ({t.Expression})").ToList();
+                        // Tags with a key too many or too few, as a writer killed mid-change or Jet writing
+                        // beside another program leaves them: the next writable open refuses writes too.
+                        if (OutOfStep(index, table) is { } outOfStep)
+                        {
+                            problems.Add(new DbfException(DbfErrorCode.IndexDamaged, outOfStep + ".",
+                                "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app).", Path.ChangeExtension(path, ".mdx")));
+                            indexDamaged = true;
+                        }
+                    }
                 }
                 catch (Exception ex) when (ex is InvalidDataException or DbfException)
                 {

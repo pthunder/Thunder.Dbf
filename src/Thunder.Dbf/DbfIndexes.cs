@@ -10,7 +10,7 @@ public interface IDbfIndexTag
     /// <summary>The tag's name (for a single-tag file, the file's name).</summary>
     string Name { get; }
 
-    /// <summary>'C' (character), 'N' (numeric), 'D' (date) or 'L' (logical).</summary>
+    /// <summary>'C' (character), 'N' (numeric), 'D' (date), 'L' (logical), or 'T' (datetime, a Visual FoxPro .cdx tag on a datetime field).</summary>
     char KeyType { get; }
 
     /// <summary>Bytes per key.</summary>

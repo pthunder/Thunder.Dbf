@@ -241,7 +241,7 @@ public sealed partial class CdxTag
     /// <inheritdoc />
     public string Name { get; }
 
-    /// <summary>'C', 'N', 'D' or 'L'. Always 'C' unless the index was opened with its table.</summary>
+    /// <summary>'C', 'N', 'D', 'L', or 'T' for a datetime field. Always 'C' unless the index was opened with its table.</summary>
     public char KeyType { get; private init; }
     /// <inheritdoc />
     public int KeyLength { get; private init; }
@@ -296,7 +296,7 @@ public sealed partial class CdxTag
 
         return new CdxTag(index, headerOffset, root, name)
         {
-            KeyType = directory || table is null ? 'C' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
+            KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,
             IsDescending = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(DescendingOffset)) != 0,
             IsUnique = (options & CdxIndex.OptionUnique) != 0,
@@ -508,6 +508,11 @@ public sealed partial class CdxTag
 
     // ---- keys -----------------------------------------------------------------------------
 
+    // A tag on a bare Visual FoxPro datetime field keys whole seconds as Julian days, not dates: its
+    // blank value is null, which would otherwise make it look like a date tag.
+    private static bool IsDateTimeField(string expression, DbfTable table, int keyLength) =>
+        keyLength == 8 && table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase)) is { Type: 'T' };
+
     /// <summary>
     /// Turns a search value into the bytes FoxPro would have stored, so every comparison is a byte
     /// comparison. Numbers and dates are doubles arranged to sort as bytes; character probes compare as prefixes.
@@ -517,6 +522,7 @@ public sealed partial class CdxTag
         'N' when KeyLength == 4 => EncodeInteger(key),
         'N' => IndexKeys.WriteOrderedDouble(IndexKeys.ToDouble(key, Name)),
         'D' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDay(key, Name)),
+        'T' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDateTime(key, Name)),
         'L' => [(byte)(IndexKeys.ToBool(key, Name) ? 'T' : 'F')],
         _ => _index.Encoding.GetBytes(IgnoreCase ? IndexKeys.ToText(key, Name).ToUpperInvariant() : IndexKeys.ToText(key, Name)),
     };
@@ -536,6 +542,7 @@ public sealed partial class CdxTag
         'N' when KeyLength == 4 => (decimal)unchecked((int)(BinaryPrimitives.ReadUInt32BigEndian(key) - 0x80000000)),
         'N' => IndexKeys.FromDouble(IndexKeys.ReadOrderedDouble(key)),
         'D' => IndexKeys.FromJulianDay(IndexKeys.ReadOrderedDouble(key)),
+        'T' => IndexKeys.FromJulianDateTime(IndexKeys.ReadOrderedDouble(key)),
         'L' => key[0] == 'T',
         _ => _index.Encoding.GetString(key).TrimEnd(' ', '\0'),
     };
