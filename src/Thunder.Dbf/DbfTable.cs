@@ -2262,7 +2262,8 @@ public sealed partial class DbfTable : IDisposable
     {
         var current = record is not null && tag.Includes(record) ? tag.KeyFor(record) : null;
         var done = new List<Action>();
-        static bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && a.AsSpan().SequenceEqual(b);
+        // As the tag compares them: a noted key in an earlier version's form is still the record's key.
+        bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && tag.SameKey(a, b);
 
         if (!tag.IsUnique)
         {
