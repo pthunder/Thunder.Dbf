@@ -143,7 +143,7 @@ public sealed partial class DbfTable : IDisposable
             var header = ReadHeader(stream, encoding: null, path);
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
                 memoStream = DbfException.OpenFile(memoPath, FileMode.Open, access, share);
-            else if (header.Fields.Any(DbfValueCodec.IsMemoField) && Directory.Exists(path + RestructureReadySuffix))
+            else if (header.Fields.Any(DbfValueCodec.IsMemoField) && FolderThere(path + RestructureReadySuffix))
                 throw RestructureUnderWay(path); // the memo file is between its two renames
 
             var cpg = FindCompanion(path, ".cpg");
@@ -201,7 +201,7 @@ public sealed partial class DbfTable : IDisposable
             {
                 stream = DbfException.OpenFile(path, FileMode.Open, access, share);
             }
-            catch (DbfException ex) when (ex.Code == DbfErrorCode.TableNotFound && Directory.Exists(path + RestructureReadySuffix))
+            catch (DbfException ex) when (ex.Code == DbfErrorCode.TableNotFound && FolderThere(path + RestructureReadySuffix))
             {
                 throw new DbfException(DbfErrorCode.IncompleteTransaction, "The table's .dbf is being swapped for one with a new structure.",
                     "Wait a moment and try again; if it persists, open the table with writable: true, exclusive: true, which finishes the change.", path, ex);
@@ -210,7 +210,7 @@ public sealed partial class DbfTable : IDisposable
             try
             {
                 RestructurePoint?.Invoke("table file opened");
-                if (writable && Directory.Exists(path + RestructureReadySuffix))
+                if (writable && FolderThere(path + RestructureReadySuffix))
                     throw RestructureUnderWay(path);
                 // By device and inode where those can be read; elsewhere there's no check (see FileIdentity).
                 same = FileIdentity.Same(stream, path);
@@ -289,14 +289,19 @@ public sealed partial class DbfTable : IDisposable
 
     // A dBASE IV table whose .mdx went missing looks just like a FoxPro 2 table, so a .cdx of the same
     // name only says "FoxPro 2" when it opens and every tag's expressions name nothing but this
-    // table's fields. A stray .cdx (another table's, renamed or copied in) leaves dBASE's rules in
-    // force: the missing .mdx keeps blocking writes, and dBASE's lock positions stay in use.
+    // table's fields, or it has no tags at all. A stray .cdx (another table's, renamed or copied in)
+    // leaves dBASE's rules in force: the missing .mdx keeps blocking writes, and dBASE's lock
+    // positions stay in use.
     private static bool IsIndexOver(string cdxPath, DbfHeader header)
     {
         var fields = header.Fields.Select(f => f.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
         try
         {
             using var index = CdxIndex.Open(cdxPath);
+            // A compound .cdx with no tags is what dropping a FoxPro table's last tag leaves (dBASE
+            // writes no .cdx at all), so it says FoxPro 2 too; it names no field to check.
+            if (index.IsCompound && index.Tags.Count == 0)
+                return true;
             return index.Tags.Count > 0 && index.Tags.All(tag =>
             {
                 var names = DbfExpression.FieldNamesIn(tag.Expression);

@@ -55,7 +55,7 @@ public sealed partial class MdxIndex : IDisposable
     public static MdxIndex Open(string path, Encoding? encoding = null)
     {
         // A DELETE TAG cut off may have left the tag table torn: it isn't read until it's put back.
-        if (File.Exists(path + DropTagImageSuffix))
+        if (DbfTable.FileThere(path + DropTagImageSuffix))
             throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this .mdx was cut off, so its tag table may be torn and isn't read.",
                 "Open the table with writable: true, exclusive: true, which puts the tag table back as it was.", path);
         var stream = DbfException.OpenFile(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
@@ -104,6 +104,7 @@ public sealed partial class MdxIndex : IDisposable
     /// </summary>
     internal void ReloadTags()
     {
+        ThrowIfDropPending(); // before the header is read: it may be the half-dropped one
         if (_batch is not null)
             return; // nobody else writes the file during a batch, and this process adds no tags then
         Tags = LoadTags(ReadHeaderArea(_stream));
@@ -290,6 +291,7 @@ public sealed partial class MdxTag
 
     private IEnumerable<Hit> Walk(KeyProbe? probe)
     {
+        _index.ThrowIfDropPending();
         var root = BinaryPrimitives.ReadInt32LittleEndian(_index.ReadBlock(_headerPage));
         return Walk(root, probe, position: probe is not null, depth: 0, visited: []);
     }

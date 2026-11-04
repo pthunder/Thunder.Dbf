@@ -49,13 +49,13 @@ Entry *i* is at 544 + 32*i*:
 
 dBASE finds a tag by name through the left, right and parent slots of each entry (bytes 16 to 18, 1-based, 0 for none), from the anchor at byte 17 of the reserved slot before the table: a binary search tree, never a scan of the slots. Thunder.Dbf's `DropIndexTag` keeps it whole at every write:
 
-1. A before-image of the first 2,048 bytes (header and tag table), written beside the index as `NAME.MDX.droptag` and forced to disk.
+1. A before-image of the first 2,048 bytes (header and tag table) and their SHA-256, written beside the index as `NAME.MDX.droptag.tmp`, forced to disk, then renamed `NAME.MDX.droptag`, so an image under that name is always whole.
 2. The anchor's slot and the kept entries, moved down over the dropped one with their tree links rebuilt over the tags that remain, in one write. The count still includes the last slot, which keeps its old contents.
 3. The smaller count.
 4. The slot past it, cleared.
 5. The before-image, deleted.
 
-A process killed between any two leaves a tree that finds every tag still counted. A power cut can tear write 2, which spans several sectors with 16 or more tags, so the before-image is what makes it safe: a writable exclusive open that finds it writes it back over the header (the tag isn't dropped after all) and deletes it, and until then other Thunder.Dbf writers are turned away, `MdxIndex.Open` (and so `OpenProductionIndex`) refuses to read the torn table, and a further drop in the same open refuses too, each with `IncompleteTransaction`. The dropped tag's blocks are left unused.
+A process killed between any two leaves a tree that finds every tag still counted. A power cut can tear write 2, which spans several sectors with 16 or more tags; the before-image is what puts that right. A writable exclusive open that finds it checks its hash and the tag count it records, writes it back over the header (the tag isn't dropped after all) and deletes it; an image that fails the check is refused with `IndexDamaged`, never written back, and a `.tmp` (never renamed into place, so never relied on) is deleted. Until the image is gone, Thunder.Dbf doesn't use the index: `MdxIndex.Open` (and so `OpenProductionIndex`) and a shared writable open refuse with `IncompleteTransaction`, and so does every read and write through the table whose drop failed partway (an image it couldn't delete, say), since writing there would keep only the tags the half-done drop left. dBASE and other programs don't know the image, and read the tag table as it is. The dropped tag's blocks are left unused.
 
 ## Tag header (one block at the tag header page)
 

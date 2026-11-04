@@ -1004,4 +1004,380 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal(before.AsSpan(0, 2048).ToArray(), File.ReadAllBytes(mdx).AsSpan(0, 2048).ToArray());
         Assert.False(File.Exists(mdx + ".droptag"));
     }
+
+    // ---- third audit ------------------------------------------------------------------------------
+
+    // A. A look for the decision that fails (access denied, a share gone) isn't "not decided": an
+    // exclusive open stops rather than undo a decided change, and finishes it once it can look.
+    [Fact]
+    public void A_failing_look_for_the_decision_never_undoes_a_decided_change()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        KilledAt("widen", path, "table moved in");
+        DbfTable.LookFails = file => file.EndsWith("restructure.commit", StringComparison.Ordinal);
+        try
+        {
+            var ex = Assert.Throws<DbfException>(() => Open(path));
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+        }
+        finally
+        {
+            DbfTable.LookFails = null;
+        }
+        Assert.True(Directory.Exists(path + ".restructuring"));
+        using var table = Open(path);
+        Assert.Equal(20, table.Fields[0].Length);
+    }
+
+    // A. Nor is a staged .dbf it couldn't see one already moved in: the open stops, and nothing is deleted.
+    [Fact]
+    public void A_failing_look_for_a_staged_file_stops_recovery_rather_than_take_it_for_installed()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        KilledAt("widen", path, "committed");
+        var staged = Path.Combine(path + ".restructuring", "PEOPLE.DBF");
+        DbfTable.LookFails = file => file == staged;
+        try
+        {
+            Assert.Throws<DbfException>(() => Open(path));
+        }
+        finally
+        {
+            DbfTable.LookFails = null;
+        }
+        Assert.True(File.Exists(staged));
+        using var table = Open(path);
+        Assert.Equal(20, table.Fields[0].Length);
+    }
+
+    // D. An open that saw no change under way, then paused before taking the table, while another
+    // process staged and decided a change and was killed before clearing it away. Taking the table,
+    // it must see the change and finish it, not clear its record away as a finished change's.
+    [Fact]
+    public void An_open_that_looked_before_a_change_began_finishes_that_change_rather_than_clear_it_away()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using var seen = new SemaphoreSlim(0);
+        using var go = new SemaphoreSlim(0);
+        DbfTable? opened = null;
+        Exception? failed = null;
+        var opener = new Thread(() =>
+        {
+            DbfTable.RestructurePoint = point => { if (point == "leftovers seen") { DbfTable.RestructurePoint = null; seen.Release(); go.Wait(); } };
+            try
+            {
+                opened = Open(path);
+            }
+            catch (Exception ex)
+            {
+                failed = ex;
+            }
+            finally
+            {
+                DbfTable.RestructurePoint = null;
+            }
+        });
+        opener.Start();
+        Assert.True(seen.Wait(TimeSpan.FromSeconds(30)));
+        KilledAt("widen", path, "table moved in"); // another process: stages, decides, dies before retiring
+        go.Release();
+        Assert.True(opener.Join(TimeSpan.FromSeconds(30)));
+        Assert.Null(failed);
+        using (opened)
+        {
+            Assert.Equal(20, opened!.Fields[0].Length);
+            Assert.NotNull(opened.StructureBackupPath);
+        }
+        Assert.False(Directory.Exists(path + ".restructuring"));
+    }
+
+    // D, the Linux and macOS case: the open takes the old .dbf just before a change renames it away;
+    // a newer change then starts writing. Holding the old file, the open must see it's not the one at
+    // the path, and leave the newer change's partial folder alone.
+    [Fact]
+    public void An_open_holding_a_dbf_renamed_away_never_clears_a_newer_change_s_folder()
+    {
+        if (OperatingSystem.IsWindows() || !FileIdentity.Available)
+            return; // on Windows the rename of a held file fails instead
+        var path = Table(DbfTableFormat.DbaseIV);
+        using var held = new SemaphoreSlim(0);
+        using var goOpener = new SemaphoreSlim(0);
+        using var decided = new SemaphoreSlim(0);
+        using var goChange = new SemaphoreSlim(0);
+        Exception? openerFailed = null;
+        var change = new Thread(() =>
+        {
+            DbfTable.RestructurePoint = point => { if (point == "committed") { decided.Release(); goChange.Wait(); } };
+            try
+            {
+                using var old = Open(path);
+                using var table = old.AddField(DbfFieldDefinition.Logical("OK"));
+            }
+            finally
+            {
+                DbfTable.RestructurePoint = null;
+            }
+        });
+        change.Start();
+        Assert.True(decided.Wait(TimeSpan.FromSeconds(30))); // decided, its files closed, the .dbf not yet moved
+
+        var opener = new Thread(() =>
+        {
+            DbfTable.RestructurePoint = point =>
+            {
+                if (point == "recovery read")
+                    DbfTable.RestructurePoint = null; // it saw the change: then it's the race below that's lost
+                if (point == "leftovers held") { DbfTable.RestructurePoint = null; held.Release(); goOpener.Wait(); }
+            };
+            try
+            {
+                using var table = Open(path);
+            }
+            catch (Exception ex)
+            {
+                openerFailed = ex;
+            }
+            finally
+            {
+                DbfTable.RestructurePoint = null;
+            }
+        });
+        // The opener must see no change under way yet hold the old .dbf: hide the staging folder from
+        // its first look only.
+        var ready = path + ".restructuring";
+        var hidden = path + ".hidden";
+        Directory.Move(ready, hidden);
+        opener.Start();
+        Assert.True(held.Wait(TimeSpan.FromSeconds(30)));
+        Directory.Move(hidden, ready);
+        goChange.Release();
+        Assert.True(change.Join(TimeSpan.FromSeconds(30))); // the old .dbf renamed away; the change done
+
+        using (var newer = PausedAt("widen", path, "copying")) // a newer change, writing its partial folder
+        {
+            goOpener.Release();
+            Assert.True(opener.Join(TimeSpan.FromSeconds(30)));
+            Assert.True(Directory.Exists(path + ".restructure-partial")); // untouched
+            Assert.Equal(DbfErrorCode.FileInUse, Assert.IsType<DbfException>(openerFailed).Code);
+        }
+        using var after = Open(path);
+        Assert.Equal("CITY", after.Fields.Last(f => !f.IsSystem).Name);
+    }
+
+    // E. Dropping a FoxPro 2 table's last tag leaves an empty structural .cdx, which still says
+    // FoxPro 2 when it's opened again: writes go on, under FoxPro's rules.
+    [Theory]
+    [InlineData(DbfTableFormat.FoxPro2)]
+    [InlineData(DbfTableFormat.VisualFoxPro)]
+    public void A_foxpro_table_whose_last_tag_was_dropped_opens_and_writes_again(DbfTableFormat format)
+    {
+        // A FoxPro 2 table without memos says 0x03, like dBASE: made by dropping the memo field of one
+        // with a .cdx, so it's known as FoxPro 2 only through its .cdx.
+        var path = Table(format);
+        using (var old = Open(path))
+        using (var table = old.DropField("NOTE"))
+            Assert.True(table.Header.IsFoxPro || table.Header.IsFoxProByCompanion);
+        using (var table = Open(path))
+            table.DropIndexTag("NAME");
+        using (var table = Open(path))
+        {
+            Assert.True(table.Header.IsFoxPro || table.Header.IsFoxProByCompanion);
+            table.Append("Kay", 50m);
+            table.CreateIndexTag("NAME", "NAME");
+        }
+        using var reopened = Open(path);
+        using var index = reopened.OpenStructuralIndex()!;
+        Assert.Equal(5, index["NAME"].Entries().Count());
+    }
+
+    // F. Opening the result failing, once the change is done, says it's done.
+    [Fact]
+    public void A_failure_opening_the_changed_table_again_says_the_change_is_done()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using (var table = Open(path))
+        {
+            DbfTable.RestructurePoint = point => { if (point == "reopening") throw new IOException($"Could not open {path}."); };
+            try
+            {
+                var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+                Assert.Contains("has its new structure", ex.Message);
+                Assert.DoesNotContain("left as it was", ex.Message);
+                Assert.DoesNotContain(_dir.FullName, ex.Message);
+            }
+            finally
+            {
+                DbfTable.RestructurePoint = null;
+            }
+        }
+        using var after = Open(path);
+        Assert.Equal("OK", after.Fields.Last().Name);
+    }
+
+    // G. Every field once: a manifest cut short, or with a field twice or one it doesn't know, is refused.
+    [Theory]
+    [InlineData("cut")]
+    [InlineData("twice")]
+    [InlineData("unknown")]
+    [InlineData("blank")]
+    public void A_malformed_manifest_moves_nothing(string damage)
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        KilledAt("widen", path, "committed");
+        var manifest = Path.Combine(Backup(), "restructure.manifest");
+        var lines = File.ReadAllText(manifest).Split('\n').ToList();
+        switch (damage)
+        {
+            case "cut": lines.RemoveAt(lines.Count - 1); break;
+            case "twice": lines.Add(lines[^1]); break;
+            case "unknown": lines.Add("extra=PEOPLE.TXT"); break;
+            case "blank": lines.Insert(2, ""); break;
+        }
+        File.WriteAllText(manifest, string.Join('\n', lines));
+        var before = Files();
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => Open(path)).Code);
+        Assert.Equal(before.Keys.Order(), Files().Keys.Order());
+        Assert.True(File.Exists(Path.Combine(path + ".restructuring", "PEOPLE.DBF"))); // nothing moved
+    }
+
+    // B. An image beside the .mdx that isn't whole (its hash doesn't match) is never written back.
+    [Fact]
+    public void A_torn_before_image_is_never_written_over_the_mdx()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("A", "NAME");
+            table.CreateIndexTag("B", "NAME");
+            MdxIndex.DropTagPoint = point => { if (point == "before-image") throw new IOException("power cut"); };
+            try
+            {
+                Assert.ThrowsAny<IOException>(() => table.DropIndexTag("A"));
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+        }
+        var mdx = MdxIndex.FindFor(path)!;
+        var header = File.ReadAllBytes(mdx);
+        var image = File.ReadAllBytes(mdx + ".droptag");
+        image[600] ^= 0xFF; // a sector of it lost
+        File.WriteAllBytes(mdx + ".droptag", image);
+
+        Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => Open(path)).Code);
+        Assert.Equal(header, File.ReadAllBytes(mdx));
+    }
+
+    // B. An image cut off while it was written was never published: it's thrown away, and the .mdx kept.
+    [Fact]
+    public void An_image_cut_off_before_it_was_published_is_thrown_away()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("A", "NAME");
+            MdxIndex.DropTagPoint = point => { if (point == "image written") throw new IOException("killed"); };
+            try
+            {
+                Assert.ThrowsAny<IOException>(() => table.DropIndexTag("A"));
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+        }
+        var mdx = MdxIndex.FindFor(path)!;
+        File.WriteAllBytes(mdx + ".droptag.tmp", [1, 2, 3]); // torn, too
+        using (var table = Open(path))
+        {
+            using var index = table.OpenProductionIndex()!;
+            Assert.Equal(["A"], index.Tags.Select(t => t.Name));
+        }
+        Assert.False(File.Exists(mdx + ".droptag.tmp"));
+    }
+
+    // C. A drop that couldn't delete its image: the same table refuses to write until it's reopened,
+    // so the restore never brings back a tag missing a record's key.
+    [Fact]
+    public void A_drop_that_couldn_t_finish_stops_writes_until_the_table_is_reopened()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("A", "NAME");
+            table.CreateIndexTag("B", "NAME");
+            MdxIndex.DropTagPoint = point => { if (point == "image deleting") throw new IOException("Another program holds the file."); };
+            try
+            {
+                var ex = Assert.Throws<DbfException>(() => table.DropIndexTag("A"));
+                Assert.DoesNotContain(_dir.FullName, ex.Message);
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Append("Kay")).Code);
+        }
+        using var reopened = Open(path); // writes the image back: the drop didn't happen
+        reopened.Append("Kay");
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(["A", "B"], index.Tags.Select(t => t.Name));
+        Assert.Equal(2, index["A"].Entries().Count());
+        Assert.Equal(2, index["B"].Entries().Count());
+    }
+
+    // H. A drop failing on a file names no path.
+    [Fact]
+    public void A_drop_failing_on_a_file_names_no_path()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using var table = Open(path);
+        table.CreateIndexTag("A", "NAME");
+        MdxIndex.DropTagPoint = point => { if (point == "image written") throw new IOException($"Could not move {path}.mdx.droptag.tmp."); };
+        try
+        {
+            var ex = Assert.Throws<DbfException>(() => table.DropIndexTag("A"));
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+            Assert.DoesNotContain(_dir.FullName, ex.Hint);
+        }
+        finally
+        {
+            MdxIndex.DropTagPoint = null;
+        }
+    }
+
+    // The review of #47: looks outside recovery (an open's check for a change under way, MdxIndex.Open's
+    // for a before-image) that fail say so without the path.
+    [Fact]
+    public void A_failing_look_outside_recovery_is_explained_without_its_path()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        DbfTable.LookFails = file => file.EndsWith(".restructuring", StringComparison.Ordinal) || file.EndsWith(".droptag", StringComparison.Ordinal);
+        try
+        {
+            var shared = Assert.Throws<DbfException>(() => Open(path, exclusive: false));
+            Assert.Equal(DbfErrorCode.AccessDenied, shared.Code);
+            Assert.DoesNotContain(_dir.FullName, shared.Message);
+            Assert.DoesNotContain(_dir.FullName, shared.Hint);
+            Assert.Equal(path + ".restructuring", shared.FilePath);
+
+            var index = Assert.Throws<DbfException>(() => MdxIndex.Open(MdxIndex.FindFor(path)!));
+            Assert.DoesNotContain(_dir.FullName, index.Message);
+        }
+        finally
+        {
+            DbfTable.LookFails = null;
+        }
+        using var table = Open(path, exclusive: false); // and the file wasn't left open
+        Assert.Equal(4, table.RecordCount);
+    }
 }

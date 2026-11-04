@@ -10,6 +10,7 @@
 //  every time a tag is added.
 
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Thunder.Dbf;
@@ -159,20 +160,27 @@ public sealed partial class MdxIndex
         // can tear the writes below sector by sector, losing a tag, and the next exclusive open puts
         // this back (see RestoreDropTag).
         var imagePath = _stream is FileStream file ? file.Name + DropTagImageSuffix : null;
-        if (imagePath is not null && File.Exists(imagePath))
+        if (imagePath is not null && DbfTable.FileThere(imagePath))
             throw new DbfException(DbfErrorCode.IncompleteTransaction, "An earlier DELETE TAG on this .mdx was cut off, and its copy of the tag table is still beside it.",
                 "Close the table and open it again with writable: true, exclusive: true, which puts the tag table back; then drop the tag again.", imagePath);
         if (imagePath is not null)
         {
+            // Written under a temporary name and forced to disk, then renamed: an image under its own
+            // name is always whole. It carries its SHA-256, checked before it's ever written back.
             var image = new byte[HeaderAreaSize];
             DbfTable.DiscardReadBuffer(_stream);
             _stream.Position = 0;
             _stream.ReadExactly(image);
-            using (var before = new FileStream(imagePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            var temporary = imagePath + ".tmp";
+            using (var before = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
             {
                 before.Write(image);
+                before.Write(SHA256.HashData(image));
                 before.Flush(flushToDisk: true);
             }
+            DropTagPoint?.Invoke("image written");
+            File.Move(temporary, imagePath);
+            _dropPending = true; // from here until the image is gone, this index reads and writes nothing
             DropTagPoint?.Invoke("before-image");
         }
 
@@ -206,8 +214,27 @@ public sealed partial class MdxIndex
         DbfTable.FlushToDisk(_stream);
         DropTagPoint?.Invoke("cleared");
         if (imagePath is not null)
+        {
+            DropTagPoint?.Invoke("image deleting");
             File.Delete(imagePath);
+        }
+        _dropPending = false;
         ReloadTags();
+    }
+
+    // Set while a DELETE TAG's before-image is beside the file. A drop that failed partway (an image
+    // that couldn't be deleted, a write that failed) leaves it set: the table this index belongs to
+    // must be reopened exclusively, which writes the image back, before it's used again. Writing
+    // through it meanwhile would keep only the tags the half-done drop left, and the restore would
+    // then bring back a tag missing those writes' keys.
+    private bool _dropPending;
+
+    internal void ThrowIfDropPending()
+    {
+        if (_dropPending)
+            throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this table's .mdx didn't finish, so its index isn't used until the tag table is put back.",
+                "Close the table and open it again with writable: true, exclusive: true, which puts the tag table back as it was.",
+                (_stream as FileStream)?.Name);
     }
 
     /// <summary>The before-image a DELETE TAG keeps beside the .mdx while it rewrites the tag table.</summary>
@@ -221,22 +248,46 @@ public sealed partial class MdxIndex
     internal static void RestoreDropTag(string mdxPath, bool exclusive)
     {
         var imagePath = mdxPath + DropTagImageSuffix;
-        if (!File.Exists(imagePath))
-            return;
-        if (!exclusive)
-            throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this table's .mdx was cut off, so its tag table may be torn.",
-                "Open the table with writable: true, exclusive: true, which puts the tag table back as it was.", mdxPath);
-        if (new FileInfo(imagePath).LinkTarget is not null || new FileInfo(imagePath).Length != HeaderAreaSize)
-            throw new DbfException(DbfErrorCode.IndexDamaged, "A DELETE TAG on this table's .mdx was cut off, and its copy of the tag table isn't one Thunder.Dbf wrote.",
-                "Rebuild the index in dBASE (or delete the .mdx and recreate its tags), then delete the .droptag file beside it.", mdxPath);
-        var image = File.ReadAllBytes(imagePath);
-        using (var index = DbfException.OpenFile(mdxPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        try
         {
-            index.Write(image);
-            index.Flush(flushToDisk: true);
+            if (DbfTable.FileThere(imagePath + ".tmp") && exclusive)
+                File.Delete(imagePath + ".tmp"); // never renamed into place: the drop it began never touched the tag table
+            if (!DbfTable.FileThere(imagePath))
+                return;
+            if (!exclusive)
+                throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this table's .mdx was cut off, so its tag table may be torn.",
+                    "Open the table with writable: true, exclusive: true, which puts the tag table back as it was.", mdxPath);
+            var image = new FileInfo(imagePath).LinkTarget is null && new FileInfo(imagePath).Length == HeaderAreaSize + ImageHashLength
+                ? File.ReadAllBytes(imagePath) : null;
+            if (image is null || !IsWholeImage(image))
+                throw new DbfException(DbfErrorCode.IndexDamaged, "A DELETE TAG on this table's .mdx was cut off, and its copy of the tag table isn't one Thunder.Dbf wrote whole.",
+                    "Rebuild the index in dBASE (or delete the .mdx and recreate its tags), then delete the .droptag file beside it.", mdxPath);
+            using (var index = DbfException.OpenFile(mdxPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                index.Write(image.AsSpan(0, HeaderAreaSize));
+                index.Flush(flushToDisk: true);
+            }
+            DropTagPoint?.Invoke("restored");
+            File.Delete(imagePath);
         }
-        DropTagPoint?.Invoke("restored");
-        File.Delete(imagePath);
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+        {
+            throw DbfException.Translate(ex, mdxPath, FileAccess.ReadWrite) ?? new DbfException(DbfErrorCode.WriteFailed,
+                "A DELETE TAG on this table's .mdx was cut off, and putting its tag table back failed.",
+                "Check that the folder can be written, then open the table exclusively again.", mdxPath, ex);
+        }
+    }
+
+    private const int ImageHashLength = 32;
+
+    // The image's own hash matches, and its header lists a tag table the header area can hold.
+    private static bool IsWholeImage(byte[] image)
+    {
+        if (!SHA256.HashData(image.AsSpan(0, HeaderAreaSize)).AsSpan().SequenceEqual(image.AsSpan(HeaderAreaSize, ImageHashLength)))
+            return false;
+        var tagCount = BinaryPrimitives.ReadUInt16LittleEndian(image.AsSpan(28));
+        var entryLength = image[26] == 0 ? 32 : image[26];
+        return tagCount <= MaxTags && entryLength >= 21 && TagTableOffset + entryLength * tagCount <= HeaderAreaSize;
     }
 
     /// <summary>For the tests: called after each of DropTag's writes.</summary>

@@ -161,7 +161,7 @@ public sealed partial class DbfTable
             // Left by a change killed while it was being written, or while its folder was being
             // deleted (nothing reads either), and finished changes' bookkeeping.
             ClearLeftoversHeld(_path); // this table holds itself unshared: it's open exclusively
-            if (Directory.Exists(partial))
+            if (FolderThere(partial))
             {
                 RequireRealFolder(partial);
                 Directory.Delete(partial, recursive: true);
@@ -733,14 +733,26 @@ public sealed partial class DbfTable
         public string Write() => string.Join('\n',
             $"id={Id}", $"table={Table}", $"memo={Memo}", $"memo.original={MemoOriginal}", $"index={Index}", $"index.original={IndexOriginal}");
 
-        // Every name is checked before it's used as a path: it comes from a file.
+        private static readonly string[] Keys = ["id", "table", "memo", "memo.original", "index", "index.original"];
+
+        // Every field must be there exactly once (an empty value is an explicit "none", a missing line
+        // is a manifest cut short), nothing else may be, and every name is checked before it's used as
+        // a path: it comes from a file.
         public static RestructureManifest? Read(string text, string tablePath)
         {
-            var lines = text.Split('\n').Select(l => l.Split('=', 2)).Where(l => l.Length == 2).ToDictionary(l => l[0].Trim(), l => l[1].Trim());
+            var lines = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var line in text.Split('\n'))
+            {
+                var parts = line.Split('=', 2);
+                if (parts.Length != 2 || !Keys.Contains(parts[0]) || !lines.TryAdd(parts[0], parts[1].Trim()))
+                    return null;
+            }
+            if (lines.Count != Keys.Length)
+                return null;
             var stem = Path.GetFileNameWithoutExtension(tablePath);
             string? Name(string key, params string[] extensions)
             {
-                var value = lines.GetValueOrDefault(key, "");
+                var value = lines[key];
                 if (value.Length == 0)
                     return null;
                 return Path.GetFileName(value) == value && Path.GetFileNameWithoutExtension(value).Equals(stem, StringComparison.OrdinalIgnoreCase)
@@ -749,8 +761,8 @@ public sealed partial class DbfTable
             }
             try
             {
-                var id = lines.GetValueOrDefault("id", "");
-                var table = lines.GetValueOrDefault("table", "");
+                var id = lines["id"];
+                var table = lines["table"];
                 if (!IsBackupName(id, tablePath) || !table.Equals(Path.GetFileName(tablePath), StringComparison.OrdinalIgnoreCase) || Path.GetFileName(table) != table)
                     return null;
                 return new RestructureManifest(id, table, Name("memo", ".dbt", ".fpt"), Name("memo.original", ".dbt", ".fpt"),
@@ -841,7 +853,20 @@ public sealed partial class DbfTable
             }
 
             // Handed over still under the lock: nothing finishes or undoes this change behind the reopened table.
-            var table = OpenPath(path, writable: true, Encoding, ignoreMissingMemo: false, _allowUnmaintainedIndexes, _maintainFoxProIndexes, exclusive: true);
+            DbfTable table;
+            try
+            {
+                RestructurePoint?.Invoke("reopening");
+                table = OpenPath(path, writable: true, Encoding, ignoreMissingMemo: false, _allowUnmaintainedIndexes, _maintainFoxProIndexes, exclusive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Done: only opening the result failed. Never "left as it was".
+                var reason = ex is DbfException known ? known : FileFailure(ex, path, "", "");
+                throw new DbfException(reason.Code,
+                    "The table has its new structure, but opening it again afterwards failed.",
+                    "Open the table again; the change itself is finished.", path, ex);
+            }
             RestructurePoint?.Invoke("reopened");
             table.FlushWritesToDisk = FlushWritesToDisk;
             table.UseJournal = _useJournal;
@@ -858,8 +883,43 @@ public sealed partial class DbfTable
         }
     }
 
+    // Whether a file (or folder) is there: true or false only when that's known. File.Exists and
+    // Directory.Exists also answer false when the look itself failed (access denied, a share gone),
+    // and acting on that could undo a decided change or take a staged file for installed; so any
+    // failure but "not there" throws, as a DbfException naming no path (it's in FilePath), and
+    // the step stops.
+    internal static bool FileThere(string file) => There(file, folder: false);
+
+    internal static bool FolderThere(string folder) => There(folder, folder: true);
+
+    /// <summary>For the tests: makes looking for a file fail (throw) where it returns true.</summary>
+    [ThreadStatic]
+    internal static Func<string, bool>? LookFails;
+
+    private static bool There(string path, bool folder)
+    {
+        try
+        {
+            if (LookFails?.Invoke(path) is true)
+                throw new UnauthorizedAccessException("Looking for the file failed.");
+            return File.GetAttributes(path).HasFlag(FileAttributes.Directory) == folder;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+        {
+            var known = DbfException.Translate(ex, path, FileAccess.Read);
+            throw new DbfException(known?.Code ?? DbfErrorCode.WriteFailed,
+                "Thunder.Dbf couldn't tell whether a file it needs beside the table is there, so it stopped rather than guess.",
+                known?.Hint ?? "Check that the folder can be read, then try again.", path, ex);
+        }
+    }
+
     // The change creates its lock; an open finishing one only ever takes a lock that's there, so it
     // never leaves one in a backup whose change has ended.
+
     private static FileStream HoldRestructure(string backup, bool create = false) =>
         new(Path.Combine(backup, RestructureLockName), create ? FileMode.CreateNew : FileMode.Open, FileAccess.ReadWrite, FileShare.None);
 
@@ -880,7 +940,7 @@ public sealed partial class DbfTable
     {
         try
         {
-            return File.Exists(Path.Combine(backup, RestructureCommitName));
+            return FileThere(Path.Combine(backup, RestructureCommitName));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -918,7 +978,7 @@ public sealed partial class DbfTable
         for (var attempt = 1; ; attempt++)
         {
             var candidate = attempt == 1 ? stem : $"{stem}-{attempt}";
-            if (!Directory.Exists(candidate) && !File.Exists(candidate))
+            if (!FolderThere(candidate) && !FileThere(candidate))
             {
                 Directory.CreateDirectory(candidate);
                 return candidate;
@@ -939,7 +999,7 @@ public sealed partial class DbfTable
         foreach (var name in new[] { manifest.Table, manifest.Memo, manifest.MemoOriginal, manifest.Index, manifest.IndexOriginal }.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var file = Path.Combine(folder, name);
-            if (File.Exists(file))
+            if (FileThere(file))
                 new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
         }
     }
@@ -949,15 +1009,15 @@ public sealed partial class DbfTable
     private static void MoveIntoPlace(string path, string ready, string backup, string name, string what)
     {
         var staged = Path.Combine(ready, name);
-        if (!File.Exists(staged))
+        if (!FileThere(staged))
             return; // moved in already
         RequireRealFile(staged);
         var destination = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, name);
-        if (File.Exists(destination))
+        if (FileThere(destination))
         {
             RequireRealFile(destination);
             var aside = Path.Combine(backup, name);
-            if (File.Exists(aside))
+            if (FileThere(aside))
                 throw new DbfException(DbfErrorCode.IncompleteTransaction,
                     "A change of this table's structure found an old file already in its backup, so it stopped rather than overwrite either.",
                     "Compare the file beside the table with the one in the change's .restructured- folder, keep the right one, and open the table exclusively again.",
@@ -981,7 +1041,7 @@ public sealed partial class DbfTable
         if (manifest.Memo is null && manifest.MemoOriginal is not null)
         {
             var unused = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, manifest.MemoOriginal);
-            if (File.Exists(unused))
+            if (FileThere(unused))
             {
                 RequireRealFile(unused);
                 File.Move(unused, Path.Combine(backup, manifest.MemoOriginal));
@@ -1000,13 +1060,13 @@ public sealed partial class DbfTable
         {
             var destination = Path.Combine(folder, name);
             var aside = Path.Combine(backup, name);
-            if (File.Exists(aside))
+            if (FileThere(aside))
             {
                 RequireRealFile(aside);
                 File.Move(aside, destination, overwrite: true);
                 RestructurePoint?.Invoke("put back");
             }
-            else if (!File.Exists(Path.Combine(ready, name)) && File.Exists(destination) && name != manifest.MemoOriginal
+            else if (!FileThere(Path.Combine(ready, name)) && FileThere(destination) && name != manifest.MemoOriginal
                      && name != manifest.IndexOriginal && !name.Equals(manifest.Table, StringComparison.OrdinalIgnoreCase))
             {
                 RequireRealFile(destination);
@@ -1041,7 +1101,7 @@ public sealed partial class DbfTable
     {
         try
         {
-            if (!Directory.Exists(folder))
+            if (!FolderThere(folder))
                 return;
             RequireRealFolder(folder);
             foreach (var file in Directory.GetFiles(folder))
@@ -1053,7 +1113,7 @@ public sealed partial class DbfTable
                 DeleteQuietly(inner);
             Directory.Delete(folder);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException { Code: DbfErrorCode.PathEscapesFolder })
         {
             // Nothing reads it; the next change or exclusive open tries again.
         }
@@ -1096,7 +1156,7 @@ public sealed partial class DbfTable
     {
         try
         {
-            if (!Directory.Exists(backup))
+            if (!FolderThere(backup))
                 return;
             RequireRealFolder(backup);
             if (Directory.EnumerateFileSystemEntries(backup).Any(e => !BookkeepingNames.Contains(Path.GetFileName(e), StringComparer.OrdinalIgnoreCase)))
@@ -1137,11 +1197,8 @@ public sealed partial class DbfTable
     {
         finished = null;
         var ready = path + RestructureReadySuffix;
-        if (!Directory.Exists(ready))
-        {
-            ClearLeftovers(path);
-            return true;
-        }
+        if (!FolderThere(ready))
+            return ClearLeftovers(path);
         RequireRealFolder(ready);
         var id = ReadRecord(Path.Combine(ready, RestructureIdName));
         if (id is null || !IsBackupName(id, path))
@@ -1152,23 +1209,23 @@ public sealed partial class DbfTable
         // Whoever holds the table, or the transaction's lock, has the change in hand.
         try
         {
-            if (File.Exists(path))
+            if (FileThere(path))
                 new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
-            if (!Directory.Exists(backup))
-                return !Directory.Exists(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id
+            if (!FolderThere(backup))
+                return !FolderThere(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id
                     ? false
                     : throw UnreadableRecord(path, ready);
             RequireRealFolder(backup);
             using var hold = HoldRestructure(backup);
             RestructurePoint?.Invoke("recovery locked");
             // The same transaction still? A paused open may have read about one that has since ended.
-            if (!Directory.Exists(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id)
+            if (!FolderThere(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id)
                 return false;
             var manifest = ReadRecord(Path.Combine(backup, RestructureManifestName)) is { } text ? RestructureManifest.Read(text, path) : null;
             if (manifest is null || !manifest.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
                 throw UnreadableRecord(path, ready);
 
-            if (File.Exists(Path.Combine(backup, RestructureCommitName)))
+            if (FileThere(Path.Combine(backup, RestructureCommitName)))
             {
                 RollForward(path, ready, backup, manifest);
                 Retire(path, ready);
@@ -1201,8 +1258,11 @@ public sealed partial class DbfTable
     // unshared from before its partial folder exists until after it's renamed ready, so the table
     // is held unshared here for the whole of it: when that fails, whatever is there belongs to
     // whoever holds the table, and is left alone; while it's held, no change can start.
-    private static void ClearLeftovers(string path)
+    // False when what it saw changed while it was taking the table (a change began, or the .dbf it
+    // holds is no longer the one at the path): the caller looks again from the start.
+    private static bool ClearLeftovers(string path)
     {
+        RestructurePoint?.Invoke("leftovers seen");
         FileStream held;
         try
         {
@@ -1210,10 +1270,18 @@ public sealed partial class DbfTable
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return; // missing, or in use: the open that follows says which
+            return true; // missing, or in use: the open that follows says which
         }
         using (held)
+        {
+            RestructurePoint?.Invoke("leftovers held");
+            // "No change under way" was seen before the table was held: a change may have started,
+            // staged and been cut off since, or renamed this very .dbf away. Never clear up on a stale look.
+            if (FolderThere(path + RestructureReadySuffix) || FileIdentity.Same(held, path) is false)
+                return false;
             ClearLeftoversHeld(path);
+        }
+        return true;
     }
 
     // Only ever called holding the table unshared: by ClearLeftovers, and by a change before it stages.
@@ -1225,7 +1293,7 @@ public sealed partial class DbfTable
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
         foreach (var backup in Directory.EnumerateDirectories(folder, Path.GetFileName(path) + RestructureBackupInfix + "*"))
         {
-            if (!BookkeepingNames.Any(n => File.Exists(Path.Combine(backup, n))))
+            if (!BookkeepingNames.Any(n => FileThere(Path.Combine(backup, n))))
                 continue;
             RequireRealFolder(backup);
             try
@@ -1242,7 +1310,7 @@ public sealed partial class DbfTable
             {
                 continue; // a change holds it: it clears up after itself
             }
-            if (File.Exists(Path.Combine(backup, RestructureCommitName)))
+            if (FileThere(Path.Combine(backup, RestructureCommitName)))
                 ClearBookkeeping(backup);
             else
                 DeleteAbandoned(backup);
@@ -1274,7 +1342,7 @@ public sealed partial class DbfTable
     // until an exclusive open has finished or undone it.
     private void ThrowIfRestructureUnfinished()
     {
-        if (_path is not null && Directory.Exists(_path + RestructureReadySuffix))
+        if (_path is not null && FolderThere(_path + RestructureReadySuffix))
             throw RestructureUnderWay(_path);
     }
 
