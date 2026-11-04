@@ -54,6 +54,10 @@ public sealed partial class MdxIndex : IDisposable
     /// <summary>Opens an .mdx file. Character keys decode with <paramref name="encoding"/> (Windows-1252 by default).</summary>
     public static MdxIndex Open(string path, Encoding? encoding = null)
     {
+        // A DELETE TAG cut off may have left the tag table torn: it isn't read until it's put back.
+        if (File.Exists(path + DropTagImageSuffix))
+            throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this .mdx was cut off, so its tag table may be torn and isn't read.",
+                "Open the table with writable: true, exclusive: true, which puts the tag table back as it was.", path);
         var stream = DbfException.OpenFile(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         try
         {

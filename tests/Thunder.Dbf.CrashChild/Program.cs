@@ -4,8 +4,9 @@
 //   | the marker   |              | structure, and at   |     A process the crash tests kill for real,
 //   |              | <- marker -- | the step named,     |     partway through a change of structure or
 //   | then kills   |              | writes the marker   |     through finishing one: no catch or finally
-//   | it           | -- kill ---> | and waits forever   |     runs, and the operating system lets go of
-//   +--------------+              +---------------------+     its files, as after a real crash.
+//   | it, or lets  | -- kill ---> | and waits, to be    |     runs, and the operating system lets go of
+//   | it go on     |              | killed or let go on |     its files, as after a real crash.
+//   +--------------+              +---------------------+
 //
 // Usage: Thunder.Dbf.CrashChild <widen|narrow|add-memo|recover> <table path> <step> <marker path>
 
@@ -17,7 +18,9 @@ DbfTable.RestructurePoint = point =>
     if (point != step)
         return;
     File.WriteAllText(marker, point);
-    Thread.Sleep(Timeout.Infinite);
+    // Waits there to be killed, or, when the test writes "<marker>.go", carries on.
+    while (!File.Exists(marker + ".go"))
+        Thread.Sleep(10);
 };
 
 using var table = DbfTable.Open(path, writable: true, exclusive: true, maintainFoxProIndexes: true);

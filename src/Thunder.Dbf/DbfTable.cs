@@ -160,6 +160,8 @@ public sealed partial class DbfTable : IDisposable
             {
                 try
                 {
+                    if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } cutOffIndex)
+                        MdxIndex.RestoreDropTag(cutOffIndex, exclusive); // a DELETE TAG cut off, before the tag table is read
                     if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is { } indexPath)
                         table.AttachIndex(DbfException.OpenFile(indexPath, FileMode.Open, FileAccess.ReadWrite, share, bufferSize: 0)); // read a block at a time, as other programs left it
                     table._journalPending = DbfJournal.IsPending(path);
@@ -204,13 +206,24 @@ public sealed partial class DbfTable : IDisposable
                 throw new DbfException(DbfErrorCode.IncompleteTransaction, "The table's .dbf is being swapped for one with a new structure.",
                     "Wait a moment and try again; if it persists, open the table with writable: true, exclusive: true, which finishes the change.", path, ex);
             }
-            RestructurePoint?.Invoke("table file opened");
-            if (writable && Directory.Exists(path + RestructureReadySuffix))
+            bool? same;
+            try
+            {
+                RestructurePoint?.Invoke("table file opened");
+                if (writable && Directory.Exists(path + RestructureReadySuffix))
+                    throw RestructureUnderWay(path);
+                // By device and inode where those can be read; elsewhere there's no check (see FileIdentity).
+                same = FileIdentity.Same(stream, path);
+            }
+            catch (Exception ex)
             {
                 stream.Dispose();
-                throw RestructureUnderWay(path);
+                if (ex is DbfException)
+                    throw;
+                throw DbfException.Translate(ex, path, access) ?? new DbfException(DbfErrorCode.WriteFailed,
+                    "The table's .dbf was opened, but checking it was the file at its path failed.", "Try again; if it persists, check the folder's permissions.", path, ex);
             }
-            if (IsFileAtPath(stream, path))
+            if (same is not false)
                 return stream;
             stream.Dispose();
             // Three tries: a swap finishes between two of them. One that never settles is refused,

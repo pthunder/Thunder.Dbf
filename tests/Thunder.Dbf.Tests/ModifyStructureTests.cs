@@ -924,9 +924,11 @@ public sealed class ModifyStructureTests : IDisposable
         Assert.True(NameTreeFinds(mdx, "A"));
         Assert.True(NameTreeFinds(mdx, "C"));
         Assert.False(NameTreeFinds(mdx, "B"));
+        // Cut off, the drop is undone by the next exclusive open, from the before-image beside the .mdx.
         using var reopened = Open(path);
         using var index = reopened.OpenProductionIndex()!;
-        Assert.Equal(["A", "C"], index.Tags.Select(t => t.Name));
+        Assert.Equal(killedAfter is null ? ["A", "C"] : ["B", "A", "C"], index.Tags.Select(t => t.Name));
+        Assert.False(File.Exists(MdxIndex.FindFor(path)! + ".droptag"));
     }
 
     [Theory]
