@@ -133,10 +133,13 @@ public sealed partial class MdxIndex : IDisposable
             throw new InvalidDataException($"The .mdx header claims {tagCount} tags of {entryLength} bytes, more than its 2,048-byte header holds.");
 
         var tags = new List<MdxTag>(tagCount);
+        var seen = new HashSet<int>();
         for (var i = 0; i < tagCount; i++)
         {
             var entry = header.AsSpan(TagTableOffset + entryLength * i, entryLength);
             var headerPage = BinaryPrimitives.ReadInt32LittleEndian(entry);
+            if (!seen.Add(headerPage))
+                continue; // a DELETE TAG cut off between moving the entries down and the count: one tag, listed twice
             var nameBytes = entry[4..15];
             var nul = nameBytes.IndexOf((byte)0);
             var name = Encoding.ASCII.GetString(nul >= 0 ? nameBytes[..nul] : nameBytes).TrimEnd();

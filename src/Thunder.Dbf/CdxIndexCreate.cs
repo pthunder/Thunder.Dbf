@@ -166,6 +166,30 @@ public sealed partial class CdxIndex
     }
 
     /// <summary>
+    /// Takes a tag out of this structural .cdx, like Visual FoxPro's <c>DELETE TAG</c>: its name leaves
+    /// the tag directory first, so from that write on nobody sees it, and only then do its header and
+    /// tree pages go on the free list, for FoxPro to reuse. A crash in between leaves unused pages.
+    /// </summary>
+    internal void DropTag(CdxTag tag)
+    {
+        var pages = tag.Pages(); // read while the tag is still listed
+        var directory = CdxTag.LoadDirectory(this);
+        var nameKey = new byte[CdxTag.TagNameLength];
+        nameKey.AsSpan().Fill((byte)' ');
+        System.Text.Encoding.ASCII.GetBytes(tag.Name.ToUpperInvariant(), nameKey);
+        if (!Update(directory, () => directory.Remove(nameKey, checked((int)tag.HeaderOffset))))
+            throw new InvalidDataException($"The tag directory doesn't list tag {tag.Name} where its header is.");
+        Commit();
+
+        foreach (var page in pages.Append(tag.HeaderOffset).Append(tag.HeaderOffset + DefaultPageLength))
+            FreePage(page);
+        Commit();
+
+        Tags = LoadTags();
+        _ourState = null; // the next write prepares the remaining tags afresh
+    }
+
+    /// <summary>
     /// The key length Visual FoxPro gives an expression: 4 for a bare integer field, 8 for numbers,
     /// dates, datetimes and currency, 1 for logicals, and the text's width for character keys (one more
     /// over a nullable field, for VFP's null marker byte).

@@ -61,6 +61,7 @@ public sealed partial class DbfTable
         using var tableLock = Locks.Table();
         Refresh();
         ThrowIfPackUnfinished();
+        ThrowIfRestructureUnfinished();
         if (Header.HasIncompleteTransaction)
             throw WriteBlocker(Header, allowUnmaintainedIndexes: true, indexMaintained: true, _path)!;
 
@@ -153,6 +154,7 @@ public sealed partial class DbfTable
         {
             Refresh();
             ThrowIfPackUnfinished();
+            ThrowIfRestructureUnfinished();
             ReplayJournal(); // a cut-off write's note is finished before the index grows
 
             var existing = StructuralCdx();
@@ -267,6 +269,47 @@ public sealed partial class DbfTable
         }
         Header.MarkProductionMdx();
         CommitHeader();
+    }
+
+    /// <summary>
+    /// Removes a tag from the production .mdx, or from the structural .cdx of a FoxPro or Visual FoxPro
+    /// table, like dBASE's and Visual FoxPro's <c>DELETE TAG name</c>. The index file stays, with its
+    /// other tags, even when it was the last one.
+    /// </summary>
+    /// <remarks>
+    /// Needs the table opened exclusively, as <see cref="CreateIndexTag(string, string, string?, bool, bool)"/> does:
+    /// a program that had the index open would go on keeping a tag that's gone. On a FoxPro table it needs
+    /// <c>maintainFoxProIndexes</c>, so the .cdx is one this table keeps.
+    /// </remarks>
+    /// <exception cref="DbfException">The index has no such tag (<see cref="DbfErrorCode.InvalidValue"/>), or the table can't be written.</exception>
+    public void DropIndexTag(string name)
+    {
+        using var forced = ForceEveryWrite();
+        DropIndexTagCore(name);
+    }
+
+    private void DropIndexTagCore(string name)
+    {
+        EnsureWritable();
+        ArgumentNullException.ThrowIfNull(name);
+        RequireExclusive("DELETE TAG");
+        using var tableLock = Locks.Table();
+        PrepareWrite(appending: false); // an unfinished pack or journal note comes first
+
+        bool Named(IDbfIndexTag tag) => tag.Name.Equals(name.Trim(), StringComparison.OrdinalIgnoreCase);
+        if (_index?.Tags.FirstOrDefault(Named) is { } mdxTag)
+        {
+            _index.DropTag(mdxTag);
+            return;
+        }
+        if (_path is not null && (Header.IsFoxPro || Header.IsFoxProByCompanion) && Header.HasStructuralCdx
+            && StructuralCdx()?.Tags.FirstOrDefault(Named) is { } cdxTag)
+        {
+            StructuralCdx()!.DropTag(cdxTag);
+            return;
+        }
+        throw new DbfException(DbfErrorCode.InvalidValue, $"The table's index has no tag named {name.Trim()}.",
+            "Check the name against the index's Tags.", _path);
     }
 
     private static string ValidTagName(string name)

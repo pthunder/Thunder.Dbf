@@ -125,6 +125,44 @@ public sealed partial class MdxIndex
         ReloadTags();
     }
 
+    /// <summary>
+    /// Takes a tag out of the tag table, like dBASE's <c>DELETE TAG</c>. The entries after it move down a
+    /// slot in one write (whole 32-byte entries, so a torn write leaves each slot old or new), which
+    /// leaves the last tag listed twice until the smaller count follows; <see cref="LoadTags"/> reads one
+    /// tag per header block, so meanwhile it's still one tag. Then the name tree is rebuilt over the
+    /// rest. The tag's blocks are left unused, never freed: nothing points at them any more.
+    /// </summary>
+    internal void DropTag(MdxTag tag)
+    {
+        ThrowIfDeferring();
+        var headerArea = ReadHeaderArea(_stream);
+        var entryLength = headerArea[26] == 0 ? 32 : headerArea[26];
+        var count = Tags.Count;
+        var at = Tags.ToList().FindIndex(t => t.HeaderPage == tag.HeaderPage);
+        if (at < 0)
+            throw new InvalidOperationException($"The index has no tag named {tag.Name}.");
+
+        if (at < count - 1)
+        {
+            _stream.Position = TagTableOffset + (long)entryLength * at;
+            _stream.Write(headerArea.AsSpan(TagTableOffset + entryLength * (at + 1), entryLength * (count - at - 1)));
+            DbfTable.FlushToDisk(_stream);
+        }
+
+        _stream.Position = 28;
+        Span<byte> tagCount = stackalloc byte[2];
+        BinaryPrimitives.WriteUInt16LittleEndian(tagCount, (ushort)(count - 1));
+        _stream.Write(tagCount);
+        DbfTable.FlushToDisk(_stream);
+
+        // The slot past the new count is cleared, as dBASE leaves unused slots.
+        _stream.Position = TagTableOffset + (long)entryLength * (count - 1);
+        _stream.Write(new byte[entryLength]);
+        WriteNameTree(Tags.Where(t => t.HeaderPage != tag.HeaderPage).Select(t => t.Name).ToList(), entryLength);
+        DbfTable.FlushToDisk(_stream);
+        ReloadTags();
+    }
+
     // Rebuilds the left / right / parent slots (1-based, 0 = none) as a binary search tree over the
     // tag names, inserted in table order: the same tree dBASE IV builds.
     private void WriteNameTree(IReadOnlyList<string> names, int entryLength)

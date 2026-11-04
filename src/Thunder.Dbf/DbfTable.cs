@@ -114,8 +114,9 @@ public sealed partial class DbfTable : IDisposable
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
     /// <param name="exclusive">Open the .dbf so no other program can open it, like dBASE and FoxPro's
     /// <c>USE ... EXCLUSIVE</c>; fails with <see cref="DbfErrorCode.FileInUse"/> while another program has it
-    /// open. <see cref="Pack"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/> and
-    /// <c>MaintainIndex(path, rebuild: true)</c> need it.</param>
+    /// open. <see cref="Pack"/>, <see cref="ModifyStructure"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/>,
+    /// <see cref="DropIndexTag"/> and <c>MaintainIndex(path, rebuild: true)</c> need it. A change of structure cut off
+    /// partway is finished, or undone, by an open that's both writable and exclusive.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,
         bool allowUnmaintainedIndexes = false, bool maintainFoxProIndexes = false, bool exclusive = false)
         => OpenPath(path, writable, encoding, ignoreMissingMemo, allowUnmaintainedIndexes, maintainFoxProIndexes, exclusive);
@@ -138,6 +139,8 @@ public sealed partial class DbfTable : IDisposable
         {
             stream.Position = 0;
             var header = ReadHeader(stream, encoding: null, path);
+            // A change of structure cut off partway is finished or undone before the memo and index are opened.
+            var restructureBackup = writable && exclusive ? FinishRestructure(path, header) : null;
             if (header.Fields.Any(DbfValueCodec.IsMemoField) && DbfMemoFile.FindFor(path, header) is { } memoPath)
                 memoStream = DbfException.OpenFile(memoPath, FileMode.Open, access, share);
 
@@ -146,6 +149,7 @@ public sealed partial class DbfTable : IDisposable
                 memoStream, ignoreMissingMemo, allowUnmaintainedIndexes);
             table._path = path;
             table._exclusive = exclusive;
+            table.StructureBackupPath = restructureBackup;
             table._maintainFoxProIndexes = maintainFoxProIndexes;
             if (table.Header.HasProductionMdx && MdxIndex.FindFor(path) is null && FindCompanion(path, ".cdx") is { } cdx
                 && IsIndexOver(cdx, table.Header))
@@ -815,7 +819,10 @@ public sealed partial class DbfTable : IDisposable
         try
         {
             if (lookInFolder)
+            {
                 ThrowIfPackUnfinished();
+                ThrowIfRestructureUnfinished();
+            }
             ThrowIfIndexesNeedRebuild();
             if (lookInFolder)
                 ThrowIfIndexAppeared();
@@ -1507,6 +1514,9 @@ public sealed partial class DbfTable : IDisposable
 
     private void DisposeFiles()
     {
+        if (_filesClosed)
+            return; // ModifyStructure closed them before swapping the new files in
+        _filesClosed = true;
         _folderWatcher?.Dispose();
         _memo?.Dispose();
         _index?.Dispose();
@@ -1519,6 +1529,8 @@ public sealed partial class DbfTable : IDisposable
         else
             _stream.Dispose();
     }
+
+    private bool _filesClosed;
 
     private DbfRecord Decode(int index, byte[] record)
     {

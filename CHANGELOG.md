@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+- **Changing a table's structure:** `table.ModifyStructure(fields)`, like dBASE's and FoxPro's `MODIFY STRUCTURE`, adds, drops, renames, widens, narrows and retypes fields in all four formats, with `AddField`, `DropField` and `AlterField` for one field and `FieldDefinitions` to start from. It writes a new table beside the old one, carries every record across (deleted ones still deleted, in the same order) with values converted where the types allow, copies the memo file whole, rebuilds the `.mdx` or `.cdx` with the same tags, and only then swaps the new files in, keeping the old ones in `NAME.DBF.restructured-<time>` (`StructureBackupPath`). A change that would lose a value is refused unless `allowLoss: true`; a tag over a dropped or renamed field is refused. Visual FoxPro nulls, autoincrement counters and binary (NOCPTRANS) fields carry across, and tables in a database container are refused. Killed partway, the next exclusive open puts the old table back if the new `.dbf` wasn't in place yet, and finishes the change if it was. It returns the reopened table and closes the one it was called on. It rewrites the whole table, so it takes time and disk space in proportion to it (figures in [Reading and writing](docs/reading-and-writing.md#it-rewrites-the-whole-table)).
+- **`DropIndexTag(name)`,** like `DELETE TAG`, takes a tag out of the production `.mdx` or a FoxPro table's structural `.cdx`; a `.cdx` tag's pages go on the free list for FoxPro to reuse. An `.mdx` tag table cut off midway through it still lists each tag once.
+- `DbfFieldDefinition.Binary` creates Visual FoxPro character and memo fields marked NOCPTRANS.
+
 ## [0.3.1] - 2026-11-03
 
 A fix for the first thing a new user of 0.3.0's Visual FoxPro tables hit, and the web service's sign-in packages on one version. Nothing in the public API changed; code compiled against 0.3.0 runs unchanged.

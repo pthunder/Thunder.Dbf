@@ -211,6 +211,14 @@ internal abstract class DbfMemoFile : IDisposable
 
     public void FlushToDisk(bool toDisk = true) => DbfTable.FlushToDisk(Stream, toDisk);
 
+    /// <summary>Copies the whole file, block numbers and all, so every pointer into it still holds in the copy.</summary>
+    public void CopyTo(Stream destination)
+    {
+        DbfTable.DiscardReadBuffer(Stream);
+        Stream.Position = 0;
+        Stream.CopyTo(destination);
+    }
+
     public void Dispose()
     {
         if (!_leaveOpen)

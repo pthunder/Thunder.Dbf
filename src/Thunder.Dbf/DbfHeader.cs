@@ -69,6 +69,8 @@ public sealed record DbfFieldDefinition(string Name, char Type, int Length, int 
     public int AutoIncrementNext { get; init; } = 1;
     /// <summary>How much an autoincrement field adds each time, 1-255.</summary>
     public int AutoIncrementStep { get; init; } = 1;
+    /// <summary>Visual FoxPro: a character or memo field that holds bytes, not text (NOCPTRANS), so no code page conversion applies.</summary>
+    public bool Binary { get; init; }
 
     /// <summary>A character (C) field of <paramref name="length"/> characters.</summary>
     public static DbfFieldDefinition Character(string name, int length) => new(name, 'C', length);
@@ -194,6 +196,12 @@ public sealed class DbfHeader
     internal bool IsFoxProByCompanion => _indexFlagMeansCdx;
 
     internal void TreatIndexFlagAsCdx() => _indexFlagMeansCdx = true;
+
+    /// <summary>Visual FoxPro: byte 28's bit 2 says the table belongs to a database container (.dbc).</summary>
+    internal bool BelongsToDatabase => IsVisualFoxPro && (_fixed[28] & 0x04) != 0;
+
+    /// <summary>The bytes Visual FoxPro keeps after the field descriptors for the path of the table's .dbc.</summary>
+    internal const int BacklinkSize = VisualFoxProBacklinkSize;
 
     /// <summary>dBASE IV: byte 15 says the table was encrypted with PROTECT. Its records are scrambled.</summary>
     public bool IsEncrypted => !IsVisualFoxPro && _fixed[15] == 0x01;
@@ -369,7 +377,7 @@ public sealed class DbfHeader
             // Visual FoxPro keeps memo pointers in four binary bytes; the others in ten digits.
             var length = visualFoxPro && type == 'M' ? 4 : def.Length;
             // Visual FoxPro marks its binary types (I, Y, B, T) binary, the flag it also uses for NOCPTRANS text.
-            var binary = visualFoxPro && type is 'I' or 'Y' or 'B' or 'T';
+            var binary = (visualFoxPro && type is 'I' or 'Y' or 'B' or 'T') || def.Binary;
             var flags = (byte)((def.Nullable ? 0x02 : 0) | (binary ? 0x04 : 0) | (def.AutoIncrement ? 0x08 : 0));
             fields.Add(new DbfField(def.Name, type, length, def.DecimalCount, offset)
             {
@@ -515,8 +523,10 @@ public sealed class DbfHeader
                 break;
         }
 
-        if (!visualFoxPro && (def.Nullable || def.AutoIncrement))
-            throw new ArgumentException($"Field '{def.Name}': nullable and autoincrement fields need a Visual FoxPro table (DbfTableFormat.VisualFoxPro).");
+        if (!visualFoxPro && (def.Nullable || def.AutoIncrement || def.Binary))
+            throw new ArgumentException($"Field '{def.Name}': nullable, autoincrement and binary fields need a Visual FoxPro table (DbfTableFormat.VisualFoxPro).");
+        if (def.Binary && type is not ('C' or 'M'))
+            throw new ArgumentException($"Field '{def.Name}': only character and memo fields can be binary (NOCPTRANS).");
         if (def.AutoIncrement)
         {
             if (def.Nullable)
