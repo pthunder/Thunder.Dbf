@@ -150,34 +150,7 @@ public sealed class MdxInPlaceTests : IDisposable
     [InlineData("interior node too")]
     public void A_split_cut_off_after_any_write_keeps_every_old_key(string shape)
     {
-        using var file = OpenIndex(descending: false, ["K0000"]);
-        var names = new List<string> { "K0000" };
-        using (var index = MdxIndex.Open(file, leaveOpen: true))
-        {
-            var tag = index["NAME"];
-            int Count(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page));
-            int Last(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page).AsSpan(8 + Count(page) * tag.ItemLength));
-            bool Ready()
-            {
-                var root = RootPage(index, tag);
-                if (Last(root) == 0)
-                    return shape == "root leaf" && Count(root) == tag.MaxKeys;
-                var leaf = root;
-                while (Last(leaf) != 0)
-                    leaf = Last(leaf);
-                var full = Count(leaf) == tag.MaxKeys;
-                return shape == "leaf under an interior root" ? full && Last(Last(root)) == 0 : full && Count(root) == tag.MaxKeys && Last(Last(root)) == 0;
-            }
-            while (!Ready()) // keys in order fill the last leaf; each split adds a pointer to its parent
-            {
-                var name = $"K{names.Count:D4}";
-                tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, name, tag.Name, tag.Expression), names.Count + 1);
-                names.Add(name);
-            }
-        }
-        var before = new byte[file.Length];
-        file.Position = 0;
-        file.ReadExactly(before);
+        var (before, names) = SplitReady(shape);
 
         var reported = 0;
         for (var allowed = 0; ; allowed++)
@@ -215,6 +188,126 @@ public sealed class MdxInPlaceTests : IDisposable
             }
         }
         Assert.True(shape == "interior node too" || reported == 0);
+    }
+
+    // A tag one insert away from the split the shape names: keys in order fill the last leaf, and each
+    // split adds a pointer to its parent. Returns the .mdx bytes and the keys already in the tag.
+    private (byte[] Bytes, List<string> Names) SplitReady(string shape)
+    {
+        using var file = OpenIndex(descending: false, ["K0000"]);
+        var names = new List<string> { "K0000" };
+        using (var index = MdxIndex.Open(file, leaveOpen: true))
+        {
+            var tag = index["NAME"];
+            int Count(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page));
+            int Last(int page) => BinaryPrimitives.ReadInt32LittleEndian(index.ReadBlock(page).AsSpan(8 + Count(page) * tag.ItemLength));
+            bool Ready()
+            {
+                var root = RootPage(index, tag);
+                if (Last(root) == 0)
+                    return shape == "root leaf" && Count(root) == tag.MaxKeys;
+                var leaf = root;
+                while (Last(leaf) != 0)
+                    leaf = Last(leaf);
+                var full = Count(leaf) == tag.MaxKeys;
+                return shape == "leaf under an interior root" ? full && Last(Last(root)) == 0 : full && Count(root) == tag.MaxKeys && Last(Last(root)) == 0;
+            }
+            while (!Ready()) // keys in order fill the last leaf; each split adds a pointer to its parent
+            {
+                var name = $"K{names.Count:D4}";
+                tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, name, tag.Name, tag.Expression), names.Count + 1);
+                names.Add(name);
+            }
+        }
+        var before = new byte[file.Length];
+        file.Position = 0;
+        file.ReadExactly(before);
+        return (before, names);
+
+    }
+
+    // A power cut keeps every write up to the last flush, and any of the ones after it, in any mix: a disk
+    // may put them down in another order. The insert's writes and flushes are recorded once; for every
+    // point the power could go, every mix of the unflushed writes is replayed onto the file as it was.
+    // Each must still find every old key (or, mid interior split, report the index damaged), as the
+    // killed-writer test asks. Without the flushes a mix holding only the shortened leaf loses keys.
+    [Theory]
+    [InlineData("root leaf")]
+    [InlineData("leaf under an interior root")]
+    [InlineData("interior node too")]
+    public void A_split_cut_by_power_keeps_every_old_key_when_writes_are_forced(string shape)
+    {
+        var (before, names) = SplitReady(shape);
+        using var recording = new RecordingStream(before);
+        using (var index = MdxIndex.Open(recording, leaveOpen: true))
+        {
+            index.ForcesWrites = () => true;
+            var tag = index["NAME"];
+            tag.Insert(MdxTag.EncodeKey(tag.KeyType, tag.KeyLength, index.Encoding, "K9999", tag.Name, tag.Expression), 99_999);
+        }
+        var steps = recording.Steps;
+        Assert.Contains(steps, s => s.Barrier);
+
+        for (var cut = 0; cut <= steps.Count; cut++)
+        {
+            var lastBarrier = cut == 0 ? -1 : steps.FindLastIndex(cut - 1, cut, s => s.Barrier);
+            var kept = steps.Take(lastBarrier + 1).Where(s => !s.Barrier).ToList();
+            var loose = steps.Skip(lastBarrier + 1).Take(cut - lastBarrier - 1).Where(s => !s.Barrier).ToList();
+            Assert.True(loose.Count <= 12, $"{shape}: {loose.Count} unflushed writes at once");
+            for (var mix = 0; mix < 1 << loose.Count; mix++)
+            {
+                var bytes = (byte[])before.Clone();
+                foreach (var step in kept.Concat(loose.Where((_, i) => (mix & (1 << i)) != 0)))
+                {
+                    if (bytes.Length < step.Offset + step.Bytes.Length)
+                        Array.Resize(ref bytes, (int)step.Offset + step.Bytes.Length);
+                    step.Bytes.CopyTo(bytes, step.Offset);
+                }
+                using var reopened = MdxIndex.Open(new MemoryStream(bytes));
+                var check = reopened["NAME"];
+                HashSet<string> scanned;
+                try
+                {
+                    scanned = check.Entries().Select(e => ((string)e.Key!).TrimEnd()).ToHashSet();
+                }
+                catch (InvalidDataException) when (shape == "interior node too")
+                {
+                    continue; // reported, not silently short
+                }
+                foreach (var name in names)
+                    Assert.True(scanned.Contains(name), $"{shape}: {name} missing after a power cut at step {cut}, writes kept {mix}");
+            }
+        }
+    }
+
+    // A file in memory that records each write (where and what) and each flush, in order.
+    private sealed class RecordingStream : MemoryStream
+    {
+        private bool _loading = true;
+
+        public RecordingStream(byte[] bytes)
+        {
+            Write(bytes, 0, bytes.Length);
+            Position = 0;
+            _loading = false;
+        }
+
+        public List<(long Offset, byte[] Bytes, bool Barrier)> Steps { get; } = [];
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            if (!_loading)
+                Steps.Add((Position, buffer.AsSpan(offset, count).ToArray(), false));
+            base.Write(buffer, offset, count);
+        }
+
+        public override void Write(ReadOnlySpan<byte> buffer) => Write(buffer.ToArray(), 0, buffer.Length);
+
+        public override void Flush()
+        {
+            Steps.Add((0, [], true));
+            base.Flush();
+        }
     }
 
     // A file in memory whose writes stop after a given number, the way a killed writer's do.
