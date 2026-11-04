@@ -549,6 +549,7 @@ public sealed partial class DbfTable : IDisposable
         try
         {
             _index = MdxIndex.Open(indexStream, Encoding, leaveOpen);
+            _index.ForcesWrites = () => ForcesWrites;
         }
         catch (InvalidDataException ex)
         {

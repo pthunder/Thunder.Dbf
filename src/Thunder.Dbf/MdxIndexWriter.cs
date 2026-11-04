@@ -110,6 +110,19 @@ public sealed partial class MdxIndex
         }
     }
 
+    /// <summary>
+    /// Whether the table forces writes to disk (FlushWritesToDisk, or a step that always does), asked at
+    /// each split; null for an index opened on its own, which never forces.
+    /// </summary>
+    internal Func<bool>? ForcesWrites { get; set; }
+
+    /// <summary>Forces what's written so far to disk before a write that depends on it, when the table forces writes.</summary>
+    internal void Barrier()
+    {
+        if (_batch is null && ForcesWrites?.Invoke() == true)
+            DbfTable.FlushToDisk(_stream, toDisk: true);
+    }
+
     /// <summary>The file's length, counting what a batch has added but not yet written.</summary>
     private long Length => _batch?.Length ?? _stream.Length;
 
@@ -478,14 +491,25 @@ public sealed partial class MdxTag
         return block;
     }
 
+    // With writes forced, each step is on disk before the next one depends on it, so a power cut keeps
+    // the order a killed process does: a disk may otherwise put a shortened node down before the parent
+    // that points past it. A batch writes everything at its end, in its own order, so needs none.
     private void Publish(List<(int Page, byte[] Block)> fresh, List<(int Page, byte[] Block)> changed, int? newRoot)
     {
         foreach (var (page, block) in fresh)
             _index.WriteBlock(page, block);
+        _index.Barrier();
         if (newRoot is { } root)
+        {
             SetRoot(root);
+            _index.Barrier();
+        }
         for (var i = changed.Count - 1; i >= 0; i--)
+        {
             _index.WriteBlock(changed[i].Page, changed[i].Block);
+            if (i > 0)
+                _index.Barrier();
+        }
     }
 
     // ---- remove ---------------------------------------------------------------------------
