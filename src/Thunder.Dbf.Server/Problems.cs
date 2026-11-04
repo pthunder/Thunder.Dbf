@@ -75,8 +75,9 @@ public static class Problems
 }
 
 /// <summary>
-/// Takes paths and account names out of text before it reaches a client. Library messages are written
-/// for the person at the server, so they name files and accounts; web clients get the gist instead.
+/// Takes paths and account names out of text before it reaches a client. Library messages never hold
+/// them (they go in FilePath and Diagnostic, for the log); this is a second line of defense, for any
+/// message that does.
 /// </summary>
 public sealed partial class Scrubber
 {

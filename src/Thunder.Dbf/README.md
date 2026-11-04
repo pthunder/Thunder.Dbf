@@ -34,12 +34,12 @@ var acme = contacts.Seek(index["CONTCOMP"], "ACME");            // like dBASE's 
 
 - **Tables:** dBASE III and IV, FoxPro 2 and Visual FoxPro, including nulls, autoincrement and over 60 code pages.
 - **Memos:** `.dbt` and `.fpt`.
-- **Indexes:** dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` read and kept exact on every write; FoxPro `.cdx`/`.idx` read and seek, and kept up to date as an opt-in preview. `INDEX ON` for `.mdx`, and `PACK`.
+- **Indexes:** dBASE IV `.mdx`, dBASE III `.ndx` and Clipper `.ntx` read and kept exact on every write; FoxPro `.cdx`/`.idx` read and seek, and kept up to date as an opt-in preview. `INDEX ON` for `.mdx` (and `.cdx`, in the preview), `PACK`, and `MODIFY STRUCTURE` (preview).
 - **Typed records and LINQ:** `ReadAll<T>()`, `AsQueryable<T>()` with seeks through `.mdx` tags.
-- **Locking:** record and table locks at dBASE, Clipper or Visual FoxPro offsets, so writes coexist with the legacy app.
+- **Locking:** record and table locks at dBASE, Clipper, Visual FoxPro or Jet (Access reading) offsets, so writes coexist with the legacy app.
 - **ADO.NET provider:** `DbfConnection`, `DbfCommand` and `DbfDataReader` with parameterized SQL.
 - **CSV:** import with the table's shape worked out from the data, and spreadsheet-safe export.
-- **Safe by default:** read-only unless you ask, errors that never leak paths, and hostile files that can't crash or hang the process.
+- **Safe by default:** read-only unless you ask, errors that never leak paths, and damaged files that fail with an explained error, not a crash (fuzzed with 100,000 corrupted files).
 
 ## Learn more
 

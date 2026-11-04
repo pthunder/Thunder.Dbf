@@ -86,8 +86,8 @@ The web service is an app, not a library, so it isn't a NuGet package. Each zip 
 
 ### Steps
 
-1. On a branch, bump `<Version>` in `Directory.Build.props` (the one place the version lives).
-2. In `CHANGELOG.md`, turn `## [X.Y.Z] - Unreleased` into `## [X.Y.Z] - YYYY-MM-DD`. That section becomes the release notes.
+1. On a branch, bump `<Version>` in `Directory.Build.props` (the one place the build reads the version from), and the "Current version" line in `llms.txt`.
+2. In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD` and start a new empty `## [Unreleased]` above it. The dated section becomes the release notes.
 3. Merge it through a pull request as usual, with CI green.
 4. Tag the merge commit on `main` and push the tag:
 
@@ -133,9 +133,9 @@ If a release fails before the nuget.org step, fix the problem, delete the tag (`
 
 No `NUGET_API_KEY` secret is needed. If trusted publishing is ever unavailable, the fallback is a scoped API key (push only, `Thunder.Dbf*` and `thunder-dbf` globs, short expiry) stored as an environment secret on `nuget` and passed to `dotnet nuget push` in place of the login step's output.
 
-## One-time GitHub settings (repository owner)
+## One-time GitHub settings (check they're on)
 
-These live in **Settings**, not in the repository, so they're listed here to switch on when the repository goes public:
+These live in **Settings**, not in the repository, so they're listed here to check:
 
 - **Security → Private vulnerability reporting:** on.
 - **Security → Secret scanning** and **Push protection:** on.
@@ -153,9 +153,9 @@ These live in **Settings**, not in the repository, so they're listed here to swi
   The topics and `llms.txt` are how people and AI assistants find the project.
 - **Account:** two-factor authentication for everyone with write access.
 
-## Publishing for the first time
+## Publishing for the first time (historical)
 
-Making the repository public publishes its whole history, so before you press the button:
+The repository is already public. This is the checklist that was followed before it went public, kept for reference. Making a repository public publishes its whole history, so before pressing the button:
 
 1. `scripts/editorial-check.sh`: today's files are clean.
 2. `scripts/history-check.sh`: every past commit is clean too. If it isn't, rewrite history (`git filter-repo`) before going public.

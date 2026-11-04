@@ -141,7 +141,7 @@ public sealed class TypedRecordTests : IDisposable
         Assert.DoesNotContain(reopened.AsQueryable<Change>().ToList(), c => c.Recno == 1);
     }
 
-    // ---- cases where a seek could disagree with a scan (from the Codex review) ---------------
+    // ---- cases where a seek could disagree with a scan (from an automated review) ------------
 
     public sealed class Narrow
     {

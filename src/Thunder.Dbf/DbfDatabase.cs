@@ -35,7 +35,8 @@ public sealed record DbfDatabaseOptions
 
     /// <summary>
     /// Preview: keep FoxPro and Visual FoxPro .cdx and .idx indexes up to date on writes. Off by default
-    /// until it has been checked against Visual FoxPro itself; without it, FoxPro tables with a .cdx refuse writes.
+    /// while it's a preview, which ends once the Visual FoxPro round-trip test (see docs/testing.md) passes;
+    /// without it, FoxPro tables with a .cdx refuse writes.
     /// </summary>
     public bool MaintainFoxProIndexes { get; init; }
 
@@ -51,7 +52,10 @@ public sealed record DbfDatabaseOptions
     /// <summary>Force each write through to the disk before the next step (see DbfTable.FlushWritesToDisk). On by default.</summary>
     public bool FlushWritesToDisk { get; init; } = true;
 
-    /// <summary>Whose lock positions writes use: dBASE, Clipper or Visual FoxPro. Auto picks per table.</summary>
+    /// <summary>
+    /// Whose lock positions writes use: dBASE, Clipper, Visual FoxPro, or Jet (Access reading). Auto
+    /// picks per table.
+    /// </summary>
     public DbfLockScheme LockScheme { get; init; } = DbfLockScheme.Auto;
 }
 

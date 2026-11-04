@@ -41,7 +41,10 @@ public enum DbfErrorCode
     /// <summary>dBASE IV encrypted the table; its records are unreadable without dBASE's PROTECT key.</summary>
     EncryptedTable,
 
-    /// <summary>dBASE IV marked a transaction as unfinished; writing on top could corrupt it further.</summary>
+    /// <summary>
+    /// An unfinished transaction: dBASE IV's BEGIN TRANSACTION, or a PACK, change of structure or
+    /// DELETE TAG that was cut off or is under way. Writing on top could corrupt it further.
+    /// </summary>
     IncompleteTransaction,
 
     /// <summary>The table has memo fields but its .dbt or .fpt file is missing.</summary>

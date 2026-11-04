@@ -380,7 +380,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     // header lock (VFP appends under it, record, count and keys together) and the index lock, the
     // update counter and the record count must be what they were before the walk; otherwise
     // another program changed something meanwhile. On a table that's never quiet that could go on
-    // for ever, so after two such tries the walk itself runs under both locks: other users wait
+    // forever, so after two such tries the walk itself runs under both locks: other users wait
     // for it, as they wait for any write. Keys out of step with the table get a moment to settle.
     private void Check()
     {

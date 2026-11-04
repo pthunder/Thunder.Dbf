@@ -32,7 +32,7 @@ Reads are: a Seek through a `.cdx` tag answers in microseconds, and reading a wh
 No. It's pure .NET, 64-bit, on Windows, Linux and macOS, with no bundled native library. On Linux and macOS it calls the C library's `stat` and `fstat` directly (always present there), to tell whether a table's file was swapped while it was being opened.
 
 **Can I use it in a mobile app?**
-Yes: the core package is trim- and AOT-compatible, so it can go into a .NET MAUI app on iOS or Android, and CI checks it with Native AOT on every change. Use anything but `AsQueryable<T>()`, keep tables in the app's own folder, and remember they go when the app is uninstalled. See [Mobile and AOT](getting-started.md#mobile-and-aot).
+Yes, as far as it's been tested: the core package is trim- and AOT-compatible, and CI publishes and runs a Native AOT build on Linux and macOS on every change. It hasn't yet been run on an iOS or Android device. Use anything but `AsQueryable<T>()`, keep tables in the app's own folder, and remember they go when the app is uninstalled. See [Mobile and AOT](getting-started.md#mobile-and-aot).
 
 **My accented letters look wrong.**
 The table probably doesn't record its code page (byte 29 is 0), so it's read as Windows-1252. `Check()` warns about this. Set `DbfDatabaseOptions.Encoding`, add `Code Page=850` (or whichever applies) to the connection string, or put a `.cpg` file next to the table.

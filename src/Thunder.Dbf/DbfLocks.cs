@@ -25,7 +25,10 @@ public enum DbfLockScheme
     /// <summary>Pick from the table: FoxPro and Visual FoxPro tables use <see cref="VisualFoxPro"/>, everything else <see cref="Dbase"/>.</summary>
     Auto,
 
-    /// <summary>dBASE IV and the Borland Database Engine (and so GoldMine): header changes under the header byte.</summary>
+    /// <summary>
+    /// dBASE IV, and the Borland Database Engine (GoldMine) as far as is known: header changes under
+    /// the header byte.
+    /// </summary>
     Dbase,
 
     /// <summary>Clipper (and Harbour's default). Clipper tables look like dBASE ones, so choose this explicitly.</summary>

@@ -60,7 +60,7 @@ table.CreateIndexTag("LIVE", "id", forExpression: "status=\"A\"");              
 table.CreateIndexTag("NAMED", "name", descending: true);
 ```
 
-Each tag is laid out as Visual FoxPro 9 lays one out (its header, then its root on the next page, the expressions in the header's pool, the same options bits), and filled with the keys VFP would build: the tests make every tag of a VFP-built table again, one of each kind (character, `UPPER()`, joined keys, numbers, currency, double, dates, datetimes, logicals, nullable, UNIQUE, CANDIDATE, FOR, DESCENDING), and compare them key for key with the ones VFP 9 wrote. A key the `.cdx` writer can't build exactly (anything past fields, `UPPER()`, `DTOS()` and `STR()` of whole numbers joined with `+`; numbers past a bare field; the GENERAL collation) is refused with nothing written, and so is a CANDIDATE tag the records would give a key twice. Visual FoxPro's statistics for its query optimiser are set to the key counts; VFP brings the rest up to date on REINDEX.
+Each tag is laid out as Visual FoxPro 9 lays one out (its header, then its root on the next page, the expressions in the header's pool, the same options bits), and filled with the keys VFP would build: the tests make every tag of a VFP-built table again, one of each kind (character, `UPPER()`, joined keys, numbers, currency, double, dates, datetimes, logicals, nullable, UNIQUE, CANDIDATE, FOR, DESCENDING), and compare them key for key with the ones VFP 9 wrote. A key the `.cdx` writer can't build exactly (anything past fields, `UPPER()`, `DTOS()` and `STR()` of whole numbers joined with `+`; numbers past a bare field; the GENERAL collation) is refused with nothing written, and so is a CANDIDATE tag the records would give a key twice. Visual FoxPro's statistics for its query optimizer are set to the key counts; VFP brings the rest up to date on REINDEX.
 
 ## Removing tags (DELETE TAG)
 
@@ -139,6 +139,6 @@ foreach (var r in table.ReadInOrder(cdx!.Tag("LASTNAME"))) { }
 
 Pass the table (as `OpenIndex` does) so key types come out right. CDX and NTX files don't record their key type; like FoxPro and Clipper, the reader works it out by evaluating the key expression on a blank record.
 
-A table with a structural `.cdx` refuses writes until `.cdx` maintenance lands, unless you opt in with `allowUnmaintainedIndexes` and rebuild the index in FoxPro afterwards. Seeks compare bytes, as dBASE, Clipper and FoxPro's MACHINE collation do. Indexes built with a language collation (FoxPro GENERAL, or some X# settings) may order a few keys differently.
+A table with a structural `.cdx` refuses writes unless it's opened with the `maintainFoxProIndexes` preview, or with `allowUnmaintainedIndexes` and the index is rebuilt in FoxPro afterwards. Seeks compare bytes, as dBASE, Clipper and FoxPro's MACHINE collation do. Indexes built with a language collation (FoxPro GENERAL, or some X# settings) may order a few keys differently.
 
 Byte-level notes: [mdx](formats/mdx.md), [ndx](formats/ndx.md), [ntx](formats/ntx.md), [cdx](formats/cdx.md).

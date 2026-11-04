@@ -16,7 +16,10 @@ namespace Thunder.Dbf;
 /// <summary>One key in an index, and the 1-based record number it points at.</summary>
 public readonly record struct MdxEntry(object? Key, int RecordNumber);
 
-/// <summary>A dBASE IV multiple-index (.mdx) file. Read-only for now.</summary>
+/// <summary>
+/// A dBASE IV multiple-index (.mdx) file. Opened on its own it only reads; a writable
+/// <see cref="DbfTable"/> keeps its production .mdx up to date.
+/// </summary>
 public sealed partial class MdxIndex : IDisposable
 {
     internal const int PageSize = 512;

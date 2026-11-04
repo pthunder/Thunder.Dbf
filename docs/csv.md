@@ -23,7 +23,7 @@ thunder-dbf import customers.csv --plan
 ```
 
 ```
-7 columns, 3 rows, delimiter ','
+6 columns, 3 rows, delimiter ','
   Customer Name            -> CUSTOMER_N C(14)    text up to 14 bytes
   Balance                  -> BALANCE    N(8,2)   numbers up to 8 wide, 2 decimals
   Zip                      -> ZIP        C(5)     text (values have leading zeros, like ZIP codes)

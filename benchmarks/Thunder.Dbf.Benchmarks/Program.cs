@@ -6,8 +6,9 @@
 //    \  \ \  __  /  /      dotnet run -c Release --project benchmarks/Thunder.Dbf.Benchmarks
 //     `--`-`----'--'
 //
-// Compares full-table scans against DbfDataReader, the most-used managed DBF reader.
-// The ADO.NET / OLE DB comparison (Jet, ACE, VFP provider) needs Windows; see README.
+// Compares full-table scans against DbfDataReader, a widely used open-source DBF reader.
+// The README's Visual FoxPro and OLE DB figures were measured separately on Windows and
+// aren't part of these benchmarks.
 
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Running;

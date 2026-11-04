@@ -10,19 +10,21 @@
 
 ## What Thunder.Dbf guarantees
 
-Every write commits in this order, each flushed to the disk itself (not just the operating system's cache) before the next:
+Every write commits in a fixed order, each step flushed to the disk itself (not just the operating system's cache) before the next. An append writes:
 
 1. new memo blocks
 2. the record bytes
 3. the table header, whose record count makes new records visible
-4. the production `.mdx` index
+4. the index keys
+
+An update, delete or recall that changes keys writes the new keys, then the record, then removes the old keys (details [below](#what-it-doesnt-guarantee)).
 
 So after a crash or a power cut:
 
 - **A completed write** is on disk.
 - **An append that was cut short** is invisible: the header still has the old count, and dBASE ignores bytes past it.
 - **A memo** written before the cut, with no record yet pointing at it, is wasted space, never corruption.
-- **An index** can at worst be missing the entries for the last write. It never points at a record that doesn't exist. `table.RebuildIndex()` puts the missing entries back, and `Check()` reports an index it can't read.
+- **An index** can be missing the entries for the last write, or (rarely, see below) be left damaged. It never points at a record that doesn't exist. `table.RebuildIndex()` puts the missing entries back, and `Check()` reports an index it can't read.
 - **A dBASE `.mdx` node split** writes its new nodes first and gives up the moved keys last, so a writer killed partway never loses keys already in the tag. With forced flushes, each step is on disk before the next depends on it, so a power cut keeps that order too. That orders whole writes only: a node is one 1 KB write, and a disk that keeps half of it through a power cut (one 512-byte sector, not the other) can leave that node damaged. Thunder.Dbf, like dBASE, has no journal for `.mdx` nodes, so after a power cut `Check()` and, if needed, `RebuildIndex()` are the safe course. A scan can see some keys twice until `RebuildIndex()`. When the split reaches an interior node, a cut in the middle can leave a page reached through both halves: the index then reports itself damaged rather than quietly missing keys, and `RebuildIndex()` puts it right.
 
 If an index update itself fails (a damaged `.mdx`, say), the changes already made to that index are undone and the write fails with `IndexDamaged`, naming the tag.
@@ -34,11 +36,21 @@ Forcing each step to the disk (FlushFileBuffers on Windows, fsync elsewhere) is 
 - **A killed process** (a crash, Task Manager, a lost network session on this side) loses nothing more than with forced flushes: every step it finished is in the operating system's hands, in order, and the crash-safe key order above still holds.
 - **A power cut or an operating-system crash** can lose the last writes, and the disk may have taken them in another order, so after one the table and its indexes can disagree: `Check()` and a rebuild (`RebuildIndex()`, or REINDEX in FoxPro) put that right. That's the same risk Visual FoxPro's own writes carry.
 
-PACK forces its writes whatever this says, and so does every write while the journal (`UseJournal`) is on: its note is emptied once what it covers is on disk, so without forced writes a power cut could keep the emptied note and lose the changes. It's on by default.
+PACK forces its writes whatever this says, and so does every write while the journal (`UseJournal`) is on: its note is emptied once what it covers is on disk, so without forced writes a power cut could keep the emptied note and lose the changes. `FlushWritesToDisk` is on by default.
 
 ### Batches: deferring index writes
 
-For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (table.LockTable()) { ... }` keeps the FoxPro `.cdx` and dBASE `.mdx` changes in memory while the lock is held and writes each changed page once, when it's disposed, instead of after every record. Meanwhile the FoxPro index lock is held too, so Visual FoxPro users wait for the batch, readers included. dBASE takes no index lock to read: during the batch its users see the batch's records but the `.mdx` as it was before it, and while the batch is being written at the end, a part-written `.mdx`; Thunder.Dbf readers in other processes see the same. Every page the batch changes stays in memory until it ends (pages only read are let go past 8 MB), so a batch rewriting most of a large index needs memory to match. It's for imports and migrations: the batch's forced flush at the end costs about as much as a few hundred records do (100 appends took 25 ms in a batch, 6 ms without, on a Mac with flushes off), so for small groups with flushes off `AppendRange` is quicker. With flushes on, the batch is the quicker way to save a group (100 appends took about 23 ms), since `AppendRange` then forces each index split to disk step by step (about 90 ms). The batch is noted in the table's journal file (`TABLE.DBF.journal`) before it starts, and the note is cleared only once every page, and the batch's records, are forced to disk, whatever `FlushWritesToDisk` says (a handful of forced flushes per batch, not one per record: the note, the index's new pages, the rest of the index, the table, and the note's clearing), so a power cut can't keep an emptied note and lose the batch. A process killed during the batch leaves the records written, the index without the batch's changes, and the note: the next write, in any Thunder.Dbf process, refuses with `IndexWouldGoStale` (and `Check()` reports it) until `RebuildIndex()` on an exclusive open rebuilds the index and clears it. Visual FoxPro doesn't read the note: until that rebuild (or a REINDEX), VFP can find stale keys. It's ignored while `UseJournal` is on.
+#### What the batch does
+
+For migrations and bulk loads, `table.DeferIndexWrites = true` with `using (table.LockTable()) { ... }` keeps the FoxPro `.cdx` and dBASE `.mdx` changes in memory while the lock is held and writes each changed page once, when it's disposed, instead of after every record. Every page the batch changes stays in memory until it ends (pages only read are let go past 8 MB), so a batch rewriting most of a large index needs memory to match. It's for imports and migrations: the batch's forced flush at the end costs about as much as a few hundred records do (100 appends took 25 ms in a batch, 6 ms without, on a Mac with flushes off), so for small groups with flushes off `AppendRange` is quicker. With flushes on, the batch is the quicker way to save a group (100 appends took about 23 ms), since `AppendRange` then forces each index split to disk step by step (about 90 ms).
+
+#### What others see meanwhile
+
+While the batch runs, the FoxPro index lock is held too, so Visual FoxPro users wait for it, readers included. dBASE takes no index lock to read: during the batch its users see the batch's records but the `.mdx` as it was before it, and while the batch is being written at the end, a part-written `.mdx`; Thunder.Dbf readers in other processes see the same.
+
+#### If it's cut off
+
+The batch is noted in the table's journal file (`TABLE.DBF.journal`) before it starts, and the note is cleared only once every page, and the batch's records, are forced to disk, whatever `FlushWritesToDisk` says (a handful of forced flushes per batch, not one per record: the note, the index's new pages, the rest of the index, the table, and the note's clearing), so a power cut can't keep an emptied note and lose the batch. A process killed during the batch leaves the records written, the index without the batch's changes, and the note: the next write, in any Thunder.Dbf process, refuses with `IndexWouldGoStale` (and `Check()` reports it) until `RebuildIndex()` on an exclusive open rebuilds the index and clears it. Visual FoxPro doesn't read the note: until that rebuild (or a REINDEX), VFP can find stale keys. `DeferIndexWrites` is ignored while `UseJournal` is on.
 
 ### Choosing
 

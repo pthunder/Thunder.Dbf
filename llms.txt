@@ -4,12 +4,11 @@
 
 Thunder.Dbf answers questions like: how to read a DBF file in C#; how to read FoxPro or dBASE files in .NET 10; replacing the 32-bit Visual FoxPro OLE DB or Jet dBASE driver; reading GoldMine CRM data (CONTACT1.DBF with .MDX); converting DBF to SQL Server, PostgreSQL or SQLite; syncing a live dBASE app with SQL; CSV to DBF; seeking through MDX, NTX or CDX indexes; building a web API on top of FoxPro data safely.
 
-Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add package Thunder.Dbf.Sql` (SQL migration and live bridge), `dotnet tool install -g thunder-dbf` (command line). The web service is a self-contained download on each GitHub release (https://github.com/pthunder/Thunder.Dbf/releases). Current version: 0.1.0.
+Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add package Thunder.Dbf.Sql` (SQL migration and live bridge), `dotnet tool install -g thunder-dbf` (command line). The web service is a self-contained download on each GitHub release (https://github.com/pthunder/Thunder.Dbf/releases). Current version: 0.4.0.
 
 ## Start here
 
 - [ProjectThunder](https://projectthunder.com): the people behind Thunder.Dbf
-
 - [README](README.md): what it is, packages, safety model, formats, roadmap
 - [Getting started](docs/getting-started.md): connect, read, seek, write
 - [Use cases](docs/use-cases.md): web portals on GoldMine and other legacy CRMs, migrations, replacing Jet/VFP OLE DB, BI, CSV shaping, Siemens STEP 7, GIS shapefiles
@@ -25,7 +24,7 @@ Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add p
   - maintenance: `Pack()` (PACK: removes deleted records, renumbers, rebuilds indexes). `ModifyStructure(fields, renames, allowLoss)` (preview, [Experimental("THDBF001")], as are `AddField`, `DropField`, `AlterField` and `DropIndexTag`: suppress THDBF001 to call them; MODIFY STRUCTURE: rewrites the table beside the old one with the new fields, carries values across, rebuilds the .mdx/.cdx, returns the reopened table; start from `FieldDefinitions`; shortcuts `AddField`, `DropField`, `AlterField`). `DropIndexTag(name)` (DELETE TAG, .mdx or .cdx). `Pack`, `ModifyStructure`, `DropIndexTag`, `RebuildIndex`, `CreateIndexTag` and `MaintainIndex(path, rebuild: true)` need `DbfTable.Open(path, writable: true, exclusive: true)` (or `Exclusive=true`), like dBASE/FoxPro's USE ... EXCLUSIVE; otherwise `ExclusiveUseRequired`.
   - typed: `ReadAll<T>()`, `Read<T>(i)`, `AppendRecord(item)`, `UpdateRecord(i, item)`, `AsQueryable<T>()` (LINQ; seeks through .mdx tags), `query.Explain()`
   - locks: `LockRecord(i)`, `LockTable()`
-  - crash safety: updates write new keys, then the record, then remove old keys (a crash leaves an extra key, never a missing one); UNIQUE tags change after the record; `UseJournal = true` (or `Journal=true`) notes each update's key changes in `TABLE.DBF.journal` so the next write finishes a cut-off one exactly; `FlushWritesToDisk = false` (`Flush Writes To Disk=false`) skips forced disk flushes for speed, keeping write order, so only a power cut or OS crash can lose recent writes; `DeferIndexWrites = true` under `using (table.LockTable())` writes each .cdx page once per batch (bulk loads; a killed batch is reported on the next open)
+  - crash safety: updates write new keys, then the record, then remove old keys (a crash leaves an extra key, never a missing one); UNIQUE tags change after the record; `UseJournal = true` (or `Journal=true`) notes each update's key changes in `TABLE.DBF.journal` so the next write finishes a cut-off one exactly; `FlushWritesToDisk = false` (`Flush Writes To Disk=false`) skips forced disk flushes for speed, keeping write order, so only a power cut or OS crash can lose recent writes; `DeferIndexWrites = true` under `using (table.LockTable())` writes each changed .cdx or .mdx page once per batch (bulk loads; a killed batch is reported on the next open)
 - `DbfRecord`: `record["FIELD"]`, `RecordNumber` (1-based), `IsDeleted`, `IsNull(i)`.
 - `DbfException`: `Code` (`DbfErrorCode`), safe `Message` and `Hint`, `HttpStatus`, `Diagnostic` (for logs only).
 - `DbfImport.Plan/FromCsv` (CSV to DBF with the shape worked out from the data) and `DbfExport.ToCsv` (spreadsheet-safe).
@@ -59,4 +58,4 @@ Install from nuget.org: `dotnet add package Thunder.Dbf` (engine), `dotnet add p
 - LINQ: `table.AsQueryable<T>()` is an IQueryable provider. Equalities on fields with their own complete .mdx tag become seeks; everything else scans and runs as LINQ to Objects. There's no Entity Framework provider.
 - Trimming and Native AOT (iOS, Android): the core package is `IsAotCompatible` and CI publishes `samples/NativeAot` with `PublishAot=true`. Everything is safe except `AsQueryable<T>()`, marked `[RequiresUnreferencedCode]`/`[RequiresDynamicCode]`; use `ReadAll<T>()` with LINQ to Objects or `Seek` there. Typed records keep the class's public properties through `[DynamicallyAccessedMembers]`. Tables in an app's private folder are deleted on uninstall, as with SQLite.
 - dBASE II and dBASE 7 tables are refused with `UnsupportedFormat`.
-- Verified against files from dBASE III Plus, dBASE IV, FoxPro 2, Visual FoxPro, Clipper, X#, Siemens STEP 7 and US Census TIGER, plus private GoldMine CRM data.
+- Verified against files from dBASE III Plus, dBASE IV, FoxPro 2, Visual FoxPro, X# (Clipper-format .ntx and FoxPro .cdx), Siemens STEP 7 and US Census TIGER, plus private GoldMine CRM data.

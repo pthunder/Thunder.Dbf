@@ -107,8 +107,8 @@ public sealed partial class DbfTable : IDisposable
     /// date (a missing .mdx, a FoxPro .cdx without <paramref name="maintainFoxProIndexes"/>, an index in a sort
     /// order or mode it doesn't write). Those indexes go stale until something rebuilds them.</param>
     /// <param name="maintainFoxProIndexes">Preview: keep FoxPro and Visual FoxPro .cdx and .idx indexes up to date on
-    /// writes. Off by default until it has been checked against Visual FoxPro itself (see docs/testing.md);
-    /// without it, a table with a .cdx refuses writes.</param>
+    /// writes. Off by default while it's a preview, which ends once the Visual FoxPro round-trip test
+    /// (see docs/testing.md) passes; without it, a table with a .cdx refuses writes.</param>
     /// <param name="path">The .dbf file.</param>
     /// <param name="writable">Open for writing. Read-only by default.</param>
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
@@ -641,9 +641,9 @@ public sealed partial class DbfTable : IDisposable
 
     /// <summary>
     /// Whose lock positions to use, so the legacy app sees this table's locks: dBASE (and GoldMine),
-    /// Clipper, or Visual FoxPro. <see cref="DbfLockScheme.Auto"/> (the default) picks Visual FoxPro for
-    /// FoxPro tables and dBASE otherwise; Clipper tables look like dBASE ones, so set Clipper
-    /// explicitly. Set it before the first write or lock.
+    /// Clipper, Visual FoxPro, or Jet (Access reading). <see cref="DbfLockScheme.Auto"/> (the default)
+    /// picks Visual FoxPro for FoxPro tables and dBASE otherwise; Clipper tables look like dBASE ones, so
+    /// set Clipper explicitly. Change it only while the table holds no lock.
     /// </summary>
     public DbfLockScheme LockScheme
     {
@@ -743,10 +743,11 @@ public sealed partial class DbfTable : IDisposable
     /// Meanwhile the FoxPro index lock is held too, so Visual FoxPro users wait, readers included;
     /// dBASE readers take no index lock: during the batch they see its records but the index as it was
     /// before it, and while it's being written at the end, a part-written index. The batch is
-    /// forced to disk when it ends, whatever <see cref="FlushWritesToDisk"/> says, which costs more than
-    /// it saves on a few hundred records: <see cref="AppendRange"/> suits small groups. A process killed
-    /// during the batch leaves the index without the batch's keys: the next open reports it and a
-    /// rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
+    /// forced to disk when it ends, whatever <see cref="FlushWritesToDisk"/> says. With
+    /// <see cref="FlushWritesToDisk"/> off, that final flush costs more than it saves on a few hundred
+    /// records (use <see cref="AppendRange"/>); with it on, the batch is the quicker way to save a
+    /// group. A process killed during the batch leaves the index without the batch's keys: the next
+    /// open reports it and a rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
     /// </summary>
     public bool DeferIndexWrites { get; set; }
 
@@ -803,7 +804,8 @@ public sealed partial class DbfTable : IDisposable
         var clean = true;
         // Forced to disk whatever FlushWritesToDisk says (a few flushes per batch, not one per record):
         // the note is emptied next, and it must never outlive the pages it covers, or a power cut could
-        // keep an emptied note and lose the batch (found by the Hyper-V power cuts, 3 in 50 with flushes off).
+        // keep an emptied note and lose the batch (seen in the power-cut tests in the README, 3 in 50
+        // with flushes off).
         foreach (var index in MaintainedIndexes)
         {
             try
@@ -961,7 +963,7 @@ public sealed partial class DbfTable : IDisposable
     /// How many of the records the header counts the file really holds: whole records, up to the last one
     /// that starts with a deletion flag (a space or '*'). After a power cut the file can be long enough
     /// and still end in records that were never written: an end-of-file mark, then zeros to the end of
-    /// the disk page (found by the Hyper-V power cuts).
+    /// the disk page (seen in the power-cut tests: README, "Measured against Visual FoxPro").
     /// </summary>
     internal long RecordsInFile()
     {
@@ -983,11 +985,11 @@ public sealed partial class DbfTable : IDisposable
     /// </summary>
     public long RecordsMissingFromFile { get; private set; }
 
-    // A header counting more records than the file holds (found by the Hyper-V power cuts) can't be read
-    // to the end, and Visual FoxPro won't open it (error 2091). Only an exclusive open, where nobody can
-    // be appending, cuts the count back to the whole records the file has; the bytes of a part record are
-    // kept beside the table first, and the indexes it keeps are rebuilt, since their keys for the missing
-    // records point past the end.
+    // A header counting more records than the file holds (seen in the power-cut tests in the README)
+    // can't be read to the end, and Visual FoxPro won't open it (error 2091). Only an exclusive open,
+    // where nobody can be appending, cuts the count back to the whole records the file has; the bytes
+    // of a part record are kept beside the table first, and the indexes it keeps are rebuilt, since
+    // their keys for the missing records point past the end.
     private void RepairShortTable()
     {
         if (!_exclusive || !_stream.CanWrite)

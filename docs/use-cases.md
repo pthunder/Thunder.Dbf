@@ -30,7 +30,7 @@
 *Reports and Excel add-ins read FoxPro tables through Microsoft's VFP OLE DB provider, which is 32-bit only and stuck on old Windows.*
 
 - Read the same tables natively in 64-bit .NET, on Windows, Linux or macOS, without installing drivers.
-- Full-table scans run about 24% faster than DbfDataReader with flat memory, and nothing goes through COM.
+- Reading a whole table ran about 2.8× faster than the VFP OLE DB driver's `SELECT *` on the same PC (see the [README](../README.md#measured-against-visual-foxpro)), with flat memory, and nothing goes through COM.
 
 ## 4. Reporting and BI on legacy data
 
