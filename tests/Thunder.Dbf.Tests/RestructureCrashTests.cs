@@ -1380,4 +1380,198 @@ public sealed class RestructureCrashTests : IDisposable
         using var table = Open(path, exclusive: false); // and the file wasn't left open
         Assert.Equal(4, table.RecordCount);
     }
+
+    // ---- fourth audit ------------------------------------------------------------------------------
+
+    // 1. A blank number can't become an integer, double or currency: those have no blank, only 0,
+    // and a nullable target's .NULL. isn't a blank either.
+    [Theory]
+    [InlineData('I')]
+    [InlineData('B')]
+    [InlineData('Y')]
+    public void A_blank_number_into_a_binary_field_is_a_loss_not_zero(char type)
+    {
+        var path = Path.Combine(_dir.FullName, "BLANK.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Numeric("X", 5)]))
+        {
+            created.Append(5m);
+            created.Append((object?)null); // blank, not .NULL.: the field isn't nullable
+        }
+        var to = (type switch { 'I' => DbfFieldDefinition.Integer("X"), 'B' => DbfFieldDefinition.Double("X"), _ => DbfFieldDefinition.Currency("X") }) with { Nullable = true };
+        using var old = Open(path);
+        Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => old.AlterField("X", to)).Code);
+        using var lossy = old.AlterField("X", to, allowLoss: true);
+        Assert.Equal(1, lossy.StructureValuesChanged);
+        Assert.False(lossy.Read(1).IsNull(0));
+        Assert.Equal(5m, Convert.ToDecimal(lossy.Read(0)["X"]));
+    }
+
+    // 2. The decision is looked at once: a look that can't tell, then one that says "not there",
+    // must not make the change decided with no decision on disk.
+    [Fact]
+    public void A_decision_that_can_t_be_told_is_never_taken_for_made()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        var looks = 0;
+        DbfTable.RestructurePoint = point => { if (point == "deciding") throw new IOException("The network share went away."); };
+        DbfTable.LookFails = file => file.EndsWith("restructure.commit", StringComparison.Ordinal) && looks++ == 0;
+        try
+        {
+            using var table = Open(path);
+            var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, ex.Code);
+            Assert.Contains("may or may not", ex.Message);
+        }
+        finally
+        {
+            DbfTable.RestructurePoint = null;
+            DbfTable.LookFails = null;
+        }
+        using var after = Open(path); // no decision on disk: undone
+        Assert.Equal(3, after.Fields.Count);
+    }
+
+    // 3. A rename that publishes the before-image and then reports failing (a network share can):
+    // the index must still be stopped until a reopen.
+    [Fact]
+    public void A_before_image_published_by_a_rename_that_reported_failing_still_stops_writes()
+    {
+        var path = Path.Combine(_dir.FullName, "TAGS.DBF");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("Ada");
+        using (var table = Open(path))
+        {
+            table.CreateIndexTag("A", "NAME");
+            table.CreateIndexTag("B", "NAME");
+            var mdx = MdxIndex.FindFor(path)!;
+            MdxIndex.DropTagPoint = point =>
+            {
+                if (point != "publishing")
+                    return;
+                File.Move(mdx + ".droptag.tmp", mdx + ".droptag"); // done, and then...
+                throw new IOException("The specified network name is no longer available.");
+            };
+            try
+            {
+                Assert.Throws<DbfException>(() => table.DropIndexTag("A"));
+            }
+            finally
+            {
+                MdxIndex.DropTagPoint = null;
+            }
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => table.Append("Kay")).Code);
+        }
+        using var reopened = Open(path);
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(["A", "B"], index.Tags.Select(t => t.Name));
+    }
+
+    // 4. DropIndexTag writes out a deferred batch first; a file failure there is explained too.
+    [Fact]
+    public void A_batch_failing_to_finish_before_a_drop_names_no_path()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        using var table = Open(path);
+        table.DeferIndexWrites = true;
+        var journal = path + ".journal";
+        using (table.LockTable())
+        {
+            table.Append("Kay", 50m, "");
+            File.SetAttributes(journal, FileAttributes.ReadOnly); // the batch can't clear its note
+            try
+            {
+                var ex = Assert.Throws<DbfException>(() => table.DropIndexTag("NAME"));
+                Assert.DoesNotContain(_dir.FullName, ex.Message);
+            }
+            finally
+            {
+                File.SetAttributes(journal, FileAttributes.Normal);
+            }
+        }
+    }
+
+    // 5. A look that fails during the swap is reported for the phase it happened in.
+    [Fact]
+    public void A_failing_look_after_the_decision_says_the_change_is_decided()
+    {
+        var path = Table(DbfTableFormat.DbaseIV);
+        var staged = Path.Combine(path + ".restructuring", "PEOPLE.DBF");
+        DbfTable.LookFails = file => file == staged;
+        try
+        {
+            using var table = Open(path);
+            var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Equal(DbfErrorCode.IncompleteTransaction, ex.Code);
+            Assert.Contains("is decided", ex.Message);
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+        }
+        finally
+        {
+            DbfTable.LookFails = null;
+        }
+        using var finished = Open(path);
+        Assert.Equal("OK", finished.Fields.Last().Name);
+    }
+
+    [Fact]
+    public void A_failing_look_before_the_decision_undoes_the_change_and_says_so()
+    {
+        var path = Table(DbfTableFormat.VisualFoxPro);
+        var before = Files();
+        var memo = Path.Combine(_dir.FullName, "PEOPLE.fpt");
+        var closed = false;
+        DbfTable.RestructurePoint = point => { if (point == "closed") closed = true; };
+        DbfTable.LookFails = file => closed && file.Equals(memo, StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            using var table = Open(path);
+            var ex = Assert.Throws<DbfException>(() => table.AddField(DbfFieldDefinition.Logical("OK")));
+            Assert.Contains("left as it was", ex.Message);
+            Assert.DoesNotContain(_dir.FullName, ex.Message);
+        }
+        finally
+        {
+            DbfTable.RestructurePoint = null;
+            DbfTable.LookFails = null;
+        }
+        foreach (var (file, bytes) in Files())
+            Assert.Equal(before[file], bytes);
+        Assert.Empty(Folders());
+    }
+
+    // 6. The new files keep the old ones' Unix modes (a table shared through its group stays so).
+    [Fact]
+    public void The_new_files_keep_the_old_files_modes()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        var path = Table(DbfTableFormat.DbaseIV);
+        var memo = Directory.GetFiles(_dir.FullName, "PEOPLE.*").Single(f => Path.GetExtension(f).Equals(".dbt", StringComparison.OrdinalIgnoreCase));
+        const UnixFileMode Group = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite;
+        const UnixFileMode Memo = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+        File.SetUnixFileMode(path, Group);
+        File.SetUnixFileMode(memo, Memo);
+        var index = MdxIndex.FindFor(path)!;
+        var indexMode = File.GetUnixFileMode(index);
+        using (var old = Open(path))
+        using (old.AddField(DbfFieldDefinition.Logical("OK")))
+        {
+        }
+        Assert.Equal(Group, File.GetUnixFileMode(path));
+        Assert.Equal(Memo, File.GetUnixFileMode(memo));
+        Assert.Equal(indexMode, File.GetUnixFileMode(index));
+    }
+
+    // 7. A manifest cut off right after its last field, whose value is empty, has no closing hash.
+    [Fact]
+    public void A_manifest_cut_off_after_its_last_field_is_refused()
+    {
+        var path = Table(DbfTableFormat.DbaseIV, memo: false);
+        KilledAt("widen", path, "committed");
+        var manifest = Path.Combine(Backup(), "restructure.manifest");
+        var text = File.ReadAllText(manifest);
+        File.WriteAllText(manifest, text[..(text.IndexOf("index.original=", StringComparison.Ordinal) + "index.original=".Length)]);
+        Assert.Equal(DbfErrorCode.IncompleteTransaction, Assert.Throws<DbfException>(() => Open(path)).Code);
+        Assert.True(File.Exists(Path.Combine(path + ".restructuring", "PEOPLE.DBF")));
+    }
 }
