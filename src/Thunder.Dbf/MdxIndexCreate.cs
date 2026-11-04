@@ -155,6 +155,24 @@ public sealed partial class MdxIndex
             .ToList();
         var tree = NameTree(Tags.Where(t => t.HeaderPage != tag.HeaderPage).Select(t => t.Name).ToList());
 
+        // 0. A before-image of the header and tag table, forced to disk beside the index: a power cut
+        // can tear the writes below sector by sector, losing a tag, and the next exclusive open puts
+        // this back (see RestoreDropTag).
+        var imagePath = _stream is FileStream file ? file.Name + DropTagImageSuffix : null;
+        if (imagePath is not null)
+        {
+            var image = new byte[HeaderAreaSize];
+            DbfTable.DiscardReadBuffer(_stream);
+            _stream.Position = 0;
+            _stream.ReadExactly(image);
+            using (var before = new FileStream(imagePath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                before.Write(image);
+                before.Flush(flushToDisk: true);
+            }
+            DropTagPoint?.Invoke("before-image");
+        }
+
         // 1. The anchor's slot and the kept entries with their new links, as one write.
         var anchorAt = TagTableOffset - entryLength;
         var block = headerArea.AsSpan(anchorAt, entryLength * (1 + kept.Count)).ToArray();
@@ -184,7 +202,38 @@ public sealed partial class MdxIndex
         _stream.Write(new byte[entryLength]);
         DbfTable.FlushToDisk(_stream);
         DropTagPoint?.Invoke("cleared");
+        if (imagePath is not null)
+            File.Delete(imagePath);
         ReloadTags();
+    }
+
+    /// <summary>The before-image a DELETE TAG keeps beside the .mdx while it rewrites the tag table.</summary>
+    internal const string DropTagImageSuffix = ".droptag";
+
+    /// <summary>
+    /// A DELETE TAG cut off leaves its before-image beside the .mdx, and the tag table may be torn.
+    /// An exclusive open writes the image back (the tag is then not dropped) and deletes it; anything
+    /// else refuses to write until one has. An image of the wrong size, or a link, is refused.
+    /// </summary>
+    internal static void RestoreDropTag(string mdxPath, bool exclusive)
+    {
+        var imagePath = mdxPath + DropTagImageSuffix;
+        if (!File.Exists(imagePath))
+            return;
+        if (!exclusive)
+            throw new DbfException(DbfErrorCode.IncompleteTransaction, "A DELETE TAG on this table's .mdx was cut off, so its tag table may be torn.",
+                "Open the table with writable: true, exclusive: true, which puts the tag table back as it was.", mdxPath);
+        if (new FileInfo(imagePath).LinkTarget is not null || new FileInfo(imagePath).Length != HeaderAreaSize)
+            throw new DbfException(DbfErrorCode.IndexDamaged, "A DELETE TAG on this table's .mdx was cut off, and its copy of the tag table isn't one Thunder.Dbf wrote.",
+                "Rebuild the index in dBASE (or delete the .mdx and recreate its tags), then delete the .droptag file beside it.", mdxPath);
+        var image = File.ReadAllBytes(imagePath);
+        using (var index = DbfException.OpenFile(mdxPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            index.Write(image);
+            index.Flush(flushToDisk: true);
+        }
+        DropTagPoint?.Invoke("restored");
+        File.Delete(imagePath);
     }
 
     /// <summary>For the tests: called after each of DropTag's writes.</summary>

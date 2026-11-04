@@ -45,6 +45,18 @@ Entry *i* is at 544 + 32*i*:
 | 19 | 1 | 0x02 |
 | 20 | 1 | key type: `C`, `N` or `D` |
 
+### Dropping a tag
+
+dBASE finds a tag by name through the left, right and parent slots of each entry (bytes 16 to 18, 1-based, 0 for none), from the anchor at byte 17 of the reserved slot before the table: a binary search tree, never a scan of the slots. Thunder.Dbf's `DropIndexTag` keeps it whole at every write:
+
+1. A before-image of the first 2,048 bytes (header and tag table), written beside the index as `NAME.MDX.droptag` and forced to disk.
+2. The anchor's slot and the kept entries, moved down over the dropped one with their tree links rebuilt over the tags that remain, in one write. The count still includes the last slot, which keeps its old contents.
+3. The smaller count.
+4. The slot past it, cleared.
+5. The before-image, deleted.
+
+A process killed between any two leaves a tree that finds every tag still counted. A power cut can tear write 2, which spans several sectors with 16 or more tags, so the before-image is what makes it safe: a writable exclusive open that finds it writes it back over the header (the tag isn't dropped after all) and deletes it, and other Thunder.Dbf writes wait for that. The dropped tag's blocks are left unused.
+
 ## Tag header (one block at the tag header page)
 
 | Offset | Size | Field |

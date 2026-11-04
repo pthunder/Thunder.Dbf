@@ -38,6 +38,7 @@
 ## Reference
 
 - File formats: [MDX](formats/mdx.md), [NDX](formats/ndx.md), [NTX](formats/ntx.md) and [CDX](formats/cdx.md) indexes.
+- [Changing a table's structure](formats/restructure.md): the transaction `ModifyStructure` follows, state by state.
 - [Samples](../samples): runnable programs for each guide.
 
 ## For maintainers

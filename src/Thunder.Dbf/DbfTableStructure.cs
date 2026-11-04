@@ -21,7 +21,7 @@ namespace Thunder.Dbf;
 public sealed partial class DbfTable
 {
     private const string RestructurePartialSuffix = ".restructure-partial";
-    private const string RestructureReadySuffix = ".restructuring";
+    internal const string RestructureReadySuffix = ".restructuring";
     private const string RestructureLockName = "restructure.lock";
 
     /// <summary>
@@ -149,32 +149,84 @@ public sealed partial class DbfTable
         var ready = _path + RestructureReadySuffix;
         int changed;
         string backup;
+        RestructureManifest manifest;
+        FileStream? held = null;
+        using var release = new Disposer(() => held?.Dispose()); // let go however this ends, as a kill would
         using (Locks.Table())
         {
             PrepareWrite(appending: false); // an unfinished pack or journal note comes first
             ThrowIfRestructureUnfinished();
             ThrowIfCantRestructure(fields);
 
-            // Left by a change killed while it was being written, or while its folder was being deleted: nothing reads either.
-            DeleteQuietly(_path + RestructureRetiredSuffix);
+            // Left by a change killed while it was being written, or while its folder was being
+            // deleted (nothing reads either), and finished changes' bookkeeping.
+            ClearLeftovers(_path);
             if (Directory.Exists(partial))
+            {
+                RequireRealFolder(partial);
                 Directory.Delete(partial, recursive: true);
+            }
+            // The transaction: its backup folder, under a name never used before, and its lock, held
+            // from here until the reopened table is handed back.
             backup = NewRestructureBackup();
+            var hold = held = HoldRestructure(backup, create: true);
             try
             {
-                changed = WriteRestructured(partial, backup, format, fields, sources, tags, allowLoss);
-                // Renamed whole once complete, so a folder under the ready name always holds a finished table and its note.
+                changed = WriteRestructured(partial, format, fields, sources, tags, allowLoss);
+                manifest = StageForSwap(partial, backup);
+                RestructurePoint?.Invoke("manifest");
+                // Renamed whole once complete, so a folder under the ready name always holds a finished table and its id.
                 Directory.Move(partial, ready);
             }
             catch
             {
                 DeleteQuietly(partial);
-                DeleteIfEmpty(backup);
+                hold.Dispose();
+                DeleteAbandoned(backup);
                 throw;
             }
         }
         RestructurePoint?.Invoke("staged");
-        return SwapInRestructured(ready, backup, changed);
+        return SwapInRestructured(ready, backup, held, manifest, changed);
+    }
+
+    private readonly struct Disposer(Action action) : IDisposable
+    {
+        public void Dispose() => action();
+    }
+
+    // Names every staged file as it will be named in place (the old file's own name where there is
+    // one, so a .FPT stays .FPT whatever case the new one was made in), then writes the manifest,
+    // forced to disk, and the staged folder's id naming the transaction.
+    private RestructureManifest StageForSwap(string partial, string backup)
+    {
+        var tableName = Path.GetFileName(FindCompanion(_path!, Path.GetExtension(_path!)) ?? _path!);
+        // The old memo file as the old table's format names it: a stray .dbt beside a FoxPro table isn't it.
+        var memoOriginal = _memo is not null && DbfMemoFile.FindFor(_path!, Header) is { } memoPath ? Path.GetFileName(memoPath) : null;
+        string? indexOriginal = null;
+        if (_index is not null && MdxIndex.FindFor(_path!) is { } mdx)
+            indexOriginal = Path.GetFileName(mdx);
+        else if (_attachedIndexes.Keys.FirstOrDefault(IsStructuralCdx) is { } cdx)
+            indexOriginal = Path.GetFileName(cdx);
+
+        string? Staged(string[] extensions, string? original)
+        {
+            if (Directory.EnumerateFiles(partial).FirstOrDefault(f => extensions.Contains(Path.GetExtension(f).ToLowerInvariant())) is not { } file)
+                return null;
+            if (original is not null && Path.GetExtension(original).Equals(Path.GetExtension(file), StringComparison.OrdinalIgnoreCase)
+                && !Path.GetFileName(file).Equals(original, StringComparison.Ordinal))
+            {
+                File.Move(file, Path.Combine(partial, original + ".naming"));
+                File.Move(Path.Combine(partial, original + ".naming"), Path.Combine(partial, original));
+                return original;
+            }
+            return Path.GetFileName(file);
+        }
+        var manifest = new RestructureManifest(Path.GetFileName(backup), tableName,
+            Staged([".dbt", ".fpt"], memoOriginal), memoOriginal, Staged([".mdx", ".cdx"], indexOriginal), indexOriginal);
+        WriteRecord(Path.Combine(backup, RestructureManifestName), manifest.Write());
+        WriteRecord(Path.Combine(partial, RestructureIdName), manifest.Id);
+        return manifest;
     }
 
     // The format the table is in now, so the new one opens in the same programs. dBASE III and IV
@@ -294,11 +346,10 @@ public sealed partial class DbfTable
 
     // Writes the new table into the partial folder: header, memo file (a copy of the old one), every
     // record, then the index, each tag built afresh. Returns how many values changed to fit.
-    private int WriteRestructured(string partial, string backup, DbfTableFormat format, IReadOnlyList<DbfFieldDefinition> fields, int[] sources,
+    private int WriteRestructured(string partial, DbfTableFormat format, IReadOnlyList<DbfFieldDefinition> fields, int[] sources,
         List<RebuiltTag> tags, bool allowLoss)
     {
         Directory.CreateDirectory(partial);
-        WriteRestructureNote(partial, backup);
         // Named as the file on disk is, whatever case the table was opened with, so the swap keeps its name.
         var stagedPath = Path.Combine(partial, Path.GetFileName(FindCompanion(_path!, Path.GetExtension(_path!)) ?? _path!));
         using (Create(stagedPath, format, fields, Header.LanguageDriver))
@@ -654,141 +705,216 @@ public sealed partial class DbfTable
 
     // ---- the swap -------------------------------------------------------------------------------
     //
-    // The change is a transaction, kept in the ready folder beside the new files:
-    //
-    //   restructure.note     the backup folder's name, on disk before the folder got its ready name
-    //   restructure.lock     held unshared by whoever moves files: the change itself, or an open finishing it
-    //   restructure.commit   the decision. Before it exists the change can only be undone; once it's on
-    //                        disk, only finished.
-    //
-    // Every file moves in two renames, the old one into the backup folder and then the new one into
-    // its place, so wherever a process dies each file is in exactly one of three places (in place,
-    // staged, or in the backup) and the next exclusive open sees which. Only the old table's own memo
-    // file moves before the decision: the old .dbf reads the copy as well as its own. Done or undone,
-    // the folder is renamed out of the way before anything in it is deleted.
+    // The protocol, state by state, with what recovery does in each: docs/formats/restructure.md.
+    // In short: B (the backup folder) is the transaction. It holds the lock, the manifest naming
+    // every file that moves, and the decision; R (the ready folder) holds the new files and names B.
+    // Each file moves in two renames, the file at its destination into B, then the staged one in.
+    // Before the decision is published the change can only be undone; after it, only finished.
 
-    private const string RestructureNoteName = "restructure.note";
+    private const string RestructureIdName = "restructure.id";
+    private const string RestructureManifestName = "restructure.manifest";
     private const string RestructureCommitName = "restructure.commit";
     private const string RestructureRetiredSuffix = ".restructure-retired";
-    private const int MaxRestructureNote = 512; // a backup folder's name is far shorter
+    private const string RestructureBackupInfix = ".restructured-";
+    private const int MaxRestructureRecord = 4096; // the id and manifest are a few names long
+
+    private static readonly string[] BookkeepingNames =
+        [RestructureLockName, RestructureManifestName, RestructureCommitName, RestructureCommitName + ".tmp"];
 
     /// <summary>For the tests: called at each step of a change of structure, and of finishing one.</summary>
     [ThreadStatic]
     internal static Action<string>? RestructurePoint;
 
-    private DbfTable SwapInRestructured(string ready, string backup, int changed)
+    // The files a change moves, as plain names in the table's folder. Memo and index are null when the
+    // new table has none; their originals are null when the old table had none. Nothing is ever
+    // picked by looking for whatever exists.
+    private sealed record RestructureManifest(string Id, string Table, string? Memo, string? MemoOriginal, string? Index, string? IndexOriginal)
+    {
+        public string Write() => string.Join('\n',
+            $"id={Id}", $"table={Table}", $"memo={Memo}", $"memo.original={MemoOriginal}", $"index={Index}", $"index.original={IndexOriginal}");
+
+        // Every name is checked before it's used as a path: it comes from a file.
+        public static RestructureManifest? Read(string text, string tablePath)
+        {
+            var lines = text.Split('\n').Select(l => l.Split('=', 2)).Where(l => l.Length == 2).ToDictionary(l => l[0].Trim(), l => l[1].Trim());
+            var stem = Path.GetFileNameWithoutExtension(tablePath);
+            string? Name(string key, params string[] extensions)
+            {
+                var value = lines.GetValueOrDefault(key, "");
+                if (value.Length == 0)
+                    return null;
+                return Path.GetFileName(value) == value && Path.GetFileNameWithoutExtension(value).Equals(stem, StringComparison.OrdinalIgnoreCase)
+                    && extensions.Contains(Path.GetExtension(value).ToLowerInvariant())
+                    ? value : throw new InvalidDataException($"The manifest's {key} isn't one of this table's files.");
+            }
+            try
+            {
+                var id = lines.GetValueOrDefault("id", "");
+                var table = lines.GetValueOrDefault("table", "");
+                if (!IsBackupName(id, tablePath) || !table.Equals(Path.GetFileName(tablePath), StringComparison.OrdinalIgnoreCase) || Path.GetFileName(table) != table)
+                    return null;
+                return new RestructureManifest(id, table, Name("memo", ".dbt", ".fpt"), Name("memo.original", ".dbt", ".fpt"),
+                    Name("index", ".mdx", ".cdx"), Name("index.original", ".mdx", ".cdx"));
+            }
+            catch (InvalidDataException)
+            {
+                return null;
+            }
+        }
+    }
+
+    private static bool IsBackupName(string name, string tablePath) =>
+        name.Length > 0 && Path.GetFileName(name) == name && name.IndexOfAny(['/', '\\', ':']) < 0
+        && name.StartsWith(Path.GetFileName(tablePath) + RestructureBackupInfix, StringComparison.OrdinalIgnoreCase);
+
+    // What the change has got to, for what it reports when something fails.
+    private enum RestructurePhase { Undecided, Publishing, Decided, Retiring }
+
+    private DbfTable SwapInRestructured(string ready, string backup, FileStream hold, RestructureManifest manifest, int changed)
     {
         var path = _path!;
-        Exception? givenUp = null;
-        using (HoldRestructure(ready))
+        var phase = RestructurePhase.Undecided;
+        using (hold)
         {
             DisposeFiles(); // Windows won't rename a file that's open
             try
             {
                 RestructurePoint?.Invoke("closed");
-                ThrowIfAnyInUse(path, ready);
-                if (StagedFile(ready, MemoExtensions) is { } memo && FindMemoBeside(path) is { } own)
-                    MoveIntoPlace(memo, own, backup, "memo");
-                Decide(ready);
+                ThrowIfAnyInUse(path, manifest);
+                // Only the old table's own memo file moves before the decision: the old .dbf reads the copy as well as its own.
+                if (manifest.Memo is not null && manifest.MemoOriginal is not null)
+                    MoveIntoPlace(path, ready, backup, manifest.Memo, "memo");
+                phase = RestructurePhase.Publishing;
+                PublishDecision(backup);
+                phase = RestructurePhase.Decided;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
             {
-                givenUp = ex;
-                try
+                if (phase == RestructurePhase.Publishing && DecisionState(backup) is not false)
                 {
-                    PutBack(path, backup);
-                    DeleteIfEmpty(backup); // before the folder goes: undoing again never needs an empty backup
+                    // Published after all (the rename went through) or can't be told: the change may be decided,
+                    // so it's left to finish, never undone.
+                    if (DecisionState(backup) is null)
+                        throw FileFailure(ex, path, "The table's new structure may or may not have been decided: publishing the decision failed partway.",
+                            "Open the table with writable: true, exclusive: true, which finishes the change or puts the table back, as the files on disk say.",
+                            DbfErrorCode.IncompleteTransaction);
+                    phase = RestructurePhase.Decided;
                 }
-                catch (Exception putBack) when (putBack is IOException or UnauthorizedAccessException)
+                else
                 {
-                    throw FileFailure(putBack, path, "The table's structure couldn't be changed, and its memo file couldn't be put back yet.",
-                        "Open the table with writable: true, exclusive: true, which puts the table back as it was.");
+                    try
+                    {
+                        Undo(path, ready, backup, manifest);
+                        Retire(path, ready);
+                    }
+                    catch (Exception undo) when (undo is IOException or UnauthorizedAccessException && undo is not DbfException)
+                    {
+                        throw FileFailure(undo, path, "The table's structure couldn't be changed, and putting it back as it was didn't finish yet.",
+                            "Open the table with writable: true, exclusive: true, which puts the table back as it was.", DbfErrorCode.IncompleteTransaction);
+                    }
+                    hold.Dispose();
+                    DeleteAbandoned(backup);
+                    throw FileFailure(ex, path, "The table's structure couldn't be changed, so it was left as it was.",
+                        "Close any other program using the table, open it exclusively again and repeat the change.");
                 }
             }
-            if (givenUp is null)
+
+            try
             {
                 RestructurePoint?.Invoke("committed");
-                try
-                {
-                    RollForward(path, ready, backup);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
-                {
-                    throw FileFailure(ex, path, "The table's new structure is decided, but not every file could be put in place yet.",
-                        "Open the table with writable: true, exclusive: true, which finishes the change.", DbfErrorCode.IncompleteTransaction);
-                }
+                RollForward(path, ready, backup, manifest);
             }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+            {
+                throw FileFailure(ex, path, "The table's new structure is decided, but not every file could be put in place yet.",
+                    "Open the table with writable: true, exclusive: true, which finishes the change.", DbfErrorCode.IncompleteTransaction);
+            }
+            phase = RestructurePhase.Retiring;
+            try
+            {
+                Retire(path, ready);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
+            {
+                throw FileFailure(ex, path, "The table has its new structure, but the folder its new files came from couldn't be cleared away, and writes wait until it is.",
+                    "Close any other program using the table's folder, then open the table with writable: true, exclusive: true.", DbfErrorCode.IncompleteTransaction);
+            }
+
+            // Handed over still under the lock: nothing finishes or undoes this change behind the reopened table.
+            var table = OpenPath(path, writable: true, Encoding, ignoreMissingMemo: false, _allowUnmaintainedIndexes, _maintainFoxProIndexes, exclusive: true);
+            RestructurePoint?.Invoke("reopened");
+            table.FlushWritesToDisk = FlushWritesToDisk;
+            table.UseJournal = _useJournal;
+            table.DeferIndexWrites = DeferIndexWrites;
+            table.RefuseLinks = RefuseLinks;
+            table._lockScheme = _lockScheme;
+            table._lockTimeout = _lockTimeout;
+            table._requireLocks = _requireLocks;
+            table.StructureBackupPath = backup;
+            table.StructureValuesChanged = changed;
+            hold.Dispose();
+            ClearBookkeeping(backup);
+            return table;
         }
-        Retire(path, ready); // after the lock is let go: Windows won't rename a folder with an open file in it
-        if (givenUp is not null)
-        {
-            throw FileFailure(givenUp, path, "The table's structure couldn't be changed, so it was left as it was.",
-                "Close any other program using the table, open it exclusively again and repeat the change.");
-        }
-
-        var table = OpenPath(path, writable: true, Encoding, ignoreMissingMemo: false, _allowUnmaintainedIndexes, _maintainFoxProIndexes, exclusive: true);
-        table.FlushWritesToDisk = FlushWritesToDisk;
-        table.UseJournal = _useJournal;
-        table.DeferIndexWrites = DeferIndexWrites;
-        table.RefuseLinks = RefuseLinks;
-        table._lockScheme = _lockScheme;
-        table._lockTimeout = _lockTimeout;
-        table._requireLocks = _requireLocks;
-        table.StructureBackupPath = backup;
-        table.StructureValuesChanged = changed;
-        return table;
     }
 
-    private static readonly string[] MemoExtensions = [".dbt", ".fpt"];
-    private static readonly string[] CompanionExtensions = [".mdx", ".cdx", ".dbt", ".fpt"];
+    // The change creates its lock; an open finishing one only ever takes a lock that's there, so it
+    // never leaves one in a backup whose change has ended.
+    private static FileStream HoldRestructure(string backup, bool create = false) =>
+        new(Path.Combine(backup, RestructureLockName), create ? FileMode.CreateNew : FileMode.Open, FileAccess.ReadWrite, FileShare.None);
 
-    private static FileStream HoldRestructure(string ready) =>
-        new(Path.Combine(ready, RestructureLockName), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-
-    // The decision, forced to disk: from here on the change is finished, never undone.
-    private static void Decide(string ready)
+    // The decision: written under a temporary name and forced to disk, then renamed. Only the final
+    // name counts, so a failure before the rename leaves the change undecided.
+    private static void PublishDecision(string backup)
     {
-        using var commit = new FileStream(Path.Combine(ready, RestructureCommitName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        commit.Flush(flushToDisk: true);
+        var temporary = Path.Combine(backup, RestructureCommitName + ".tmp");
+        using (var commit = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+            commit.Flush(flushToDisk: true);
+        RestructurePoint?.Invoke("deciding");
+        File.Move(temporary, Path.Combine(backup, RestructureCommitName));
+        RestructurePoint?.Invoke("decided");
     }
 
-    // The backup's name, written into the new table's folder before it was renamed ready, so a ready
-    // folder always holds one.
-    private static void WriteRestructureNote(string partial, string backup)
+    // True when the decision is published, false when it plainly isn't, null when that can't be told.
+    private static bool? DecisionState(string backup)
     {
-        using var note = new FileStream(Path.Combine(partial, RestructureNoteName), FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        note.Write(Encoding.UTF8.GetBytes(Path.GetFileName(backup)));
-        note.Flush(flushToDisk: true);
-    }
-
-    // The backup folder the note names, or null when the note is missing, too long or not a name this
-    // table's changes use: it comes from a file, so it's checked before it's used as a path.
-    private static string? ReadRestructureNote(string path, string ready)
-    {
-        byte[] bytes;
         try
         {
-            using var note = new FileStream(Path.Combine(ready, RestructureNoteName), FileMode.Open, FileAccess.Read, FileShare.Read);
-            bytes = new byte[MaxRestructureNote + 1];
-            bytes = bytes[..note.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false)];
+            return File.Exists(Path.Combine(backup, RestructureCommitName));
         }
-        catch (FileNotFoundException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return null;
         }
-        if (bytes.Length > MaxRestructureNote)
-            return null;
-        var name = Encoding.UTF8.GetString(bytes).Trim();
-        if (name.Length == 0 || Path.GetFileName(name) != name
-            || !name.StartsWith(Path.GetFileName(path) + ".restructured-", StringComparison.OrdinalIgnoreCase))
-            return null;
-        return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, name);
     }
 
-    // TABLE.DBF.restructured-<UTC time to the millisecond>, named like the cut-off backups.
+    private static void WriteRecord(string file, string text)
+    {
+        using var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        stream.Write(Encoding.UTF8.GetBytes(text));
+        stream.Flush(flushToDisk: true);
+    }
+
+    // A small record the change wrote, or null when it's missing or longer than any it writes.
+    private static string? ReadRecord(string file)
+    {
+        try
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var bytes = new byte[MaxRestructureRecord + 1];
+            var read = stream.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
+            return read > MaxRestructureRecord ? null : Encoding.UTF8.GetString(bytes, 0, read).Trim();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+    }
+
+    // TABLE.DBF.restructured-<UTC time to the millisecond>, named like the cut-off backups. Never reused.
     private string NewRestructureBackup()
     {
-        var stem = $"{_path}.restructured-{CutOffClock():yyyyMMdd'T'HHmmss'.'fff'Z'}";
+        var stem = $"{_path}{RestructureBackupInfix}{CutOffClock():yyyyMMdd'T'HHmmss'.'fff'Z'}";
         for (var attempt = 1; ; attempt++)
         {
             var candidate = attempt == 1 ? stem : $"{stem}-{attempt}";
@@ -804,37 +930,37 @@ public sealed partial class DbfTable
     }
 
     // Every file the swap will replace, tried unshared now that this table's own handles are closed,
-    // so one another program holds open (an index opened to read, say) stops the change before the
-    // .dbf moves. A program that opens one after this is caught by the moves themselves: on Windows
-    // they fail, and the change is undone; elsewhere a Thunder.Dbf open checks it has the file now in
-    // place (see OpenPath).
-    private static void ThrowIfAnyInUse(string path, string ready)
+    // so one another program holds open (an index opened to read, say) stops the change before
+    // anything moves. One opened after this is caught by the moves themselves on Windows, and by an
+    // open's identity check elsewhere (see OpenTableFile).
+    private static void ThrowIfAnyInUse(string path, RestructureManifest manifest)
     {
-        var replaced = Directory.GetFiles(ready).Select(f => FindCompanion(path, Path.GetExtension(f))).Append(path);
-        foreach (var file in replaced.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        foreach (var name in new[] { manifest.Table, manifest.Memo, manifest.MemoOriginal, manifest.Index, manifest.IndexOriginal }.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
         {
+            var file = Path.Combine(folder, name);
             if (File.Exists(file))
                 new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
         }
     }
 
-    // The staged file with one of these extensions, named after the table, or null.
-    private static string? StagedFile(string ready, IReadOnlyCollection<string> extensions) =>
-        Directory.EnumerateFiles(ready).FirstOrDefault(f => extensions.Contains(Path.GetExtension(f).ToLowerInvariant()));
-
-    private static string? FindMemoBeside(string path) => FindCompanion(path, ".dbt") ?? FindCompanion(path, ".fpt");
-
-    // Two renames: the old file into the backup, then the new one into its place. Run again after a
-    // kill, it carries on from whichever of them was done.
-    private static void MoveIntoPlace(string staged, string destination, string backup, string what)
+    // Two renames: the file at the destination into the backup, then the staged one into its place.
+    // Run again after a kill, it carries on from whichever of them was done.
+    private static void MoveIntoPlace(string path, string ready, string backup, string name, string what)
     {
+        var staged = Path.Combine(ready, name);
+        if (!File.Exists(staged))
+            return; // moved in already
+        RequireRealFile(staged);
+        var destination = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, name);
         if (File.Exists(destination))
         {
-            var aside = Path.Combine(backup, Path.GetFileName(destination));
+            RequireRealFile(destination);
+            var aside = Path.Combine(backup, name);
             if (File.Exists(aside))
                 throw new DbfException(DbfErrorCode.IncompleteTransaction,
                     "A change of this table's structure found an old file already in its backup, so it stopped rather than overwrite either.",
-                    "Compare the file beside the table with the one in the newest .restructured- folder, keep the right one, and open the table exclusively again.",
+                    "Compare the file beside the table with the one in the change's .restructured- folder, keep the right one, and open the table exclusively again.",
                     destination);
             File.Move(destination, aside);
             RestructurePoint?.Invoke($"{what} moved aside");
@@ -843,116 +969,161 @@ public sealed partial class DbfTable
         RestructurePoint?.Invoke($"{what} moved in");
     }
 
-    // After the decision: the .dbf, then the index and a memo file the old table didn't have; a memo
-    // file the new structure has no use for joins the backup.
-    private static void RollForward(string path, string ready, string backup)
+    // After the decision: the .dbf, then the index and a memo file the old table didn't have; then
+    // the old memo file, when the new table has none, joins the backup.
+    private static void RollForward(string path, string ready, string backup, RestructureManifest manifest)
     {
-        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        if (Directory.EnumerateFiles(ready).FirstOrDefault(f => Path.GetExtension(f).Equals(".dbf", StringComparison.OrdinalIgnoreCase)
-                && Path.GetFileNameWithoutExtension(f).Equals(Path.GetFileNameWithoutExtension(path), StringComparison.OrdinalIgnoreCase)) is { } table)
-            MoveIntoPlace(table, Path.Combine(folder, Path.GetFileName(table)), backup, "table");
-
-        foreach (var file in Directory.GetFiles(ready))
+        MoveIntoPlace(path, ready, backup, manifest.Table, "table");
+        if (manifest.Index is not null)
+            MoveIntoPlace(path, ready, backup, manifest.Index, "index");
+        if (manifest.Memo is not null)
+            MoveIntoPlace(path, ready, backup, manifest.Memo, "memo");
+        if (manifest.Memo is null && manifest.MemoOriginal is not null)
         {
-            // Only what a change stages, named after this table: a stale or foreign folder can't put anything else in place.
-            var extension = Path.GetExtension(file).ToLowerInvariant();
-            if (!CompanionExtensions.Contains(extension)
-                || !Path.GetFileNameWithoutExtension(file).Equals(Path.GetFileNameWithoutExtension(path), StringComparison.OrdinalIgnoreCase))
-                continue;
-            MoveIntoPlace(file, FindCompanion(path, extension) ?? Path.Combine(folder, Path.GetFileName(file)), backup,
-                extension is ".dbt" or ".fpt" ? "memo" : "index");
-        }
-
-        if (ReadHeaderOf(path).Fields.Any(DbfValueCodec.IsMemoField))
-            return;
-        foreach (var extension in MemoExtensions)
-        {
-            if (FindCompanion(path, extension) is { } unused)
+            var unused = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, manifest.MemoOriginal);
+            if (File.Exists(unused))
             {
-                File.Move(unused, Path.Combine(backup, Path.GetFileName(unused)));
+                RequireRealFile(unused);
+                File.Move(unused, Path.Combine(backup, manifest.MemoOriginal));
                 RestructurePoint?.Invoke("unused memo moved aside");
             }
         }
     }
 
-    // Before the decision only the old table's own memo file can have gone into the backup, and only
-    // to be replaced by the copy: it comes back over the copy, so the old table is exactly as it was.
-    private static void PutBack(string path, string backup)
+    // Before the decision: every file the backup holds goes back over whatever is at its place now,
+    // and a file the change put where there was none (a memo file or index the table didn't have)
+    // goes back into the ready folder. The old table is then byte for byte as it was.
+    private static void Undo(string path, string ready, string backup, RestructureManifest manifest)
     {
-        if (!Directory.Exists(backup))
-            return;
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
-        foreach (var file in Directory.GetFiles(backup))
+        foreach (var name in new[] { manifest.Table, manifest.Memo, manifest.Index, manifest.MemoOriginal }.OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            File.Move(file, Path.Combine(folder, Path.GetFileName(file)), overwrite: true);
-            RestructurePoint?.Invoke("put back");
+            var destination = Path.Combine(folder, name);
+            var aside = Path.Combine(backup, name);
+            if (File.Exists(aside))
+            {
+                RequireRealFile(aside);
+                File.Move(aside, destination, overwrite: true);
+                RestructurePoint?.Invoke("put back");
+            }
+            else if (!File.Exists(Path.Combine(ready, name)) && File.Exists(destination) && name != manifest.MemoOriginal
+                     && name != manifest.IndexOriginal && !name.Equals(manifest.Table, StringComparison.OrdinalIgnoreCase))
+            {
+                RequireRealFile(destination);
+                File.Move(destination, Path.Combine(ready, name));
+                RestructurePoint?.Invoke("taken back");
+            }
         }
     }
 
-    // The folder goes out of the way under another name before anything in it is deleted, so a
-    // process killed meanwhile leaves only a folder nothing reads; the next change or open clears it.
+    // The ready folder goes out of the way under another name before anything in it is deleted, so a
+    // process killed meanwhile leaves only a folder nothing reads.
     private static void Retire(string path, string ready)
     {
         var retired = path + RestructureRetiredSuffix;
         DeleteQuietly(retired);
         try
         {
+            RestructurePoint?.Invoke("retiring");
             Directory.Move(ready, retired);
         }
         catch (DirectoryNotFoundException)
         {
-            return; // another exclusive open retired it first
+            return;
         }
         RestructurePoint?.Invoke("retired");
         DeleteQuietly(retired);
     }
 
+    // A folder only this code writes, emptied and deleted, never entered when it's a link: that
+    // could reach files anywhere.
     private static void DeleteQuietly(string folder)
     {
         try
         {
             if (!Directory.Exists(folder))
                 return;
+            RequireRealFolder(folder);
             foreach (var file in Directory.GetFiles(folder))
             {
-                File.Delete(file);
+                File.Delete(file); // a link here is deleted itself, never followed
                 RestructurePoint?.Invoke("deleted");
             }
-            Directory.Delete(folder, recursive: true);
+            foreach (var inner in Directory.GetDirectories(folder))
+                DeleteQuietly(inner);
+            Directory.Delete(folder);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
         {
             // Nothing reads it; the next change or exclusive open tries again.
         }
     }
 
-    private static void DeleteIfEmpty(string folder)
+    private static void RequireRealFolder(string folder)
+    {
+        var info = new DirectoryInfo(folder);
+        if (info.LinkTarget is not null || (info.Exists && info.Attributes.HasFlag(FileAttributes.ReparsePoint)))
+            throw new DbfException(DbfErrorCode.PathEscapesFolder, "A folder Thunder.Dbf keeps beside the table for changing its structure is a link, so it wasn't entered.",
+                "Remove the link (it isn't one Thunder.Dbf made), then open the table again.", folder);
+    }
+
+    private static void RequireRealFile(string file)
+    {
+        if (new FileInfo(file).LinkTarget is not null)
+            throw new DbfException(DbfErrorCode.PathEscapesFolder, "A file a change of this table's structure would move is a link, so it wasn't moved.",
+                "Replace the link with the real file, or remove it, then open the table again.", file);
+    }
+
+    // After the change is finished: the backup keeps the old files, and loses the lock, manifest and decision.
+    private static void ClearBookkeeping(string backup)
+    {
+        foreach (var name in BookkeepingNames)
+        {
+            try
+            {
+                File.Delete(Path.Combine(backup, name));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left in the backup; the next exclusive open clears it.
+            }
+        }
+        RestructurePoint?.Invoke("cleaned");
+    }
+
+    // A backup no change finished: it holds only bookkeeping (the undoing put every old file back), so it goes.
+    private static void DeleteAbandoned(string backup)
     {
         try
         {
-            if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any())
-                Directory.Delete(folder);
+            if (!Directory.Exists(backup))
+                return;
+            RequireRealFolder(backup);
+            if (Directory.EnumerateFileSystemEntries(backup).Any(e => !BookkeepingNames.Contains(Path.GetFileName(e), StringComparer.OrdinalIgnoreCase)))
+                return;
+            foreach (var name in BookkeepingNames)
+                File.Delete(Path.Combine(backup, name));
+            Directory.Delete(backup);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
         {
-            // An empty folder left behind costs nothing.
+            // An empty folder left behind costs nothing; the next exclusive open tries again.
         }
     }
 
-    // On a writable exclusive open, before the table's files are opened (the .dbf itself may be in the
-    // backup, between its two renames): a change of structure cut off partway is finished when its
-    // decision is on disk, and undone when it isn't. Returns the backup folder of a change it finished.
+    // On a writable exclusive open, before the table's files are opened (the .dbf may be in the
+    // backup, between its two renames). Returns the backup folder of a change it finished.
     private static string? FinishRestructure(string path)
     {
-        var ready = path + RestructureReadySuffix;
-        if (!Directory.Exists(ready))
-        {
-            DeleteQuietly(path + RestructureRetiredSuffix);
-            return null;
-        }
         try
         {
-            return FinishRestructureCore(path, ready);
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                if (FinishRestructureOnce(path, out var backup))
+                    return backup;
+            }
+            throw new DbfException(DbfErrorCode.FileInUse, "This table's structure kept changing while the open looked at it.",
+                "Wait for the other program to finish, then open the table again.", path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException)
         {
@@ -961,40 +1132,62 @@ public sealed partial class DbfTable
         }
     }
 
-    private static string? FinishRestructureCore(string path, string ready)
+    // One look. False when the transaction it read about changed under it, so the caller looks again.
+    private static bool FinishRestructureOnce(string path, out string? finished)
     {
-        // Whoever holds the table, or the change's lock, has the change in hand: a change holds the
-        // table until it has taken the lock.
+        finished = null;
+        var ready = path + RestructureReadySuffix;
+        if (!Directory.Exists(ready))
+        {
+            ClearLeftovers(path);
+            return true;
+        }
+        RequireRealFolder(ready);
+        var id = ReadRecord(Path.Combine(ready, RestructureIdName));
+        if (id is null || !IsBackupName(id, path))
+            throw UnreadableRecord(path, ready);
+        var backup = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path))!, id);
+        RestructurePoint?.Invoke("recovery read");
+
+        // Whoever holds the table, or the transaction's lock, has the change in hand.
         try
         {
             if (File.Exists(path))
                 new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
-            using var hold = HoldRestructure(ready);
-            var committed = File.Exists(Path.Combine(ready, RestructureCommitName));
-            var backup = ReadRestructureNote(path, ready);
-            if (committed)
+            if (!Directory.Exists(backup))
+                return !Directory.Exists(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id
+                    ? false
+                    : throw UnreadableRecord(path, ready);
+            RequireRealFolder(backup);
+            using var hold = HoldRestructure(backup);
+            RestructurePoint?.Invoke("recovery locked");
+            // The same transaction still? A paused open may have read about one that has since ended.
+            if (!Directory.Exists(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id)
+                return false;
+            var manifest = ReadRecord(Path.Combine(backup, RestructureManifestName)) is { } text ? RestructureManifest.Read(text, path) : null;
+            if (manifest is null || !manifest.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
+                throw UnreadableRecord(path, ready);
+
+            if (File.Exists(Path.Combine(backup, RestructureCommitName)))
             {
-                if (backup is null)
-                    throw UnreadableNote(path, ready, committed);
-                Directory.CreateDirectory(backup);
-                RollForward(path, ready, backup);
+                RollForward(path, ready, backup, manifest);
+                Retire(path, ready);
+                hold.Dispose();
+                ClearBookkeeping(backup);
+                finished = backup;
             }
-            else if (backup is not null)
+            else
             {
-                PutBack(path, backup);
-                DeleteIfEmpty(backup); // before the folder goes: undoing again never needs an empty backup
+                Undo(path, ready, backup, manifest);
+                Retire(path, ready);
+                hold.Dispose();
+                DeleteAbandoned(backup);
             }
-            else if (!OldTableWhole(path))
-            {
-                throw UnreadableNote(path, ready, committed);
-            }
-            hold.Dispose();
-            Retire(path, ready);
-            return committed ? backup : null;
+            return true;
         }
-        catch (DirectoryNotFoundException)
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            return null; // the change finished meanwhile
+            return false; // the backup or its lock went: that transaction ended meanwhile
         }
         catch (IOException ex) when (ex is not DbfException && DbfException.Translate(ex, path, FileAccess.ReadWrite) is { Code: DbfErrorCode.FileInUse })
         {
@@ -1003,20 +1196,42 @@ public sealed partial class DbfTable
         }
     }
 
-    // Undone without a note: safe only when the old .dbf and its memo file are both in place.
-    private static bool OldTableWhole(string path)
+    // With no change under way: folders left by kills, which nothing reads, and the bookkeeping of
+    // finished changes (once nobody holds their lock).
+    private static void ClearLeftovers(string path)
     {
-        if (!File.Exists(path))
-            return false;
-        var header = ReadHeaderOf(path);
-        return !header.Fields.Any(DbfValueCodec.IsMemoField) || DbfMemoFile.FindFor(path, header) is not null;
+        DeleteQuietly(path + RestructurePartialSuffix);
+        DeleteQuietly(path + RestructureRetiredSuffix);
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
+        foreach (var backup in Directory.EnumerateDirectories(folder, Path.GetFileName(path) + RestructureBackupInfix + "*"))
+        {
+            if (!BookkeepingNames.Any(n => File.Exists(Path.Combine(backup, n))))
+                continue;
+            RequireRealFolder(backup);
+            try
+            {
+                using (HoldRestructure(backup))
+                {
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                // No lock left to hold: nobody is using it.
+            }
+            catch (IOException)
+            {
+                continue; // a change holds it: it clears up after itself
+            }
+            if (File.Exists(Path.Combine(backup, RestructureCommitName)))
+                ClearBookkeeping(backup);
+            else
+                DeleteAbandoned(backup);
+        }
     }
 
-    private static DbfException UnreadableNote(string path, string ready, bool committed) => new(DbfErrorCode.IncompleteTransaction,
-        "A change of this table's structure was cut off, and its note saying where the old files went can't be read.",
-        committed
-            ? $"Move the files in the {RestructureReadySuffix} folder beside the table into place by hand (the old ones are in the newest .restructured- folder), then delete that folder."
-            : $"The change wasn't decided: move any file in the newest .restructured- folder back beside the table, then delete the {RestructureReadySuffix} folder.",
+    private static DbfException UnreadableRecord(string path, string ready) => new(DbfErrorCode.IncompleteTransaction,
+        "A change of this table's structure was cut off, and its record of which files go where can't be read.",
+        $"Compare the table's files with those in the {RestructureReadySuffix} folder and the newest .restructured- folder beside it, put the right ones in place by hand, then delete the {RestructureReadySuffix} folder.",
         path, diagnostic: ready);
 
     // A filesystem failure in a change of structure, explained without the paths it names (they go to
@@ -1046,22 +1261,4 @@ public sealed partial class DbfTable
     private static DbfException RestructureUnderWay(string path) => new(DbfErrorCode.IncompleteTransaction,
         "This table's structure is being changed, or a change of it was cut off, so its files may be a mix of old and new.",
         "Wait a moment and try again; if it persists, open the table with writable: true, exclusive: true, which finishes the change or puts the table back as it was.", path);
-
-    // True when the open file is the one at the path now. A change of structure renames the old
-    // .dbf into its backup, and on Linux and macOS a handle opened just before keeps pointing at it.
-    // The device and inode say so exactly; where they can't be read, the creation time, which writes
-    // don't change, stands in (the new .dbf was created after the old).
-    private static bool IsFileAtPath(FileStream stream, string path)
-    {
-        if (FileIdentity.Same(stream, path) is { } same)
-            return same;
-        try
-        {
-            return File.GetCreationTimeUtc(stream.SafeFileHandle) == File.GetCreationTimeUtc(path);
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-    }
 }

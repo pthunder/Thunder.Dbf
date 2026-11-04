@@ -213,6 +213,14 @@ public sealed class DbfDatabase : IDisposable
         var path = Directory.EnumerateFiles(Folder)
             .FirstOrDefault(p => Path.GetExtension(p).Equals(".dbf", StringComparison.OrdinalIgnoreCase)
                 && Path.GetFileNameWithoutExtension(p).Equals(wanted, StringComparison.OrdinalIgnoreCase));
+        // A change of structure cut off between the .dbf's two renames leaves it in its backup: the
+        // table is found through the change's folder, so an exclusive open can finish the change.
+        path ??= Directory.EnumerateDirectories(Folder, "*" + DbfTable.RestructureReadySuffix)
+            .Select(d => Path.GetFileName(d)[..^DbfTable.RestructureReadySuffix.Length])
+            .Where(t => Path.GetExtension(t).Equals(".dbf", StringComparison.OrdinalIgnoreCase)
+                && Path.GetFileNameWithoutExtension(t).Equals(wanted, StringComparison.OrdinalIgnoreCase))
+            .Select(t => Path.Combine(Folder, t))
+            .FirstOrDefault();
 
         if (path is null)
         {

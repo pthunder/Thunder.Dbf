@@ -29,7 +29,7 @@ dBASE's own limits apply (2 GB files, 1 billion records). Thunder.Dbf streams ev
 Reads are: a Seek through a `.cdx` tag answers in microseconds, and reading a whole table runs at hundreds of thousands of records a second, ahead of the Visual FoxPro OLE DB driver on the same machine. Writes are as safe as you ask them to be. By default every write is forced to disk in a crash-safe order, which is slower than Visual FoxPro, which never forces its writes. With `FlushWritesToDisk = false` they're many times faster, close to the OLE DB driver on tables with a few index tags, and bulk loads with `DeferIndexWrites` are faster again. See [Durability](durability.md#choosing) for what each setting trades.
 
 **Does it need ODBC, OLE DB, Jet or a 32-bit process?**
-No. It's pure .NET with no native dependencies, 64-bit, on Windows, Linux and macOS.
+No. It's pure .NET, 64-bit, on Windows, Linux and macOS, with no bundled native library. On Linux and macOS it calls the C library's `stat` and `fstat` directly (always present there), to tell whether a table's file was swapped while it was being opened.
 
 **Can I use it in a mobile app?**
 Yes: the core package is trim- and AOT-compatible, so it can go into a .NET MAUI app on iOS or Android, and CI checks it with Native AOT on every change. Use anything but `AsQueryable<T>()`, keep tables in the app's own folder, and remember they go when the app is uninstalled. See [Mobile and AOT](getting-started.md#mobile-and-aot).
