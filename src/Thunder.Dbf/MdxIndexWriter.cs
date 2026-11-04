@@ -291,14 +291,14 @@ public sealed partial class MdxTag
     internal byte[] KeyFor(DbfRecord record)
     {
         ParseExpressions();
-        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression);
+        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression, FixedDigitCount);
     }
 
     /// <summary>
     /// The stored bytes for one key value. Shared with INDEX ON, which encodes every key before a new
     /// tag exists, so a value that can't be stored stops the command before the file changes.
     /// </summary>
-    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression)
+    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, int? digitCount = null)
     {
         switch (keyType)
         {
@@ -314,10 +314,10 @@ public sealed partial class MdxTag
             case 'N':
                 return value switch
                 {
-                    decimal d => MdxKeys.EncodeNumeric(d),
-                    double d => MdxKeys.EncodeNumeric(d),
-                    int or long => MdxKeys.EncodeNumeric(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
-                    null => MdxKeys.EncodeNumeric(0m),
+                    decimal d => MdxKeys.EncodeNumeric(d, digitCount),
+                    double d => MdxKeys.EncodeNumeric(d, digitCount),
+                    int or long => MdxKeys.EncodeNumeric(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture), digitCount),
+                    null => MdxKeys.EncodeNumeric(0m, digitCount),
                     _ => throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a number."),
                 };
             default:

@@ -10,9 +10,11 @@ namespace Thunder.Dbf.Tests;
 // decoded insert path that #39 replaced, so any change to how keys are placed, nodes split, separators
 // chosen or padding zeroed shows here, with and without a deferred batch. Only the two dates in the
 // file header (bytes 1-3 and 44-46, the day it was made and last changed) are blanked before hashing.
+// Re-pinned when numeric keys began counting significant digits, as dBASE's engine does: compared
+// with the file before, exactly 301 bytes differ, every one the digit-count byte of a numeric key.
 public sealed class MdxBytesTests : IDisposable
 {
-    private const string Expected = "DCA10895086ECC42A16056DA96D944BC3A7CD9AEE8EB302CC3C5C42A349AC09B";
+    private const string Expected = "16E6D7DC66FB4A7AD3B32B511CADDECD406DE75DA2F32F7A83B194B5167DF980";
 
     private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-mdx-bytes-");
 

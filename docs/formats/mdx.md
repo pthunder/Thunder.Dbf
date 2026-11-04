@@ -96,5 +96,14 @@ A process killed between any two leaves a tree that finds every tag still counte
   - byte 1 = sign (bit 7) | digit count << 2 | 0x01
   - bytes 2-11 = up to 20 BCD digits, first digit in the high nibble
   - Zero is `34 01 00 …`.
-  - Examples: 1 → `35 05 10`, 13 → `36 09 13`.
+  - Examples: 1 → `35 05 10`, 13 → `36 09 13`, 15940 → `39 11 15 94`.
   - Compare by decoded value: Xbase64's byte compare sorts zero wrongly.
+  - **The digit count depends on the writer:**
+    - dBASE's engine (SIMATIC's files) counts significant digits. 15940 counts 4 and 100 counts 1.
+    - Jet gives every key of a field one count, whatever its value: 10 for an N(20,5), as measured on Windows.
+    - Xbase64, and Thunder.Dbf 0.4.0 and earlier, count the digits printed. 15940 counts 5.
+  - **Jet compares the bytes** when it steps from one match to the next. If a key with the same value but a different count follows a deleted one, Jet can't find that live record (`WHERE ID = 95` returns nothing).
+  - **So Thunder.Dbf writes a tag's own count:**
+    - It reads the first and last leaf of the tag.
+    - If their keys share one count that is neither their significant nor their printed digits, that's a fixed width (Jet's). Thunder.Dbf writes every key with it, through updates and rebuilds.
+    - Otherwise it counts significant digits, as dBASE does. Every numeric key in the SIMATIC files re-encodes to the same bytes.

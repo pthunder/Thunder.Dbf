@@ -355,6 +355,71 @@ public sealed partial class MdxTag
 
     private int Order(int ascending) => IsDescending ? -ascending : ascending;
 
+    // ---- the digit count numeric keys carry -----------------------------------------------
+
+    // Byte 1 of a numeric key counts its digits, and writers disagree on what to count: dBASE's
+    // engine (SIMATIC's files) counts the significant ones, so 15940 counts 4, while Jet gives every
+    // key of a field the same count (10 for an N(20,5)). Jet steps from one match to the next by
+    // comparing bytes, so a key in another form hides a live record behind a deleted one (found by
+    // the Jet tests on Windows). A tag written with a fixed count keeps it, even when earlier versions
+    // of Thunder.Dbf have left keys of their own among its keys; any other tag counts significant digits.
+    private int? _digitCount;
+    private bool _digitCountKnown;
+
+    /// <summary>The digit count this tag's numeric keys are written with, or null to count significant digits.</summary>
+    internal int? FixedDigitCount
+    {
+        get
+        {
+            if (!_digitCountKnown)
+            {
+                _digitCount = LearnDigitCount();
+                _digitCountKnown = true;
+            }
+            return _digitCount;
+        }
+    }
+
+    private int? LearnDigitCount()
+    {
+        if (KeyType != 'N')
+            return null;
+        try
+        {
+            // Only the first and last leaves: cheap, and they hold the shortest and longest values. A
+            // key counting its significant digits (dBASE) or its printed digits (earlier versions of
+            // Thunder.Dbf) says nothing; what's left is a fixed width.
+            var keys = EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true));
+            var widths = keys
+                .Where(k => MdxKeys.DigitCount(k) != MdxKeys.SignificantDigits(k) && MdxKeys.DigitCount(k) != MdxKeys.PrintedDigits(k))
+                .Select(k => MdxKeys.DigitCount(k))
+                .Distinct()
+                .ToList();
+            return widths is [var width] ? width : null;
+        }
+        catch (InvalidDataException)
+        {
+            return null; // a damaged tree has nothing to follow, and a rebuild must still work
+        }
+    }
+
+    // The keys of the first or last leaf, reached down the edge of the tree.
+    private List<byte[]> EdgeLeafKeys(bool rightmost)
+    {
+        var page = BinaryPrimitives.ReadInt32LittleEndian(_index.ReadBlock(_headerPage));
+        for (var depth = 0; depth <= MaxDepth; depth++)
+        {
+            var node = _index.ReadBlock(page);
+            var count = BinaryPrimitives.ReadInt32LittleEndian(node);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {page} claims {count} keys.");
+            if (BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength, 4)) == 0)
+                return [.. Enumerable.Range(0, count).Select(i => node.AsSpan(8 + i * ItemLength + 4, KeyLength).ToArray())];
+            page = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + (rightmost ? count : 0) * ItemLength, 4));
+        }
+        throw new InvalidDataException($"Tag {Name} is deeper than {MaxDepth} levels.");
+    }
+
     // ---- keys -----------------------------------------------------------------------------
 
     private abstract record KeyProbe;
@@ -471,6 +536,23 @@ internal static class MdxKeys
 
     private static bool IsNegative(ReadOnlySpan<byte> key) => (key[1] & 0x80) != 0;
 
+    /// <summary>The digit count a stored key carries in byte 1.</summary>
+    public static int DigitCount(ReadOnlySpan<byte> key) => (key[1] >> 2) & 0x1F;
+
+    /// <summary>
+    /// The count earlier versions of Thunder.Dbf gave this key's value, after Xbase64: every digit of the
+    /// number as printed without its zero padding, so 15940 counts 5 and .05 counts 2.
+    /// </summary>
+    public static int PrintedDigits(ReadOnlySpan<byte> key)
+    {
+        var significant = SignificantDigits(key);
+        var exponent = key[0] - ExponentBias;
+        return significant == 0 ? 0 : exponent >= significant ? exponent : exponent > 0 ? significant : significant - exponent;
+    }
+
+    /// <summary>The count dBASE's engine would give this key's value: its significant digits.</summary>
+    public static int SignificantDigits(ReadOnlySpan<byte> key) => Digits(key).TrimEnd('0').Length;
+
     private static bool IsZero(ReadOnlySpan<byte> key) => key[2..NumericKeyLength].IndexOfAnyExcept((byte)0) < 0;
 
     private static string Digits(ReadOnlySpan<byte> key)
@@ -484,12 +566,14 @@ internal static class MdxKeys
         return digits.ToString();
     }
 
-    public static byte[] EncodeNumeric(double value)
+    /// <param name="value">The key's value.</param>
+    /// <param name="digitCount">The count for byte 1 (a tag's <see cref="MdxTag.FixedDigitCount"/>), or null for the significant digits.</param>
+    public static byte[] EncodeNumeric(double value, int? digitCount = null)
     {
         if (!double.IsFinite(value))
             throw new ArgumentException($"{value} can't be an index key.");
         if (value == 0)
-            return EncodeNumeric(0m);
+            return EncodeNumeric(0m, digitCount);
 
         // The shortest round-trip form ("1E+100", "2.5E-50", "123.45") has exactly the digits the
         // value was written with; "E19" would add binary noise like 1.0000000000000000159E+100.
@@ -502,13 +586,14 @@ internal static class MdxKeys
         var leadingZeros = digits.Length - digits.TrimStart('0').Length;
         var significant = digits[leadingZeros..].TrimEnd('0');
         var exponent = (point < 0 ? mantissa.Length : point) + power - leadingZeros;
-        return Pack(value < 0, significant, exponent, significant.Length);
+        return Pack(value < 0, significant, exponent, digitCount ?? significant.Length);
     }
 
-    public static byte[] EncodeNumeric(decimal value)
+    /// <inheritdoc cref="EncodeNumeric(double, int?)"/>
+    public static byte[] EncodeNumeric(decimal value, int? digitCount = null)
     {
         if (value == 0)
-            return Pack(negative: false, "", 0, 0);
+            return Pack(negative: false, "", 0, digitCount ?? 0);
 
         var text = Math.Abs(value).ToString(CultureInfo.InvariantCulture);
         var point = text.IndexOf('.');
@@ -529,10 +614,10 @@ internal static class MdxKeys
             significant = fraction[leadingZeros..];
         }
 
-        // Xbase64 counts every digit it printed after stripping zeros: 100 counts 3, .05 counts 2.
-        var count = whole.Length + fraction.Length;
-
-        return Pack(value < 0, significant, exponent, count);
+        // dBASE's engine counts significant digits: 15940 counts 4 and 100 counts 1, as in SIMATIC's
+        // files (Xbase64 counts every digit it printed, 5 and 3, which no file here was written with).
+        significant = significant.TrimEnd('0');
+        return Pack(value < 0, significant, exponent, digitCount ?? significant.Length);
     }
 
     private static byte[] Pack(bool negative, string significant, int exponent, int count)

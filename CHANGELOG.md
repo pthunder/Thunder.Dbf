@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Jet could miss live records through a dBASE `.mdx` number tag** that Thunder.Dbf had written to. This affects 0.2.0 to 0.4.0.
+  - Each number key stores a digit count. Jet writes every key of a field with one count (10 for an N(20,5)), and it compares bytes when it steps from one match to the next. Thunder.Dbf wrote each key's own count instead.
+  - The result: when a key followed a deleted record's key of the same value, Jet's `WHERE ID = 95` couldn't find the live record. On the Windows test PC, 2,000 ordinary writes left Jet missing 46 of 9,210 live IDs, and `RebuildIndex()` didn't put it right.
+  - Thunder.Dbf now writes a tag's own count, read from its first and last leaf, in every write and rebuild. That also repairs a Jet tag that earlier versions have already written to.
+  - Other tags count significant digits, as dBASE's engine does. Every numeric key in the SIMATIC test files re-encodes byte for byte.
+  - Values and their order don't change. Thunder.Dbf's own lookups read either form.
+- The tests that create symbolic links are skipped, not failed, on a machine that can't create links (Windows without Developer Mode or administrator rights).
+
 ### Added
 
 - `samples/Maui`: an iPhone CRM built with .NET MAUI. It opens any dBASE or FoxPro table from Files, with its memo and index files, and works out which fields hold the name, phone, follow-up date and so on from their names. Edits keep the `.cdx` or `.mdx` index up to date, and Share sends the files back out in their original format. Tested on the iOS 27 simulator.
