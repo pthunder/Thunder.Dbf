@@ -285,7 +285,16 @@ public sealed partial class DbfTable
     public void DropIndexTag(string name)
     {
         using var forced = ForceEveryWrite();
-        DropIndexTagCore(name);
+        try
+        {
+            DropIndexTagCore(name);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not DbfException && _path is not null)
+        {
+            // Paths stay in the log (FilePath and the inner exception), out of the message.
+            throw FileFailure(ex, _path, "The tag couldn't be dropped.",
+                "If the error repeats, close the table and open it again with writable: true, exclusive: true, which puts an interrupted drop's tag table back.");
+        }
     }
 
     private void DropIndexTagCore(string name)
