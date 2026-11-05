@@ -599,9 +599,10 @@ public sealed partial class DbfTable : IDisposable
         {
             using var tableLock = Locks.Table();
             Refresh();
-            // Counting every key reads the whole index (a second or more for a million records), so only
-            // an exclusive open, the one that repairs, counts them; a shared one checks the last records.
-            _mdxOutOfStep = _index.OutOfStep(this, countKeys: _exclusive);
+            // Every key is counted, by its leaves, on every writable open, as a .cdx is checked: an update
+            // cut off mid-table leaves an extra key only a count finds (about 0.1 s for a million records
+            // in three tags, well under a millisecond for an ordinary table).
+            _mdxOutOfStep = _index.OutOfStep(this);
         }
         catch (InvalidDataException ex)
         {

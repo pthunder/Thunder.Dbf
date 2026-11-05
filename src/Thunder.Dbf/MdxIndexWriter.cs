@@ -34,14 +34,24 @@ public sealed partial class MdxIndex
     /// Jet writing beside another writer, leaves a tag that fails one of them. The same checks a .cdx gets.
     /// </summary>
     /// <param name="table">The table the index belongs to.</param>
-    /// <param name="countKeys">Also count every tag's keys: a read of every leaf, done by an exclusive open and by Check(); a shared open checks only the last records.</param>
-    internal string? OutOfStep(DbfTable table, bool countKeys = true)
+    /// <param name="checkUnique">Also check each UNIQUE tag holds one key per distinct value: a read of every record, which Check() does.</param>
+    internal string? OutOfStep(DbfTable table, bool checkUnique = false)
     {
         var records = table.RecordCount;
-        foreach (var tag in countKeys ? Tags : [])
+        foreach (var tag in Tags)
         {
             if (tag.ForExpression is null && !tag.IsUnique && tag.CountKeys() is var keys && keys != records)
                 return $"Tag {tag.Name} holds {keys:N0} keys for {records:N0} records, so it isn't in step with the table (a write reached the table but not the index, or the index but not the table)";
+        }
+        // A UNIQUE tag holds one key for each value the records have (deleted ones included, as dBASE
+        // keeps them). Kills that hand a key on between records can leave one short or over.
+        foreach (var tag in checkUnique ? Tags.Where(t => t.IsUnique && t.ForExpression is null) : [])
+        {
+            var values = new HashSet<string>();
+            foreach (var record in table.ReadAll())
+                values.Add(Convert.ToHexString(tag.KeyFor(record)));
+            if (tag.CountKeys() is var keys && keys != values.Count)
+                return $"UNIQUE tag {tag.Name} holds {keys:N0} keys for {values.Count:N0} distinct values, so it isn't in step with the table";
         }
         for (var index = Math.Max(0, records - 2); index < records; index++)
         {

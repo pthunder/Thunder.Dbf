@@ -42,7 +42,7 @@ public sealed class MdxInStepTests : IDisposable
         using (var mdx = MdxIndex.Open(new FileStream(Path.ChangeExtension(_path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
             mdx["BYID"].Insert(MdxKeys.EncodeNumeric(9966m, NumericKeyStyle.Jet), 162);
 
-        AssertCaughtUntilRebuilt(exclusiveSays: "BYID holds 501 keys for 500 records", sharedSays: null);
+        AssertCaughtUntilRebuilt(exclusiveSays: "BYID holds 501 keys for 500 records", sharedSays: "BYID holds 501 keys for 500 records");
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public sealed class MdxInStepTests : IDisposable
             table.Append(501, "late");
         File.WriteAllBytes(mdxPath, before); // the record and the count reached the disk, the keys didn't
 
-        AssertCaughtUntilRebuilt(exclusiveSays: "holds 500 keys for 501 records", sharedSays: "has no key for record 501");
+        AssertCaughtUntilRebuilt(exclusiveSays: "holds 500 keys for 501 records", sharedSays: "holds 500 keys for 501 records");
     }
 
     [Fact]
@@ -80,6 +80,28 @@ public sealed class MdxInStepTests : IDisposable
     }
 
     [Fact]
+    public void Check_finds_a_UNIQUE_tag_a_key_short()
+    {
+        var path = Path.Combine(_dir.FullName, "CATS.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Character("STATUS", 10)]))
+        {
+            foreach (var status in new[] { "ACTIVE", "LAPSED", "ACTIVE", "GONE" })
+                table.Append(status);
+            table.Delete(3); // a deleted record keeps its key, as dBASE keeps it
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("STATUS", "status", unique: true);
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Empty(db.Check().Problems);
+
+        // A kill that handed LAPSED on to nobody: the tag loses that key.
+        using (var mdx = MdxIndex.Open(new FileStream(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
+            Assert.True(mdx["STATUS"].Remove(System.Text.Encoding.ASCII.GetBytes("LAPSED    "), 2));
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Message.Contains("UNIQUE tag STATUS holds 2 keys for 3 distinct values", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_table_in_step_opens_and_checks_clean()
     {
         using (var table = DbfTable.Open(_path, writable: true))
@@ -88,8 +110,7 @@ public sealed class MdxInStepTests : IDisposable
         Assert.Empty(db.Check().Problems);
     }
 
-    // Check() and an exclusive open count every key; a shared open, to stay fast on big tables, checks
-    // only that the last records have their keys, which is what an append cut off leaves.
+    // Every writable open counts every key, shared or exclusive, as a .cdx open does.
     private void AssertCaughtUntilRebuilt(string exclusiveSays, string? sharedSays)
     {
         using (var db = DbfDatabase.Open(_dir.FullName))

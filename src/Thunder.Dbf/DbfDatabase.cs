@@ -185,7 +185,7 @@ public sealed class DbfDatabase : IDisposable
     {
         try
         {
-            return index.OutOfStep(table);
+            return index.OutOfStep(table, checkUnique: true);
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
                                        or FormatException or ArgumentException or ArithmeticException)
