@@ -100,6 +100,29 @@ public sealed partial class DbfTable : IDisposable
     internal long? MemoMissingTail => _memo?.MissingTail();
 
     /// <summary>
+    /// True when every memo a record names reads whole: the tail a power cut took held only blocks
+    /// nobody uses yet. Padding over a memo that lost its end would make it read back with zeros in
+    /// place of its text, so then the file is left as it is, for a backup.
+    /// </summary>
+    internal bool MemosReadWhole()
+    {
+        var memoFields = Fields.Select((f, i) => (f, i)).Where(x => DbfValueCodec.IsMemoField(x.f)).Select(x => x.i).ToList();
+        try
+        {
+            foreach (var record in ReadAll())
+            {
+                foreach (var field in memoFields)
+                    _ = record[field];
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FormatException or IOException or EndOfStreamException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Opens a .dbf file and its .dbt/.fpt memo file. Files are opened shared, like dBASE does in
     /// multi-user mode, so the legacy app keeps working; writes coordinate with it through
     /// dBASE-compatible record and table locks.
@@ -1038,7 +1061,8 @@ public sealed partial class DbfTable : IDisposable
             return;
         try
         {
-            _memo.PadMissingTail();
+            if (_memo.MissingTail() is not null && MemosReadWhole())
+                _memo.PadMissingTail();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
         {
@@ -2410,18 +2434,21 @@ public sealed partial class DbfTable : IDisposable
         done.Add(() => tag.Insert(key, recordNumber));
         if (tag.IsUnique && !tag.UniqueKeepsFirstIndexed && LowestOtherRecordWithKey(tag, key, recordNumber) is { } next)
         {
-            tag.Insert(key, next);
-            done.Add(() => tag.Remove(key, next));
+            // The holder's own key, in the form this version writes: the one given may be a journal's
+            // note in an earlier version's form (an .mdx number's digit count).
+            tag.Insert(next.Key, next.Record);
+            done.Add(() => tag.Remove(next.Key, next.Record));
         }
     }
 
-    // When a unique tag's record leaves, the lowest-numbered other record with the same key takes its place.
-    private int? LowestOtherRecordWithKey(IMaintainedTag tag, byte[] key, int leaving)
+    // When a unique tag's record leaves, the lowest-numbered other record with the same key takes its
+    // place. Keys compare as the tag compares them, so one noted by 0.4.0 still finds its holder.
+    private (int Record, byte[] Key)? LowestOtherRecordWithKey(IMaintainedTag tag, byte[] key, int leaving)
     {
         foreach (var record in ReadAll())
         {
-            if (record.RecordNumber != leaving && tag.Includes(record) && tag.KeyFor(record).AsSpan().SequenceEqual(key))
-                return record.RecordNumber;
+            if (record.RecordNumber != leaving && tag.Includes(record) && tag.KeyFor(record) is var candidate && tag.SameKey(candidate, key))
+                return (record.RecordNumber, candidate);
         }
         return null;
     }

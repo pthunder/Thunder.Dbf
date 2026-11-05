@@ -58,6 +58,28 @@ public sealed class MdxInStepTests : IDisposable
     }
 
     [Fact]
+    public void A_UNIQUE_tag_whose_last_records_share_a_key_is_in_step()
+    {
+        // A UNIQUE tag keeps one record per key: the last record, a repeat, rightly has no key of its own.
+        var path = Path.Combine(_dir.FullName, "CATS.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Character("STATUS", 10)]))
+        {
+            foreach (var status in new[] { "ACTIVE", "LAPSED", "ACTIVE", "ACTIVE" })
+                table.Append(status);
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("STATUS", "status", unique: true);
+
+        foreach (var exclusive in new[] { false, true })
+        {
+            using var table = DbfTable.Open(path, writable: true, exclusive: exclusive);
+            table.UpdateFields(1, new Dictionary<string, object?> { ["STATUS"] = "LAPSED" });
+        }
+        using var db = DbfDatabase.Open(_dir.FullName);
+        Assert.Empty(db.Check().Problems);
+    }
+
+    [Fact]
     public void A_table_in_step_opens_and_checks_clean()
     {
         using (var table = DbfTable.Open(_path, writable: true))

@@ -46,7 +46,8 @@ public sealed partial class MdxIndex
         for (var index = Math.Max(0, records - 2); index < records; index++)
         {
             var record = table.Read(index);
-            foreach (var tag in Tags)
+            // A UNIQUE tag keeps one record per key, so a record may rightly have none (as for a .cdx).
+            foreach (var tag in Tags.Where(t => !t.IsUnique))
             {
                 if (tag.Includes(record) && !tag.Contains(tag.KeyFor(record), record.RecordNumber))
                     return $"Tag {tag.Name} has no key for record {record.RecordNumber:N0}, so it isn't in step with the table (a write reached the table but not the index)";

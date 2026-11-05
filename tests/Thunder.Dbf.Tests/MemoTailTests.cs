@@ -59,6 +59,31 @@ public sealed class MemoTailTests : IDisposable
     }
 
     [Fact]
+    public void A_memo_that_lost_its_end_is_reported_and_not_padded_over()
+    {
+        // The cut took part of a memo a record names, not only free blocks: padding would make it read
+        // back with zeros where its text was, so the file stays as it is and Check() says restore it.
+        var path = Path.Combine(_dir.FullName, "CALLS.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]))
+        {
+            table.Append("short");
+            table.Append(new string('y', 300));
+        }
+        var memoPath = MemoFile(path, ".FPT");
+        var bytes = File.ReadAllBytes(memoPath);
+        File.WriteAllBytes(memoPath, bytes[..^100]); // the header still names the old end
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            Assert.Equal(bytes.Length - 100, new FileInfo(memoPath).Length); // not padded
+            Assert.Equal("short", table.Read(0)["NOTES"]);
+            Assert.ThrowsAny<Exception>(() => table.Read(1)["NOTES"]); // still reported, never read as zeros
+        }
+    }
+
+    [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");
