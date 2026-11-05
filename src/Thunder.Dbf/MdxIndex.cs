@@ -105,11 +105,18 @@ public sealed partial class MdxIndex : IDisposable
     /// Re-reads the tag table, in case the legacy app added, dropped or rebuilt tags since the index
     /// was opened, so writes maintain every tag that exists now.
     /// </summary>
-    internal void ReloadTags()
+    /// <summary>
+    /// Whether the table holds the file to itself (opened exclusive: no other program can open it). Its
+    /// writes then skip re-reading the tag table, and tags keep what they learned (their digit style).
+    /// </summary>
+    internal Func<bool>? IsExclusive { get; set; }
+
+    /// <summary>Reads the tag table again, for changes other programs made. <paramref name="force"/> for this process's own.</summary>
+    internal void ReloadTags(bool force = false)
     {
         ThrowIfDropPending(); // before the header is read: it may be the half-dropped one
-        if (_batch is not null)
-            return; // nobody else writes the file during a batch, and this process adds no tags then
+        if (!force && (_batch is not null || IsExclusive?.Invoke() == true))
+            return; // nobody else writes the file during a batch or an exclusive open, and tags change here only by force
         Tags = LoadTags(ReadHeaderArea(_stream));
     }
 
@@ -355,6 +362,59 @@ public sealed partial class MdxTag
 
     private int Order(int ascending) => IsDescending ? -ascending : ascending;
 
+    // ---- the digit count numeric keys carry -----------------------------------------------
+
+    // Byte 1 of a numeric key counts its digits, and writers disagree on whole numbers: dBASE's engine
+    // (SIMATIC's files) counts significant digits, so 15940 counts 4, while Jet counts 10 for every
+    // whole number and significant digits for the rest (measured on Windows for N(5,0) to N(20,5)).
+    // Jet steps from one match to the next by comparing bytes, so a key in another form hides a live
+    // record behind a deleted one. A tag keeps the rule its keys show; one that shows neither (new,
+    // small whole numbers only, or written by Thunder.Dbf 0.4.0 or earlier) takes Jet's, the reader
+    // known to compare bytes.
+    private NumericKeyStyle? _numericStyle;
+
+    /// <summary>How this tag's numeric keys count their digits, learned once from its keys.</summary>
+    internal NumericKeyStyle NumericStyle => _numericStyle ??= LearnNumericStyle();
+
+    private NumericKeyStyle LearnNumericStyle()
+    {
+        if (KeyType != 'N')
+            return NumericKeyStyle.Jet;
+        try
+        {
+            // Only the first and last leaves: cheap, and they hold the shortest and longest values.
+            var keys = EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).Where(MdxKeys.IsWholeNumber).ToList();
+            if (keys.Any(k => MdxKeys.DigitCount(k) == MdxKeys.JetWholeDigits && MdxKeys.SignificantDigits(k) < MdxKeys.JetWholeDigits))
+                return NumericKeyStyle.Jet;
+            // Significant digits for a whole number with trailing zeros: only dBASE counts 15940 as 4.
+            // Small whole numbers alone (1, 95) count the same in dBASE and in 0.4.0, so they don't say.
+            return keys.Any(k => MdxKeys.DigitCount(k) == MdxKeys.SignificantDigits(k) && MdxKeys.DigitCount(k) != MdxKeys.PrintedDigits(k))
+                ? NumericKeyStyle.Dbase
+                : NumericKeyStyle.Jet;
+        }
+        catch (InvalidDataException)
+        {
+            return NumericKeyStyle.Jet; // a damaged tree has nothing to follow, and a rebuild must still work
+        }
+    }
+
+    // The keys of the first or last leaf, reached down the edge of the tree.
+    private List<byte[]> EdgeLeafKeys(bool rightmost)
+    {
+        var page = BinaryPrimitives.ReadInt32LittleEndian(_index.ReadBlock(_headerPage));
+        for (var depth = 0; depth <= MaxDepth; depth++)
+        {
+            var node = _index.ReadBlock(page);
+            var count = BinaryPrimitives.ReadInt32LittleEndian(node);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {page} claims {count} keys.");
+            if (BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength, 4)) == 0)
+                return [.. Enumerable.Range(0, count).Select(i => node.AsSpan(8 + i * ItemLength + 4, KeyLength).ToArray())];
+            page = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + (rightmost ? count : 0) * ItemLength, 4));
+        }
+        throw new InvalidDataException($"Tag {Name} is deeper than {MaxDepth} levels.");
+    }
+
     // ---- keys -----------------------------------------------------------------------------
 
     private abstract record KeyProbe;
@@ -418,9 +478,21 @@ public sealed partial class MdxTag
     }
 }
 
+/// <summary>How a writer counts the digits of a numeric .mdx key (byte 1).</summary>
+internal enum NumericKeyStyle
+{
+    /// <summary>Jet: 10 for a whole number, the significant digits otherwise.</summary>
+    Jet,
+    /// <summary>dBASE's engine: the significant digits.</summary>
+    Dbase,
+}
+
 /// <summary>dBASE IV key encodings: 12-byte BCD numbers and Julian-day dates.</summary>
 internal static class MdxKeys
 {
+    /// <summary>The count Jet gives every whole number, whatever its field (it keeps 10 digits at most).</summary>
+    public const int JetWholeDigits = 10;
+
     public const int NumericKeyLength = 12;
     private const int ExponentBias = 52;
     private const int MaxDigits = 20;
@@ -471,6 +543,26 @@ internal static class MdxKeys
 
     private static bool IsNegative(ReadOnlySpan<byte> key) => (key[1] & 0x80) != 0;
 
+    /// <summary>The digit count a stored key carries in byte 1.</summary>
+    public static int DigitCount(ReadOnlySpan<byte> key) => (key[1] >> 2) & 0x1F;
+
+    /// <summary>
+    /// The count earlier versions of Thunder.Dbf gave this key's value, after Xbase64: every digit of the
+    /// number as printed without its zero padding, so 15940 counts 5 and .05 counts 2.
+    /// </summary>
+    public static int PrintedDigits(ReadOnlySpan<byte> key)
+    {
+        var significant = SignificantDigits(key);
+        var exponent = key[0] - ExponentBias;
+        return significant == 0 ? 0 : exponent >= significant ? exponent : exponent > 0 ? significant : significant - exponent;
+    }
+
+    /// <summary>True for a nonzero whole number: its digits all come before the point.</summary>
+    public static bool IsWholeNumber(byte[] key) => SignificantDigits(key) is > 0 and var digits && key[0] - ExponentBias >= digits;
+
+    /// <summary>The count dBASE's engine would give this key's value: its significant digits.</summary>
+    public static int SignificantDigits(ReadOnlySpan<byte> key) => Digits(key).TrimEnd('0').Length;
+
     private static bool IsZero(ReadOnlySpan<byte> key) => key[2..NumericKeyLength].IndexOfAnyExcept((byte)0) < 0;
 
     private static string Digits(ReadOnlySpan<byte> key)
@@ -484,12 +576,14 @@ internal static class MdxKeys
         return digits.ToString();
     }
 
-    public static byte[] EncodeNumeric(double value)
+    /// <param name="value">The key's value.</param>
+    /// <param name="style">How byte 1 counts the digits: a tag's <see cref="MdxTag.NumericStyle"/>.</param>
+    public static byte[] EncodeNumeric(double value, NumericKeyStyle style = NumericKeyStyle.Dbase)
     {
         if (!double.IsFinite(value))
             throw new ArgumentException($"{value} can't be an index key.");
         if (value == 0)
-            return EncodeNumeric(0m);
+            return EncodeNumeric(0m, style);
 
         // The shortest round-trip form ("1E+100", "2.5E-50", "123.45") has exactly the digits the
         // value was written with; "E19" would add binary noise like 1.0000000000000000159E+100.
@@ -502,13 +596,14 @@ internal static class MdxKeys
         var leadingZeros = digits.Length - digits.TrimStart('0').Length;
         var significant = digits[leadingZeros..].TrimEnd('0');
         var exponent = (point < 0 ? mantissa.Length : point) + power - leadingZeros;
-        return Pack(value < 0, significant, exponent, significant.Length);
+        return Pack(value < 0, significant, exponent, Count(style, significant.Length, exponent));
     }
 
-    public static byte[] EncodeNumeric(decimal value)
+    /// <inheritdoc cref="EncodeNumeric(double, NumericKeyStyle)"/>
+    public static byte[] EncodeNumeric(decimal value, NumericKeyStyle style = NumericKeyStyle.Dbase)
     {
         if (value == 0)
-            return Pack(negative: false, "", 0, 0);
+            return Pack(negative: false, "", 0, 0); // zero counts 0 for Jet and dBASE alike
 
         var text = Math.Abs(value).ToString(CultureInfo.InvariantCulture);
         var point = text.IndexOf('.');
@@ -529,11 +624,16 @@ internal static class MdxKeys
             significant = fraction[leadingZeros..];
         }
 
-        // Xbase64 counts every digit it printed after stripping zeros: 100 counts 3, .05 counts 2.
-        var count = whole.Length + fraction.Length;
-
-        return Pack(value < 0, significant, exponent, count);
+        // dBASE's engine counts significant digits: 15940 counts 4 and 100 counts 1, as in SIMATIC's
+        // files (Xbase64 counts every digit it printed, 5 and 3, which no file here was written with).
+        significant = significant.TrimEnd('0');
+        return Pack(value < 0, significant, exponent, Count(style, significant.Length, exponent));
     }
+
+    // A whole number (every digit before the point) counts 10 for Jet; anything else, and every
+    // number for dBASE, counts its significant digits.
+    private static int Count(NumericKeyStyle style, int significant, int exponent) =>
+        style == NumericKeyStyle.Jet && exponent >= significant ? Math.Max(JetWholeDigits, significant) : significant;
 
     private static byte[] Pack(bool negative, string significant, int exponent, int count)
     {

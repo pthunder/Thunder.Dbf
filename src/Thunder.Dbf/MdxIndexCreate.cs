@@ -123,7 +123,7 @@ public sealed partial class MdxIndex
         DbfTable.FlushToDisk(_stream);
 
         WriteNameTree([.. Tags.Select(t => t.Name), tag.Name], entryLength);
-        ReloadTags();
+        ReloadTags(force: true);
     }
 
     /// <summary>
@@ -222,7 +222,7 @@ public sealed partial class MdxIndex
             File.Delete(imagePath);
         }
         _dropPending = false;
-        ReloadTags();
+        ReloadTags(force: true);
     }
 
     // Set from just before a DELETE TAG's before-image is published until it's gone. A drop that failed partway (an image

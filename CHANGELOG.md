@@ -10,6 +10,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Jet could miss live records in a dBASE `.mdx` number tag** that Thunder.Dbf had written to. This affects 0.2.0 to 0.4.0. Jet compares key bytes when it steps from one match to the next, and goes down the tree by interior keys without moving on to the next leaf. On the Windows test PC, 2,000 ordinary writes left Jet missing 46 of 9,210 live IDs. Thunder.Dbf's own lookups, `Check()` and its rebuild comparison compare keys by value, so they saw nothing wrong. There were two causes:
+  - **Digit counts.** Each number key stores a digit count. Jet counts 10 for a whole number and the significant digits otherwise. dBASE counts the significant digits. Thunder.Dbf counted the digits it printed (Xbase64's rule). It now follows the tag's writer, read from its first and last leaf. Tags that don't show one, including new tags and tags 0.4.0 wrote, use Jet's rule. Values and their order don't change, and Thunder.Dbf reads keys in any form.
+  - **Interior keys.** When a leaf's last key moved out, the key above it stayed where it was, too high, and Jet then missed keys in the next leaf. Interior keys now always equal their child's last key, as dBASE and Jet keep them. A new key equal to an interior key goes into the child that key covers.
+  - **If 0.4.0 or earlier has written to a table that Jet or Access also reads,** run `RebuildIndex()` once after upgrading. It puts every key into Jet's form, and Jet then finds every record.
+- The tests that create symbolic links are skipped, not failed, on a machine that can't create links (Windows without Developer Mode or administrator rights).
+
+### Changed
+
+- **Writes to an `.mdx` table opened `exclusive: true` are about 2.5 times faster.** Each indexed update took about 50 µs and now takes 20. No other program can open the table then, so a write no longer reads the `.mdx` tag table again first. Creating or dropping a tag still reloads it.
+
 ### Added
 
 - `samples/Maui`: an iPhone CRM built with .NET MAUI. It opens any dBASE or FoxPro table from Files, with its memo and index files, and works out which fields hold the name, phone, follow-up date and so on from their names. Edits keep the `.cdx` or `.mdx` index up to date, and Share sends the files back out in their original format. Tested on the iOS 27 simulator.

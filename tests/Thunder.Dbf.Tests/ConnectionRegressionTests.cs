@@ -37,7 +37,7 @@ public sealed class ConnectionRegressionTests : IDisposable
     }
 
     // #1, #2: links of every kind are refused, not followed and judged.
-    [Fact]
+    [SymlinkFact]
     public void Links_through_a_parent_folder_are_refused()
     {
         Directory.CreateSymbolicLink(Path.Combine(_data, "bridge"), _outside);
@@ -47,7 +47,7 @@ public sealed class ConnectionRegressionTests : IDisposable
         Assert.Equal(DbfErrorCode.PathEscapesFolder, Assert.Throws<DbfException>(() => db["clients"]).Code);
     }
 
-    [Fact]
+    [SymlinkFact]
     public void Linked_companion_files_are_refused()
     {
         File.Move(Path.Combine(_data, "CHANGELOG.DBT"), Path.Combine(_outside, "CHANGELOG.DBT"));
@@ -57,7 +57,7 @@ public sealed class ConnectionRegressionTests : IDisposable
         Assert.Equal(DbfErrorCode.PathEscapesFolder, Assert.Throws<DbfException>(() => db["changelog"]).Code);
     }
 
-    [Fact]
+    [SymlinkFact]
     public void An_index_swapped_for_a_link_after_opening_is_refused()
     {
         using var db = DbfDatabase.Open(_data);
@@ -69,7 +69,7 @@ public sealed class ConnectionRegressionTests : IDisposable
         Assert.Equal(DbfErrorCode.PathEscapesFolder, Assert.Throws<DbfException>(() => table.OpenProductionIndex()).Code);
     }
 
-    [Fact]
+    [SymlinkFact]
     public void A_data_folder_reached_through_a_link_still_works()
     {
         var alias = Path.Combine(_root.FullName, "alias");

@@ -107,7 +107,7 @@ public sealed class DbfDatabaseTests : IDisposable
         Assert.Equal(403, error.HttpStatus);
     }
 
-    [Fact]
+    [SymlinkFact]
     public void Links_to_files_outside_the_folder_are_refused()
     {
         var outside = Path.Combine(Path.GetTempPath(), $"thunder-outside-{Guid.NewGuid():N}.dbf");
