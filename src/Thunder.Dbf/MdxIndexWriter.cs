@@ -33,12 +33,14 @@ public sealed partial class MdxIndex
     /// its record but added no keys, an update with its new keys in and its old ones not yet out), or
     /// Jet writing beside another writer, leaves a tag that fails one of them. The same checks a .cdx gets.
     /// </summary>
-    internal string? OutOfStep(DbfTable table)
+    /// <param name="table">The table the index belongs to.</param>
+    /// <param name="countKeys">Also count every tag's keys: a read of every leaf, done by an exclusive open and by Check(); a shared open checks only the last records.</param>
+    internal string? OutOfStep(DbfTable table, bool countKeys = true)
     {
         var records = table.RecordCount;
-        foreach (var tag in Tags)
+        foreach (var tag in countKeys ? Tags : [])
         {
-            if (tag.ForExpression is null && !tag.IsUnique && tag.Entries().Count() is var keys && keys != records)
+            if (tag.ForExpression is null && !tag.IsUnique && tag.CountKeys() is var keys && keys != records)
                 return $"Tag {tag.Name} holds {keys:N0} keys for {records:N0} records, so it isn't in step with the table (a write reached the table but not the index, or the index but not the table)";
         }
         for (var index = Math.Max(0, records - 2); index < records; index++)
@@ -548,6 +550,36 @@ public sealed partial class MdxTag
     /// <summary>True when the tag holds exactly this key for this record.</summary>
     internal bool Contains(byte[] key, int recordNumber) =>
         Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found;
+
+    /// <summary>
+    /// How many keys the tag holds: the leaves' counts added up, without reading a key (a million
+    /// keys in three tags took 1.25 s decoded). Every page is read at most once.
+    /// </summary>
+    internal long CountKeys()
+    {
+        long keys = 0;
+        var visited = new HashSet<int>();
+        var pages = new Stack<(int Page, int Depth)>([(RootPage(), 0)]);
+        var block = new byte[_index.BlockSize];
+        while (pages.TryPop(out var at))
+        {
+            GuardDepth(at.Depth);
+            if (!visited.Add(at.Page))
+                throw new InvalidDataException($"Tag {Name} reaches index page {at.Page} twice; the index is corrupt.");
+            _index.ReadBlock(at.Page, block);
+            var count = NodeCount(block);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {at.Page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
+            if (BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + count * ItemLength)) == 0)
+            {
+                keys += count;
+                continue;
+            }
+            for (var i = 0; i <= count; i++)
+                pages.Push((BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + i * ItemLength)), at.Depth + 1));
+        }
+        return keys;
+    }
 
     /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
     internal bool Remove(byte[] key, int recordNumber)

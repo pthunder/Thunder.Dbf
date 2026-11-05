@@ -27,6 +27,14 @@ public sealed class MdxInStepTests : IDisposable
 
     public void Dispose() => _dir.Delete(recursive: true);
 
+    private void AssertWritesRefused(bool exclusive, string says)
+    {
+        using var table = DbfTable.Open(_path, writable: true, exclusive: exclusive);
+        var refused = Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "changed" }));
+        Assert.Equal(DbfErrorCode.IndexDamaged, refused.Code);
+        Assert.Contains(says, refused.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_update_cut_off_with_its_new_key_in_and_its_old_one_not_out_is_caught()
     {
@@ -34,7 +42,7 @@ public sealed class MdxInStepTests : IDisposable
         using (var mdx = MdxIndex.Open(new FileStream(Path.ChangeExtension(_path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
             mdx["BYID"].Insert(MdxKeys.EncodeNumeric(9966m, NumericKeyStyle.Jet), 162);
 
-        AssertCaughtUntilRebuilt("BYID holds 501 keys for 500 records");
+        AssertCaughtUntilRebuilt(exclusiveSays: "BYID holds 501 keys for 500 records", sharedSays: null);
     }
 
     [Fact]
@@ -46,7 +54,7 @@ public sealed class MdxInStepTests : IDisposable
             table.Append(501, "late");
         File.WriteAllBytes(mdxPath, before); // the record and the count reached the disk, the keys didn't
 
-        AssertCaughtUntilRebuilt("holds 500 keys for 501 records");
+        AssertCaughtUntilRebuilt(exclusiveSays: "holds 500 keys for 501 records", sharedSays: "has no key for record 501");
     }
 
     [Fact]
@@ -58,17 +66,16 @@ public sealed class MdxInStepTests : IDisposable
         Assert.Empty(db.Check().Problems);
     }
 
-    private void AssertCaughtUntilRebuilt(string expected)
+    // Check() and an exclusive open count every key; a shared open, to stay fast on big tables, checks
+    // only that the last records have their keys, which is what an append cut off leaves.
+    private void AssertCaughtUntilRebuilt(string exclusiveSays, string? sharedSays)
     {
         using (var db = DbfDatabase.Open(_dir.FullName))
-            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.IndexDamaged && p.Message.Contains(expected, StringComparison.Ordinal));
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.IndexDamaged && p.Message.Contains(exclusiveSays, StringComparison.Ordinal));
 
-        using (var table = DbfTable.Open(_path, writable: true))
-        {
-            var refused = Assert.Throws<DbfException>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "changed" }));
-            Assert.Equal(DbfErrorCode.IndexDamaged, refused.Code);
-            Assert.Contains(expected, refused.Message, StringComparison.Ordinal);
-        }
+        AssertWritesRefused(exclusive: true, exclusiveSays);
+        if (sharedSays is not null)
+            AssertWritesRefused(exclusive: false, sharedSays);
 
         using (var table = DbfTable.Open(_path, writable: true, exclusive: true))
             table.RebuildIndex();
