@@ -73,6 +73,21 @@ internal static class DbfValueCodec
                 if (dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber || millis < 0 || millis >= MillisecondsPerDay)
                     throw new FormatException($"Field {field.Name} holds an impossible datetime (day {julianDay}, {millis} ms).");
                 // DBF datetimes carry no time zone, so they come back as Unspecified wall-clock times.
+                // Visual FoxPro keeps whole seconds and often stores one a millisecond short (03:42:47 as
+                // 13,366,999 ms), which VFP and its OLE DB provider read as the second it meant. A time
+                // within a millisecond of a whole second is that second; any other keeps its milliseconds.
+                var offSecond = millis % 1000;
+                if (offSecond is 1 or 999)
+                {
+                    millis += offSecond == 1 ? -1 : 1;
+                    if (millis == MillisecondsPerDay)
+                    {
+                        if (dayNumber == DateOnly.MaxValue.DayNumber)
+                            millis--; // no day after the last one: keep its last millisecond
+                        else
+                            (dayNumber, millis) = (dayNumber + 1, 0);
+                    }
+                }
                 return DateOnly.FromDayNumber(dayNumber).ToDateTime(TimeOnly.FromTimeSpan(TimeSpan.FromMilliseconds(millis)));
             }
 

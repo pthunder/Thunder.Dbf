@@ -26,6 +26,33 @@ public sealed partial class MdxIndex
 
     private int PagesPerBlock => BlockSize / PageSize;
 
+    /// <summary>
+    /// Why the tags aren't in step with <paramref name="table"/>, or null when they are. A tag with no
+    /// FOR filter and no UNIQUE holds one key per record, deleted ones included, and every tag holds the
+    /// last two records' keys: a writer killed between the table and the index (an append that counted
+    /// its record but added no keys, an update with its new keys in and its old ones not yet out), or
+    /// Jet writing beside another writer, leaves a tag that fails one of them. The same checks a .cdx gets.
+    /// </summary>
+    internal string? OutOfStep(DbfTable table)
+    {
+        var records = table.RecordCount;
+        foreach (var tag in Tags)
+        {
+            if (tag.ForExpression is null && !tag.IsUnique && tag.Entries().Count() is var keys && keys != records)
+                return $"Tag {tag.Name} holds {keys:N0} keys for {records:N0} records, so it isn't in step with the table (a write reached the table but not the index, or the index but not the table)";
+        }
+        for (var index = Math.Max(0, records - 2); index < records; index++)
+        {
+            var record = table.Read(index);
+            foreach (var tag in Tags)
+            {
+                if (tag.Includes(record) && !tag.Contains(tag.KeyFor(record), record.RecordNumber))
+                    return $"Tag {tag.Name} has no key for record {record.RecordNumber:N0}, so it isn't in step with the table (a write reached the table but not the index)";
+            }
+        }
+        return null;
+    }
+
     internal void WriteBlock(int page, byte[] block)
     {
         if (page <= 0 || block.Length != BlockSize)

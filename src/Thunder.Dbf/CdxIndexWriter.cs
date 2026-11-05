@@ -1189,14 +1189,9 @@ public sealed partial class CdxTag : IMaintainedTag
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a date."),
                 });
             case KeyKind.DateTime:
-                // Julian days with the time as a fraction of the day, worked out the way Visual FoxPro 9
-                // does it: whole seconds since day 0 (the stored milliseconds rounded), times 1/86400 as a
-                // double. (Adding seconds / 86400 to the day comes out one step off for about a quarter of
-                // real values.) An empty one keys as 0.
                 return IndexKeys.WriteOrderedDouble(value switch
                 {
-                    DateTime moment => (IndexKeys.JulianDay(DateOnly.FromDateTime(moment)) * 86_400d
-                        + Math.Round(moment.TimeOfDay.Ticks / (double)TimeSpan.TicksPerSecond, MidpointRounding.AwayFromZero)) * (1d / 86_400d),
+                    DateTime moment => IndexKeys.JulianDateTime(moment),
                     null => 0d,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a datetime."),
                 });

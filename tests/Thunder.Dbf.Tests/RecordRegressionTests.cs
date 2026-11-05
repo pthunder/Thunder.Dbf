@@ -178,12 +178,43 @@ public class RecordRegressionTests
 
         var values = table.Read(0).Values.ToArray();
         var updated = table.Fields.Select((f, i) => (f, i)).Single(x => x.f.Name == "UPDATED").i;
-        values[updated] = new DateTime(2026, 10, 30, 23, 59, 59, 999).AddTicks(9_999);
+        values[updated] = new DateTime(2026, 10, 30, 23, 59, 59, 998).AddTicks(9_999);
         table.Update(0, values);
 
         var read = (DateTime)table.Read(0)["UPDATED"]!;
-        Assert.Equal(new DateTime(2026, 10, 30, 23, 59, 59, 999), read);
+        Assert.Equal(new DateTime(2026, 10, 30, 23, 59, 59, 998), read); // the extra ticks dropped, not rounded up
         Assert.Equal(DateTimeKind.Unspecified, read.Kind);
+    }
+
+    [Theory]
+    [InlineData(60_054_999, "2024-03-11T16:40:55")] // what Visual FoxPro stored for 16:40:55 (on {^1978-02-10})
+    [InlineData(13_366_999, "2024-03-11T03:42:47")] // and for {^2024-03-11 03:42:47}
+    [InlineData(32_968_000, "2024-03-11T09:09:28")]
+    [InlineData(32_968_001, "2024-03-11T09:09:28")]
+    [InlineData(86_399_999, "2024-03-12T00:00:00")] // a millisecond short of midnight is midnight
+    [InlineData(14_230_250, "2024-03-11T03:57:10.250")] // real milliseconds stay
+    [InlineData(14_230_998, "2024-03-11T03:57:10.998")]
+    public void Datetimes_a_millisecond_off_a_second_read_as_that_second(int millis, string expected)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"thunder-dt-{Guid.NewGuid():N}.dbf");
+        try
+        {
+            using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.DateTime("STAMP")]))
+                table.Append(new DateTime(2024, 3, 11));
+            var bytes = File.ReadAllBytes(path);
+            var at = bytes.Length - 1 - 8 + 4; // the one record's datetime, before the end-of-file mark: its milliseconds
+            if (bytes[^1] != 0x1A)
+                at++;
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(at), millis);
+            File.WriteAllBytes(path, bytes);
+
+            using var reopened = DbfTable.Open(path);
+            Assert.Equal(DateTime.Parse(expected, System.Globalization.CultureInfo.InvariantCulture), reopened.Read(0)["STAMP"]);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]

@@ -10,7 +10,7 @@ public interface IDbfIndexTag
     /// <summary>The tag's name (for a single-tag file, the file's name).</summary>
     string Name { get; }
 
-    /// <summary>'C' (character), 'N' (numeric), 'D' (date) or 'L' (logical).</summary>
+    /// <summary>'C' (character), 'N' (numeric), 'D' (date), 'L' (logical), or 'T' (datetime, a Visual FoxPro .cdx tag on a datetime field).</summary>
     char KeyType { get; }
 
     /// <summary>Bytes per key.</summary>
@@ -170,6 +170,12 @@ internal interface IMaintainedTag
     /// <summary>The record number stored under <paramref name="key"/>, or null. Used for unique tags.</summary>
     int? FirstRecordFor(byte[] key);
 
+    /// <summary>
+    /// True when the tag treats two stored keys as the same key, as its searches do. Byte for byte
+    /// unless the format allows one value more than one form (an .mdx number's digit count).
+    /// </summary>
+    bool SameKey(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => a.SequenceEqual(b);
+
     /// <summary>Removes every key (for a rebuild).</summary>
     void Clear();
 
@@ -221,4 +227,9 @@ public sealed partial class MdxTag : IMaintainedTag
     bool IMaintainedTag.Contains(byte[] key, int recordNumber) => Contains(key, recordNumber);
     int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
     void IMaintainedTag.Clear() => Clear();
+
+    // 0.4.0 wrote 6152 with 4 digits and this version writes it with Jet's 10; both are the same key,
+    // and Remove finds either. Comparing by value keeps a note 0.4.0 left from taking out the
+    // record's own key (found by the Windows PC's journal kills).
+    bool IMaintainedTag.SameKey(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => CompareAscending(a, b) == 0;
 }

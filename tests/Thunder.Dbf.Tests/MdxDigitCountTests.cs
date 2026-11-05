@@ -177,6 +177,37 @@ public sealed class MdxDigitCountTests : IDisposable
             Assert.Equal(id, Assert.Single(mdx["ID"].SeekExact(id)).Key);
     }
 
+    [Fact]
+    public void A_journal_note_0_4_0_left_keeps_the_records_own_key()
+    {
+        // 0.4.0 with UseJournal, killed after an update's new keys went in: #152's ID 152 -> 4635.
+        var path = Table(DbfFieldDefinition.Numeric("ID", 10, 0), Enumerable.Range(1, 300).Select(i => (decimal)i));
+        using (var table = Writable(path))
+        {
+            table.UseJournal = true;
+            table.CrashPoint = point => { if (point == "new keys") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.UpdateFields(151, new Dictionary<string, object?> { ["ID"] = 4_635m }));
+        }
+        // Every key, and the note's, in 0.4.0's form (6152 with 4 digits, not Jet's 10).
+        Patch(path, key => MdxKeys.PrintedDigits(key));
+        var note = DbfJournal.Read(path)!;
+        DbfJournal.Write(path, note with { Changes = [.. note.Changes.Select(c => c with { OldKey = Printed(c.OldKey), NewKey = Printed(c.NewKey) })] });
+
+        using (var table = Writable(path))
+            table.UpdateFields(0, new Dictionary<string, object?> { ["NAME"] = "next write" });
+
+        using var reopened = DbfTable.Open(path);
+        using var mdx = reopened.OpenProductionIndex()!;
+        Assert.Equal(152, Assert.Single(mdx["ID"].SeekExact(152m)).RecordNumber); // the record's own key stays
+        Assert.Empty(mdx["ID"].SeekExact(4_635m)); // the cut-off change's key goes
+        Assert.Equal(300, mdx["ID"].Entries().Count());
+
+        static byte[]? Printed(byte[]? key) =>
+            key is null ? null : [key[0], (byte)((key[1] & 0x83) | (MdxKeys.PrintedDigits(key) << 2)), .. key[2..]];
+    }
+
+    private sealed class Killed : Exception;
+
     // ---- tables ---------------------------------------------------------------------------
 
     // A table with a tag on its number field, made by Thunder.Dbf.
