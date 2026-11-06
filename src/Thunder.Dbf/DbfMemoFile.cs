@@ -194,6 +194,8 @@ internal abstract class DbfMemoFile : IDisposable
     public int Write(ReadOnlySpan<byte> data, int blockType)
     {
         Validate(data, blockType);
+        if (FreeChainDamaged)
+            throw FreeChainDamagedException(); // before a byte is written
         var framed = Frame(data, blockType);
         // Allocate from the physical end of the file; never trust a stored pointer to say where that is.
         var block = checked((int)Math.Max(FirstDataBlock, (Stream.Length + BlockSize - 1) / BlockSize));
@@ -288,6 +290,13 @@ internal abstract class DbfMemoFile : IDisposable
     }
 
     /// <summary>The block the header (or, for dBASE IV, its free chain) says the file ends at; null if it can't tell.</summary>
+    /// <summary>True when a dBASE IV free chain loops or links into the header, so no memo can be added.</summary>
+    public virtual bool FreeChainDamaged => false;
+
+    internal static DbfException FreeChainDamagedException(string? path = null) => new(DbfErrorCode.MemoFileDamaged,
+        "The dBASE IV memo file's chain of free blocks loops or links into its header, so a new memo can't be added to it.",
+        "Pack the table in dBASE or Access (or copy it there), which rewrites the memo file; the memos themselves still read.", path);
+
     protected virtual int? EndBlock() => ReadUInt32(0, BigEndian);
 
     /// <summary>Records that the file now ends at <paramref name="newEnd"/> instead of <paramref name="oldEnd"/>.</summary>
@@ -429,52 +438,50 @@ internal abstract class DbfMemoFile : IDisposable
         }
 
 
-        // The free chain's last link points at the end of the file: the first link at or past the
-        // blocks the file holds. A chain that goes backwards is damaged, and says nothing.
         private const uint UsedBlock = 0x0008FFFF; // FF FF 08 00, a memo's signature, read as a link
+
+        // The free chain runs from the header through each free block's first four bytes, in any order
+        // (Jet links freed blocks onto its head, so its chains run downward), to a link at or past the
+        // blocks the file holds: the end of the file. Returns where that last link is (0: the header)
+        // and the end it names. Stale: the header names no data block, or a link names a memo's own
+        // block (a power cut rolled it back to where that memo now starts); the next write points it at
+        // the new end. Damaged: a loop, or a link into the header; nothing can be written through it.
+        private (long LinkAt, int End, bool Stale, bool Damaged) WalkFreeChain()
+        {
+            var inFile = (int)Math.Min(int.MaxValue, (Stream.Length + BlockSize - 1) / BlockSize);
+            long linkAt = 0;
+            var current = ReadUInt32(0, bigEndian: false);
+            if (current < FirstDataBlock)
+                return (0, current, Stale: true, Damaged: false);
+            var seen = new HashSet<int>();
+            while (current < inFile)
+            {
+                if (current < FirstDataBlock || !seen.Add(current))
+                    return (linkAt, current, Stale: false, Damaged: true);
+                var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
+                if (next == UsedBlock)
+                    return (linkAt, current, Stale: true, Damaged: false);
+                linkAt = (long)current * BlockSize;
+                current = next;
+            }
+            return (linkAt, current, Stale: false, Damaged: false);
+        }
 
         protected override int? EndBlock()
         {
-            var inFile = (Stream.Length + BlockSize - 1) / BlockSize;
-            var current = ReadUInt32(0, bigEndian: false);
-            for (var steps = 0; steps <= inFile; steps++)
-            {
-                if (current < FirstDataBlock || current >= inFile)
-                    return current;
-                var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
-                if (next <= current || next == UsedBlock)
-                    return null; // backwards, or a memo's own block (a header a cut rolled back): damaged
-                current = next;
-            }
-            return null;
+            var chain = WalkFreeChain();
+            return chain.Stale || chain.Damaged ? null : chain.End;
         }
 
-        // Walk the free chain to the link that points at the old end of file and move it.
-        // A link that names a memo's own block is stale (a power cut rolled the header or a free block
-        // back to where that memo now starts): it's pointed at the new end, never written over the memo.
+        public override bool FreeChainDamaged => Stream.Length >= HeaderSize && WalkFreeChain().Damaged;
+
+        // Points the link that names the old end of the file (or a stale one) at the new end.
         protected override void MoveEndOfFile(int oldEnd, int newEnd)
         {
-            var current = ReadUInt32(0, bigEndian: false);
-            if (current < FirstDataBlock || current >= oldEnd || ReadUInt32((long)current * BlockSize, bigEndian: false) == UsedBlock)
-            {
-                WriteUInt32(0, newEnd, bigEndian: false);
-                return;
-            }
-
-            for (var steps = 0; steps <= oldEnd; steps++)
-            {
-                var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
-                if (next >= oldEnd || ReadUInt32((long)next * BlockSize, bigEndian: false) == UsedBlock)
-                {
-                    WriteUInt32((long)current * BlockSize, newEnd, bigEndian: false);
-                    return;
-                }
-                if (next <= current)
-                    break;
-                current = next;
-            }
-
-            throw new InvalidDataException("The memo file's free-block chain is damaged; refusing to write to it.");
+            var chain = WalkFreeChain();
+            if (chain.Damaged)
+                throw FreeChainDamagedException();
+            WriteUInt32(chain.LinkAt, newEnd, bigEndian: false);
         }
     }
 

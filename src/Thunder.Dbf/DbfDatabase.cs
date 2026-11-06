@@ -350,6 +350,8 @@ public sealed class DbfDatabase : IDisposable
             if (table.Header.HasIncompleteTransaction)
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
+            if (table.MemoFreeChainDamaged)
+                problems.Add(DbfMemoFile.FreeChainDamagedException(path));
             if (MemoMissingTail(table) is null && table.MemoCutThrough)
                 problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
                     "A memo a record names runs past the end of the memo file: a power cut lost its end (and with it, maybe, the header's new end).",

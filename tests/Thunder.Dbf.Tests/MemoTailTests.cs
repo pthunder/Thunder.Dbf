@@ -343,6 +343,73 @@ public sealed class MemoTailTests : IDisposable
             Assert.DoesNotContain(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
     }
 
+    // Five one-block memos (blocks 1-5); the records naming blocks 2 and 4 lose them, and those
+    // blocks join a free chain the way Jet links them: each freed block onto the chain's head.
+    private (string Path, string MemoPath, byte[] Bytes) DbaseIVWithFreeBlocks(string name)
+    {
+        var path = Path.Combine(_dir.FullName, name);
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Memo("NOTES")]))
+        {
+            for (var i = 1; i <= 5; i++)
+                table.Append($"memo {i}");
+        }
+        using (var table = DbfTable.Open(path, writable: true, allowUnmaintainedIndexes: true))
+        {
+            table.UpdateFields(1, new Dictionary<string, object?> { ["NOTES"] = null });
+            table.UpdateFields(3, new Dictionary<string, object?> { ["NOTES"] = null });
+        }
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        Assert.Equal(6 * 512, bytes.Length);
+        return (path, memoPath, bytes);
+    }
+
+    private static void Link(byte[] memo, int from, int to) =>
+        BinaryPrimitives.WriteUInt32LittleEndian(memo.AsSpan(from * 512), (uint)to);
+
+    [Fact]
+    public void A_dBASE_IV_free_chain_running_downward_like_Jets_takes_new_memos()
+    {
+        var (path, memoPath, bytes) = DbaseIVWithFreeBlocks("JETIV.DBF");
+        Link(bytes, 0, 4); // the header: free block 4 first,
+        Link(bytes, 4, 2); // then down to 2,
+        Link(bytes, 2, 6); // then the end of the file
+        File.WriteAllBytes(memoPath, bytes);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.DoesNotContain(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+        using (var table = DbfTable.Open(path, writable: true, allowUnmaintainedIndexes: true))
+            table.Append("from Thunder.Dbf");
+        var after = File.ReadAllBytes(memoPath);
+        Assert.Equal(7u, BinaryPrimitives.ReadUInt32LittleEndian(after.AsSpan(2 * 512))); // the last link moved on
+        Assert.Equal(4u, BinaryPrimitives.ReadUInt32LittleEndian(after)); // the rest of the chain kept
+        using (var reopened = DbfTable.Open(path))
+        {
+            Assert.Equal("from Thunder.Dbf", reopened.Read(5)["NOTES"]);
+            Assert.Equal("memo 5", reopened.Read(4)["NOTES"]);
+        }
+    }
+
+    [Fact]
+    public void A_dBASE_IV_free_chain_that_loops_is_reported_and_takes_no_memo()
+    {
+        var (path, memoPath, bytes) = DbaseIVWithFreeBlocks("LOOPIV.DBF");
+        Link(bytes, 0, 4);
+        Link(bytes, 4, 2);
+        Link(bytes, 2, 4); // back to 4: no end
+        File.WriteAllBytes(memoPath, bytes);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Message.Contains("free blocks", StringComparison.Ordinal));
+        using (var table = DbfTable.Open(path, writable: true, allowUnmaintainedIndexes: true))
+        {
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => table.Append("nowhere to go")).Code);
+            Assert.Equal("memo 5", table.Read(4)["NOTES"]);
+            Assert.Equal(5, table.RecordCount); // no record without its memo
+        }
+        Assert.Equal(bytes, File.ReadAllBytes(memoPath)); // not a byte written
+    }
+
     [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {

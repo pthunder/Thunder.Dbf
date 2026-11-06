@@ -99,6 +99,9 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>How many bytes the memo file falls short of the end its header names (see DbfMemoFile.MissingTail).</summary>
     internal long? MemoMissingTail => _memo?.MissingTail();
 
+    /// <summary>True when a dBASE IV memo file's free chain loops or links into its header: no memo can be added.</summary>
+    internal bool MemoFreeChainDamaged => _memo?.FreeChainDamaged ?? false;
+
     /// <summary>True when a memo a record names doesn't lie whole in the file: a power cut lost its end.</summary>
     internal bool MemoCutThrough => LastMemoCut();
 
