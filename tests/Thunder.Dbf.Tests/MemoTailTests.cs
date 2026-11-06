@@ -233,6 +233,7 @@ public sealed class MemoTailTests : IDisposable
     [InlineData(DbfTableFormat.VisualFoxPro, ".FPT")]
     [InlineData(DbfTableFormat.FoxPro2, ".FPT")]
     [InlineData(DbfTableFormat.DbaseIII, ".DBT")]
+    [InlineData(DbfTableFormat.DbaseIV, ".DBT")]
     public void A_cut_memo_is_caught_when_the_header_lost_its_new_end_too(DbfTableFormat format, string extension)
     {
         // The cut kept the record's pointer and the memo's first blocks, and lost both the memo's tail
@@ -250,7 +251,12 @@ public sealed class MemoTailTests : IDisposable
         File.WriteAllBytes(memoPath, bytes[..(oldEnd + 512)]); // the long memo's first 512 bytes stay
 
         using (var db = DbfDatabase.Open(_dir.FullName))
-            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+        {
+            var problems = db.Check().Problems;
+            Assert.Contains(problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+            // dBASE IV: the rolled-back header points at the cut memo's own block, not at a free one.
+            Assert.DoesNotContain(problems, p => p.Message.Contains("bytes shorter", StringComparison.Ordinal));
+        }
         using (var shared = DbfTable.Open(path, writable: true))
             Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => shared.Append("NEW")).Code);
         Assert.Equal(oldEnd + 512, new FileInfo(memoPath).Length); // nothing written into the lost tail

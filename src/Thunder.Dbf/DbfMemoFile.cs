@@ -412,6 +412,8 @@ internal abstract class DbfMemoFile : IDisposable
 
         // The free chain's last link points at the end of the file: the first link at or past the
         // blocks the file holds. A chain that goes backwards is damaged, and says nothing.
+        private const uint UsedBlock = 0x0008FFFF; // FF FF 08 00, a memo's signature, read as a link
+
         protected override int? EndBlock()
         {
             var inFile = (Stream.Length + BlockSize - 1) / BlockSize;
@@ -421,8 +423,8 @@ internal abstract class DbfMemoFile : IDisposable
                 if (current < FirstDataBlock || current >= inFile)
                     return current;
                 var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
-                if (next <= current)
-                    return null;
+                if (next <= current || next == UsedBlock)
+                    return null; // backwards, or a memo's own block (a header a cut rolled back): damaged
                 current = next;
             }
             return null;
