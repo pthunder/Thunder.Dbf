@@ -446,15 +446,16 @@ internal abstract class DbfMemoFile : IDisposable
         // and the end it names. Stale: the header names no data block, or a link names a memo's own
         // block (a power cut rolled it back to where that memo now starts); the next write points it at
         // the new end. Damaged: a loop, or a link into the header; nothing can be written through it.
-        private (long LinkAt, int End, bool Stale, bool Damaged) WalkFreeChain()
+        // inFile: the blocks the file held before a write, which may have grown it since.
+        private (long LinkAt, int End, bool Stale, bool Damaged) WalkFreeChain(int? inFile = null)
         {
-            var inFile = (int)Math.Min(int.MaxValue, (Stream.Length + BlockSize - 1) / BlockSize);
+            var blocks = inFile ?? (int)Math.Min(int.MaxValue, (Stream.Length + BlockSize - 1) / BlockSize);
             long linkAt = 0;
             var current = ReadUInt32(0, bigEndian: false);
             if (current < FirstDataBlock)
                 return (0, current, Stale: true, Damaged: false);
             var seen = new HashSet<int>();
-            while (current < inFile)
+            while (current < blocks)
             {
                 if (current < FirstDataBlock || !seen.Add(current))
                     return (linkAt, current, Stale: false, Damaged: true);
@@ -475,10 +476,11 @@ internal abstract class DbfMemoFile : IDisposable
 
         public override bool FreeChainDamaged => Stream.Length >= HeaderSize && WalkFreeChain().Damaged;
 
-        // Points the link that names the old end of the file (or a stale one) at the new end.
+        // Points the link that names the old end of the file (or a stale one) at the new end. The walk
+        // stops at the old end: past it lies the memo just written, whose text is no link.
         protected override void MoveEndOfFile(int oldEnd, int newEnd)
         {
-            var chain = WalkFreeChain();
+            var chain = WalkFreeChain(oldEnd);
             if (chain.Damaged)
                 throw FreeChainDamagedException();
             WriteUInt32(chain.LinkAt, newEnd, bigEndian: false);

@@ -411,6 +411,31 @@ public sealed class MemoTailTests : IDisposable
     }
 
     [Fact]
+    public void A_dBASE_IV_append_after_a_cut_doesnt_take_its_own_text_for_a_link()
+    {
+        // The cut kept the header's new end (block 4) and lost blocks 2-3 of an append whose record
+        // never reached the disk. The next memo fills blocks 2-5; block 4 is its text, not a free block.
+        var path = Path.Combine(_dir.FullName, "IVGROW.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append("one");
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        Assert.Equal(2 * 512, bytes.Length);
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, 4);
+        File.WriteAllBytes(memoPath, bytes);
+
+        var text = new string('x', 1_600);
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append(text);
+        using (var reopened = DbfTable.Open(path))
+        {
+            Assert.Equal(text, reopened.Read(1)["NOTES"]);
+            Assert.Equal("one", reopened.Read(0)["NOTES"]);
+        }
+        Assert.Equal(6u, BinaryPrimitives.ReadUInt32LittleEndian(File.ReadAllBytes(memoPath)));
+    }
+
+    [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");
