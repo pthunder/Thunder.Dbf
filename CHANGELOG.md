@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-05
+
+Compatibility with Jet and Visual FoxPro, found by testing 0.4.0 against them on Windows: Jet finds every record in a dBASE `.mdx` Thunder.Dbf writes, VFP datetimes read as VFP means them, and kills and power cuts that 0.4.0 left silently wrong are now reported or repaired. Checked on the Windows test PC with VFP 9, Jet, killed writers and Hyper-V power cuts, and by a release audit.
+
+**Upgrading from 0.4.0:** nothing in the public API was removed, and code compiled against 0.4.0 runs unchanged. Things to know:
+- If 0.4.0 or earlier wrote to a dBASE `.mdx` table that Jet or Access also reads, run `RebuildIndex()` once (the table opened `exclusive: true`). Until then Jet can still miss records whose keys 0.4.0 wrote.
+- A writable open now refuses writes (`IndexDamaged`) to a table whose `.mdx` doesn't match it, as it already did for a `.cdx`. `RebuildIndex()` clears it.
+- A `.cdx` tag on a Visual FoxPro datetime field reports `KeyType` `'T'`, not `'D'`, and its keys come back as `DateTime`.
+
 ### Fixed
 
 - **Jet could miss live records in a dBASE `.mdx` number tag** that Thunder.Dbf had written to. This affects 0.2.0 to 0.4.0. Jet compares key bytes when it steps from one match to the next, and goes down the tree by interior keys without moving on to the next leaf. On the Windows test PC, 2,000 ordinary writes left Jet missing 46 of 9,210 live IDs. Thunder.Dbf's own lookups, `Check()` and its rebuild comparison compare keys by value, so they saw nothing wrong. There were two causes:
