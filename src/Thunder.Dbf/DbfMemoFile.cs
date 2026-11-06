@@ -289,7 +289,6 @@ internal abstract class DbfMemoFile : IDisposable
         DbfTable.FlushToDisk(Stream);
     }
 
-    /// <summary>The block the header (or, for dBASE IV, its free chain) says the file ends at; null if it can't tell.</summary>
     /// <summary>True when a dBASE IV free chain loops or links into the header, so no memo can be added.</summary>
     public virtual bool FreeChainDamaged => false;
 
@@ -297,6 +296,7 @@ internal abstract class DbfMemoFile : IDisposable
         "The dBASE IV memo file's chain of free blocks loops or links into its header, so a new memo can't be added to it.",
         "Pack the table in dBASE or Access (or copy it there), which rewrites the memo file; the memos themselves still read.", path);
 
+    /// <summary>The block the header (or, for dBASE IV, its free chain) says the file ends at; null if it can't tell.</summary>
     protected virtual int? EndBlock() => ReadUInt32(0, BigEndian);
 
     /// <summary>Records that the file now ends at <paramref name="newEnd"/> instead of <paramref name="oldEnd"/>.</summary>
@@ -436,7 +436,6 @@ internal abstract class DbfMemoFile : IDisposable
             data.CopyTo(framed.AsSpan(BlockHeaderSize));
             return framed;
         }
-
 
         private const uint UsedBlock = 0x0008FFFF; // FF FF 08 00, a memo's signature, read as a link
 

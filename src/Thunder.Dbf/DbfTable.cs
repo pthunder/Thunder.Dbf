@@ -122,13 +122,15 @@ public sealed partial class DbfTable : IDisposable
         var nullFlags = Header.NullFlagsFieldIndex is { } n ? Fields[n] : null;
         var highest = 0;
         var length = Header.RecordLength;
-        var batch = new byte[length * 4096];
+        var rows = Math.Max(1, Math.Min(4096, (1 << 20) / length)); // about 1 MB a batch, whatever the header says
+        var batch = new byte[length * rows];
         DiscardReadBuffer(_stream);
-        for (var first = 0; first < RecordCount; first += 4096)
+        for (var first = 0; first < RecordCount; first += rows)
         {
-            var count = Math.Min(4096, RecordCount - first);
+            var count = Math.Min(rows, RecordCount - first);
             _stream.Position = Header.HeaderLength + (long)first * length;
             var read = _stream.ReadAtLeast(batch.AsSpan(0, count * length), count * length, throwOnEndOfStream: false) / length;
+            var lastBatch = read < count; // the file ran out before the header's count
             for (var i = 0; i < read; i++)
             {
                 var row = batch.AsSpan(i * length, length);
@@ -146,6 +148,8 @@ public sealed partial class DbfTable : IDisposable
                         highest = block;
                 }
             }
+            if (lastBatch)
+                break;
         }
         return highest > 0 && memo.IsCut(highest);
     }
