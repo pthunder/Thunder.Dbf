@@ -619,6 +619,9 @@ public sealed partial class DbfTable : IDisposable
     // After a failed index update the index may hold half a change, so no write may build on it.
     private void ThrowIfIndexesNeedRebuild()
     {
+        if (_memoDamaged)
+            throw new DbfException(DbfErrorCode.MemoFileDamaged, "A memo a record names lost its end with the end of the memo file (a power cut), so writing would put new memo text where the old one's was.",
+                "Restore the memo file from a backup, then open the table again.", _path);
         if (_mdxOutOfStep is { } reason)
             throw new DbfException(DbfErrorCode.IndexDamaged, $"{reason}. Writing would build on keys that are already wrong.",
                 "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
@@ -1058,11 +1061,20 @@ public sealed partial class DbfTable : IDisposable
     // opens it again, and every memo a record names is where it was (found by the Hyper-V power cuts).
     private void RepairShortMemo()
     {
-        if (!_exclusive || !_stream.CanWrite || _memo is null)
+        if (!_stream.CanWrite || _memo is null)
             return;
         try
         {
-            if (_memo.MissingTail() is not null && MemosReadWhole())
+            if (_memo.MissingTail() is null)
+                return;
+            if (!MemosReadWhole())
+            {
+                // A memo a record names lost its end. A new memo would go where that end was, and the
+                // damaged one would then read as whole with the new one's bytes in it: no writes at all.
+                _memoDamaged = true;
+                return;
+            }
+            if (_exclusive)
                 _memo.PadMissingTail();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
@@ -1070,6 +1082,8 @@ public sealed partial class DbfTable : IDisposable
             // A memo file that can't be read or written here: its own reads and writes report it.
         }
     }
+
+    private bool _memoDamaged; // a memo a record names was cut off by the lost tail of the file
 
     private void RepairShortTable()
     {
@@ -2430,6 +2444,14 @@ public sealed partial class DbfTable : IDisposable
             // replay doesn't know how far the cut-off write got, so there it may be missing.)
             if (!tag.IsUnique && !mayBeMissing)
                 throw new InvalidDataException($"Index tag {tag.Name} has no entry for record {recordNumber}, which it should.");
+            // A replay can find the removal done and the hand-over not (the writer died between them):
+            // the next holder gets the key, unless a record already holds it.
+            if (tag.IsUnique && mayBeMissing && !tag.UniqueKeepsFirstIndexed && tag.FirstRecordFor(key) is null
+                && LowestOtherRecordWithKey(tag, key, recordNumber) is { } heir && tag.FirstRecordFor(heir.Key) is null)
+            {
+                tag.Insert(heir.Key, heir.Record);
+                done.Add(() => tag.Remove(heir.Key, heir.Record));
+            }
             return;
         }
         done.Add(() => tag.Insert(key, recordNumber));
