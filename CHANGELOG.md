@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The NuGet packages carry release notes: each version's section of this changelog, shown on nuget.org's Release Notes tab.
+
 ### Fixed
 
 - **Gaps in 0.4.1's guard against writing over a power-cut memo.** Each let a new memo land in the space of one the cut damaged, so the old memo read back with the new one's bytes in it:
