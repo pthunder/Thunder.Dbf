@@ -270,12 +270,6 @@ internal abstract class DbfMemoFile : IDisposable
         }
     }
 
-    /// <summary>
-    /// True when the file's own header can't be trusted to say where it ends: a dBASE IV free chain,
-    /// whose links a cut can take with it, so a lost link can look like the end of the file.
-    /// </summary>
-    public virtual bool EndIsAChain => false;
-
     /// <summary>True when the file is shorter than its 512-byte header (SIMATIC writes those before any memo).</summary>
     public bool ShorterThanHeader
     {
@@ -425,7 +419,6 @@ internal abstract class DbfMemoFile : IDisposable
             return framed;
         }
 
-        public override bool EndIsAChain => true;
 
         // The free chain's last link points at the end of the file: the first link at or past the
         // blocks the file holds. A chain that goes backwards is damaged, and says nothing.

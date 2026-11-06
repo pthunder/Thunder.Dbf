@@ -352,7 +352,7 @@ public sealed class DbfDatabase : IDisposable
 
             if (MemoMissingTail(table) is null && table.MemoCutThrough)
                 problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
-                    "The memo file is shorter than its own header, though records name memos in it: a power cut lost its end.",
+                    "A memo a record names runs past the end of the memo file: a power cut lost its end (and with it, maybe, the header's new end).",
                     "Restore the memo file from a backup. Thunder.Dbf refuses writes to the table until then, since a new memo would land where the lost ones were.", path));
             if (MemoMissingTail(table) is { } missing)
                 problems.Add(!table.MemoCutThrough

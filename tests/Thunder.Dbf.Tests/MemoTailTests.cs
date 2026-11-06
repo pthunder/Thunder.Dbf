@@ -194,6 +194,57 @@ public sealed class MemoTailTests : IDisposable
         Assert.Equal(1_024, new FileInfo(memoPath).Length);
     }
 
+    [Theory]
+    [InlineData(DbfTableFormat.VisualFoxPro, ".FPT")]
+    [InlineData(DbfTableFormat.FoxPro2, ".FPT")]
+    [InlineData(DbfTableFormat.DbaseIII, ".DBT")]
+    public void A_cut_memo_is_caught_when_the_header_lost_its_new_end_too(DbfTableFormat format, string extension)
+    {
+        // The cut kept the record's pointer and the memo's first blocks, and lost both the memo's tail
+        // and the header's new next-free block: the old header names an end inside the file.
+        var path = Path.Combine(_dir.FullName, "LOST.DBF");
+        using (var table = DbfTable.Create(path, format, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append("short");
+        var memoPath = MemoFile(path, extension);
+        var before = File.ReadAllBytes(memoPath)[..4]; // the header's next free block before the long memo
+        var oldEnd = File.ReadAllBytes(memoPath).Length;
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append(new string('z', 2_000));
+        var bytes = File.ReadAllBytes(memoPath);
+        before.CopyTo(bytes, 0);
+        File.WriteAllBytes(memoPath, bytes[..(oldEnd + 512)]); // the long memo's first 512 bytes stay
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+        using (var shared = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => shared.Append("NEW")).Code);
+        Assert.Equal(oldEnd + 512, new FileInfo(memoPath).Length); // nothing written into the lost tail
+    }
+
+    [Fact]
+    public void A_null_memo_with_a_stale_pointer_doesnt_block_writes()
+    {
+        // .NULL. wins over whatever the pointer bytes say: a stale block past the end isn't a cut memo.
+        var path = Path.Combine(_dir.FullName, "NULLS.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES") with { Nullable = true }]))
+        {
+            table.Append("kept");
+            table.Append([null]);
+        }
+        var bytes = File.ReadAllBytes(path);
+        int headerLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(8));
+        int recordLength = BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(10));
+        BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(headerLength + recordLength + 1), 99_999);
+        File.WriteAllBytes(path, bytes);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.Append("more");
+            Assert.Null(table.Read(1)["NOTES"]);
+            Assert.Equal("kept", table.Read(0)["NOTES"]);
+        }
+    }
+
     [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {

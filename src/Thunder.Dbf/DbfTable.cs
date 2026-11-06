@@ -104,18 +104,20 @@ public sealed partial class DbfTable : IDisposable
         && ((_memo.MissingTail() is not null || _memo.ShorterThanHeader) && !MemosReadWhole() || LastMemoCut());
 
     /// <summary>
-    /// For a dBASE IV memo file, whose end is the last link of a free chain a cut can take away: true
-    /// when the highest memo any record names doesn't lie whole in the file. Memos don't overlap, so
-    /// a cut tail shows in that one (or in one past the end, which is higher still). Block numbers are
-    /// read from the records' bytes, without loading a memo; one memo is read.
+    /// True when the highest memo any record names doesn't lie whole in the file. The header's end
+    /// can't be trusted to show a cut: a power cut can lose the header's new next-free block with the
+    /// tail (FoxPro, dBASE III), or a link of a dBASE IV free chain. Memos don't overlap, so a cut tail
+    /// shows in the highest one (or in one past the end, higher still). Block numbers are read from the
+    /// records' bytes, ASCII or binary, skipping fields marked .NULL.; one memo is read.
     /// </summary>
     private bool LastMemoCut()
     {
-        if (_memo is not { EndIsAChain: true } memo)
+        if (_memo is not { } memo)
             return false;
-        var fields = Fields.Where(f => DbfValueCodec.IsMemoField(f) && f.Length == 10).ToList();
+        var fields = Fields.Where(f => DbfValueCodec.IsMemoField(f) && f.Length is 10 or 4).ToList();
         if (fields.Count == 0)
             return false;
+        var nullFlags = Header.NullFlagsFieldIndex is { } n ? Fields[n] : null;
         var highest = 0;
         var length = Header.RecordLength;
         var batch = new byte[length * 4096];
@@ -127,10 +129,18 @@ public sealed partial class DbfTable : IDisposable
             var read = _stream.ReadAtLeast(batch.AsSpan(0, count * length), count * length, throwOnEndOfStream: false) / length;
             for (var i = 0; i < read; i++)
             {
+                var row = batch.AsSpan(i * length, length);
                 foreach (var field in fields)
                 {
-                    var text = System.Text.Encoding.ASCII.GetString(batch, i * length + field.Offset, field.Length).Trim();
-                    if (int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var block) && block > highest)
+                    if (field.NullBit is { } bit && nullFlags is not null && IsBitSet(row.Slice(nullFlags.Offset, nullFlags.Length), bit))
+                        continue;
+                    var bytes = row.Slice(field.Offset, field.Length);
+                    int block;
+                    if (field.Length == 4)
+                        block = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes);
+                    else if (!int.TryParse(System.Text.Encoding.ASCII.GetString(bytes).Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out block))
+                        continue;
+                    if (block > highest)
                         highest = block;
                 }
             }
@@ -1117,7 +1127,7 @@ public sealed partial class DbfTable : IDisposable
             var missingTail = _memo.MissingTail();
             if (missingTail is null && !_memo.ShorterThanHeader)
             {
-                _memoDamaged = LastMemoCut(); // a dBASE IV chain can hide a short file: look at the last memo
+                _memoDamaged = LastMemoCut(); // a lost header end or dBASE IV link can hide a cut: look at the last memo
                 return;
             }
             if (!MemosReadWhole())
