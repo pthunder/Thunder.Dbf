@@ -99,6 +99,9 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>How many bytes the memo file falls short of the end its header names (see DbfMemoFile.MissingTail).</summary>
     internal long? MemoMissingTail => _memo?.MissingTail();
 
+    /// <summary>True when the memo file is short (of its header's end, or of the header) and a memo a record names lost part of itself.</summary>
+    internal bool MemoCutThrough => _memo is not null && (_memo.MissingTail() is not null || _memo.ShorterThanHeader) && !MemosReadWhole();
+
     /// <summary>
     /// True when every memo a record names reads whole: the tail a power cut took held only blocks
     /// nobody uses yet. Padding over a memo that lost its end would make it read back with zeros in
@@ -107,12 +110,18 @@ public sealed partial class DbfTable : IDisposable
     internal bool MemosReadWhole()
     {
         var memoFields = Fields.Select((f, i) => (f, i)).Where(x => DbfValueCodec.IsMemoField(x.f)).Select(x => x.i).ToList();
+        if (_memo is null || memoFields.Count == 0)
+            return true;
         try
         {
-            foreach (var record in ReadAll())
+            for (var index = 0; index < RecordCount; index++)
             {
+                _memo.LastReadReachedEnd = false; // before the read: a record may load its memos as it's read
+                var record = Read(index);
                 foreach (var field in memoFields)
                     _ = record[field];
+                if (_memo.LastReadReachedEnd)
+                    return false; // a dBASE III memo the end of the file cut through
             }
             return true;
         }
@@ -290,6 +299,8 @@ public sealed partial class DbfTable : IDisposable
             ignoreMissingMemo, allowUnmaintainedIndexes);
         if (indexStream is not null && header.HasProductionMdx && stream.CanWrite)
             table.AttachIndex(indexStream, leaveOpen);
+        if (stream.CanWrite)
+            table.RepairShortMemo(); // the guard only: a table opened from streams is never padded
         return table;
     }
 
@@ -1065,7 +1076,10 @@ public sealed partial class DbfTable : IDisposable
             return;
         try
         {
-            if (_memo.MissingTail() is null)
+            // Shorter than its header names, or than the header itself: a file with no memo yet is
+            // fine, so is one whose memos all read whole; one that lost part of a memo takes no writes.
+            var missingTail = _memo.MissingTail();
+            if (missingTail is null && !_memo.ShorterThanHeader)
                 return;
             if (!MemosReadWhole())
             {
@@ -1074,7 +1088,7 @@ public sealed partial class DbfTable : IDisposable
                 _memoDamaged = true;
                 return;
             }
-            if (_exclusive)
+            if (_exclusive && missingTail is not null)
                 _memo.PadMissingTail();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)

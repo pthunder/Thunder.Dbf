@@ -89,6 +89,64 @@ public sealed class MemoTailTests : IDisposable
     }
 
     [Fact]
+    public void A_table_opened_from_streams_refuses_writes_over_a_cut_memo()
+    {
+        var path = Path.Combine(_dir.FullName, "CALLS.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]))
+        {
+            table.Append("short");
+            table.Append(new string('y', 300));
+        }
+        var memoPath = MemoFile(path, ".FPT");
+        var cut = File.ReadAllBytes(memoPath)[..^100];
+        File.WriteAllBytes(memoPath, cut);
+
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite);
+        using var memo = new FileStream(memoPath, FileMode.Open, FileAccess.ReadWrite);
+        using (var table = DbfTable.Open(stream, leaveOpen: true, memoStream: memo))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => table.Append("new")).Code);
+        Assert.Equal(cut.Length, memo.Length); // nothing written into the lost memo's space
+    }
+
+    [Fact]
+    public void A_memo_file_cut_below_its_header_while_records_name_memos_takes_no_writes()
+    {
+        // Records name memos in blocks the file no longer reaches, though it's shorter than its own
+        // header (which a file with no memo yet may be).
+        var path = Path.Combine(_dir.FullName, "CALLS.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append("a memo in block 8");
+        var memoPath = MemoFile(path, ".FPT");
+        File.WriteAllBytes(memoPath, File.ReadAllBytes(memoPath)[..24]);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+        using (var table = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => table.Append("would reuse block 8")).Code);
+        Assert.Equal(24, new FileInfo(memoPath).Length);
+    }
+
+    [Fact]
+    public void A_dBASE_III_memo_cut_mid_text_counts_as_cut()
+    {
+        // A dBASE III memo has no length, only an end marker: cut through, it reads as shorter text.
+        var path = Path.Combine(_dir.FullName, "OLD.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIII, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append(new string('m', 800));
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        Assert.Equal(1_536, bytes.Length);
+        File.WriteAllBytes(memoPath, bytes[..1_024]);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+        using (var shared = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => shared.Append("NEW")).Code);
+        using (DbfTable.Open(path, writable: true, exclusive: true)) { }
+        Assert.Equal(1_024, new FileInfo(memoPath).Length); // not padded over
+    }
+
+    [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");

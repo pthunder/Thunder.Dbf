@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Three gaps in 0.4.1's guard against writing over a power-cut memo.** Each let a new memo land in the space of one the cut damaged, so the old memo read back with the new one's bytes in it:
+  - **Tables opened from streams** (`DbfTable.Open(stream, memoStream: …)`) skipped the guard. They now refuse writes too. Like every table opened from streams, they aren't padded.
+  - **A memo file cut below its 512-byte header** counted as one with no memos yet, even when records named blocks in it. It's now checked like any other short memo file.
+  - **A dBASE III memo cut mid-text** read as shorter text, since it has an end marker but no length, so it counted as whole. Writes stayed on, and an exclusive open even padded over it. It now counts as cut.
+
+  In each case, writes to the table are refused (`MemoFileDamaged`) and `Check()` says to restore the memo file from a backup. 0.4.0 had no guard at all.
+
 ## [0.4.1] - 2026-11-05
 
 Compatibility with Jet and Visual FoxPro, found by testing 0.4.0 against them on Windows: Jet finds every record in a dBASE `.mdx` Thunder.Dbf writes, VFP datetimes read as VFP means them, and kills and power cuts that 0.4.0 left silently wrong are now reported or repaired. Checked on the Windows test PC with VFP 9, Jet, killed writers and Hyper-V power cuts, and by a release audit.

@@ -243,6 +243,22 @@ internal abstract class DbfMemoFile : IDisposable
         return named > Stream.Length ? named - Stream.Length : null;
     }
 
+    /// <summary>
+    /// True when the last memo read ran into the end of the file without its end marker: a dBASE III
+    /// memo has no length, so one the file was cut through reads as shorter text, not as an error.
+    /// </summary>
+    public bool LastReadReachedEnd { get; set; }
+
+    /// <summary>True when the file is shorter than its 512-byte header (SIMATIC writes those before any memo).</summary>
+    public bool ShorterThanHeader
+    {
+        get
+        {
+            DbfTable.DiscardReadBuffer(Stream);
+            return Stream.Length < HeaderSize;
+        }
+    }
+
     /// <summary>Pads the file with zeros to the end its header names, so every block it promises is there.</summary>
     public void PadMissingTail()
     {
@@ -299,7 +315,12 @@ internal abstract class DbfMemoFile : IDisposable
 
         public override DbfMemoFormat Format => DbfMemoFormat.DbaseIII;
 
-        protected override DbfMemo ReadAt(long remaining) => new(ReadToTerminator(Stream, remaining), TextBlock);
+        protected override DbfMemo ReadAt(long remaining)
+        {
+            var text = ReadToTerminator(Stream, remaining, out var terminated);
+            LastReadReachedEnd = !terminated;
+            return new(text, TextBlock);
+        }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
         {
@@ -308,8 +329,11 @@ internal abstract class DbfMemoFile : IDisposable
             return [.. data, Terminator, Terminator];
         }
 
-        internal static byte[] ReadToTerminator(Stream stream, long remaining)
+        internal static byte[] ReadToTerminator(Stream stream, long remaining) => ReadToTerminator(stream, remaining, out _);
+
+        internal static byte[] ReadToTerminator(Stream stream, long remaining, out bool terminated)
         {
+            terminated = true;
             using var memo = new MemoryStream();
             var chunk = new byte[512];
             while (remaining > 0)
@@ -328,6 +352,7 @@ internal abstract class DbfMemoFile : IDisposable
 
             // The file ended before a terminator. Keep the text (it's often the last memo of a
             // truncated file) but drop the zero padding that fills the rest of its block.
+            terminated = false;
             var data = memo.ToArray();
             var length = data.Length;
             while (length > 0 && data[length - 1] == 0)
@@ -359,7 +384,9 @@ internal abstract class DbfMemoFile : IDisposable
 
             // Some tools write 0x8B tables with dBASE III-style memos; fall back to the terminator.
             Stream.Position = start;
-            return new(DbaseIIIMemo.ReadToTerminator(Stream, remaining), TextBlock);
+            var text = DbaseIIIMemo.ReadToTerminator(Stream, remaining, out var terminated);
+            LastReadReachedEnd = !terminated;
+            return new(text, TextBlock);
         }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
