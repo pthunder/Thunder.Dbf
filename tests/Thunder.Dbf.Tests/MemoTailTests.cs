@@ -18,7 +18,6 @@ public sealed class MemoTailTests : IDisposable
 
     [Theory]
     [InlineData(DbfTableFormat.VisualFoxPro, ".FPT", 64, true)]
-    [InlineData(DbfTableFormat.DbaseIV, ".DBT", 512, false)]
     public void A_memo_file_shorter_than_its_header_says_is_reported_and_padded_back(DbfTableFormat format, string extension, int blockSize, bool bigEndian)
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");
@@ -56,6 +55,42 @@ public sealed class MemoTailTests : IDisposable
         }
         using (var db = DbfDatabase.Open(_dir.FullName))
             Assert.Empty(db.Check().Problems);
+    }
+
+    [Theory]
+    [InlineData(DbfTableFormat.DbaseIII)]
+    [InlineData(DbfTableFormat.DbaseIV)]
+    public void A_dbt_whose_last_block_is_short_like_Jet_writes_is_fine(DbfTableFormat format)
+    {
+        // Jet doesn't pad a .dbt's last block, so the file ends before the header's next free block.
+        // dBASE and Jet read it as it is: no problem to report, nothing to pad.
+        var path = Path.Combine(_dir.FullName, "JET.DBF");
+        using (var table = DbfTable.Create(path, format, [DbfFieldDefinition.Memo("NOTES")]))
+        {
+            table.Append("first");
+            table.Append(new string('j', 700));
+        }
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        var end = bytes.Length - 1;
+        while (bytes[end] == 0)
+            end--;
+        File.WriteAllBytes(memoPath, bytes[..(end + 1)]); // just past the last memo's end marker
+        var shortLength = end + 1L;
+        Assert.True(shortLength < bytes.Length);
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.DoesNotContain(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            Assert.Equal(shortLength, new FileInfo(memoPath).Length); // not padded
+            table.Append("after Jet");
+        }
+        using (var reopened = DbfTable.Open(path))
+        {
+            Assert.Equal(new string('j', 700), reopened.Read(1)["NOTES"]);
+            Assert.Equal("after Jet", reopened.Read(2)["NOTES"]);
+        }
     }
 
     [Fact]

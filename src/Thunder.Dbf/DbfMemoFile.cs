@@ -264,19 +264,9 @@ internal abstract class DbfMemoFile : IDisposable
             Read(block);
             return LastReadReachedEnd;
         }
-        catch (InvalidDataException)
+        catch (Exception ex) when (ex is InvalidDataException or FormatException or EndOfStreamException)
         {
             return true;
-        }
-    }
-
-    /// <summary>True when the file is shorter than its 512-byte header (SIMATIC writes those before any memo).</summary>
-    public bool ShorterThanHeader
-    {
-        get
-        {
-            DbfTable.DiscardReadBuffer(Stream);
-            return Stream.Length < HeaderSize;
         }
     }
 

@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - **A header that lost its new end.** A cut can take a memo's tail and the header's updated next-free block with it, so the old header names an end inside the file. A dBASE IV memo file can show the same thing when a cut takes the last link of its chain of free blocks. For every memo format, the highest memo any record names is now checked to lie whole in the file. The block numbers are read straight from the records, ASCII or binary, skipping fields marked .NULL., and only one memo is read.
 
   In each case, writes to the table are refused (`MemoFileDamaged`) and `Check()` says to restore the memo file from a backup. 0.4.0 had no guard at all.
+- **`Check()` no longer calls Jet-maintained dBASE memo files damaged.** Jet doesn't pad a `.dbt`'s last block, so the file ends before the block its header names. 0.4.1's `Check()` reported that as a power cut, quoting Visual FoxPro's error 41, after every Jet write, and an exclusive open padded the file each time. A `.dbt` whose memos are all whole is now left alone. A `.fpt` is still reported and padded, since Visual FoxPro needs that.
+- **Writable opens of a memo file that ends early no longer read every memo.** Only the highest memo a record names is read, since memos don't overlap. On a Jet-maintained table, that was every writable open.
 
 ## [0.4.1] - 2026-11-05
 

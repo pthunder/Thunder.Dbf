@@ -99,9 +99,8 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>How many bytes the memo file falls short of the end its header names (see DbfMemoFile.MissingTail).</summary>
     internal long? MemoMissingTail => _memo?.MissingTail();
 
-    /// <summary>True when the memo file is short (of its header's end, or of the header) and a memo a record names lost part of itself.</summary>
-    internal bool MemoCutThrough => _memo is not null
-        && ((_memo.MissingTail() is not null || _memo.ShorterThanHeader) && !MemosReadWhole() || LastMemoCut());
+    /// <summary>True when a memo a record names doesn't lie whole in the file: a power cut lost its end.</summary>
+    internal bool MemoCutThrough => LastMemoCut();
 
     /// <summary>
     /// True when the highest memo any record names doesn't lie whole in the file. The header's end
@@ -146,35 +145,6 @@ public sealed partial class DbfTable : IDisposable
             }
         }
         return highest > 0 && memo.IsCut(highest);
-    }
-
-    /// <summary>
-    /// True when every memo a record names reads whole: the tail a power cut took held only blocks
-    /// nobody uses yet. Padding over a memo that lost its end would make it read back with zeros in
-    /// place of its text, so then the file is left as it is, for a backup.
-    /// </summary>
-    internal bool MemosReadWhole()
-    {
-        var memoFields = Fields.Select((f, i) => (f, i)).Where(x => DbfValueCodec.IsMemoField(x.f)).Select(x => x.i).ToList();
-        if (_memo is null || memoFields.Count == 0)
-            return true;
-        try
-        {
-            for (var index = 0; index < RecordCount; index++)
-            {
-                _memo.LastReadReachedEnd = false; // before the read: a record may load its memos as it's read
-                var record = Read(index);
-                foreach (var field in memoFields)
-                    _ = record[field];
-                if (_memo.LastReadReachedEnd)
-                    return false; // a dBASE III memo the end of the file cut through
-            }
-            return true;
-        }
-        catch (Exception ex) when (ex is InvalidDataException or FormatException or IOException or EndOfStreamException)
-        {
-            return false;
-        }
     }
 
     /// <summary>
@@ -1122,22 +1092,15 @@ public sealed partial class DbfTable : IDisposable
             return;
         try
         {
-            // Shorter than its header names, or than the header itself: a file with no memo yet is
-            // fine, so is one whose memos all read whole; one that lost part of a memo takes no writes.
-            var missingTail = _memo.MissingTail();
-            if (missingTail is null && !_memo.ShorterThanHeader)
-            {
-                _memoDamaged = LastMemoCut(); // a lost header end or dBASE IV link can hide a cut: look at the last memo
-                return;
-            }
-            if (!MemosReadWhole())
-            {
-                // A memo a record names lost its end. A new memo would go where that end was, and the
-                // damaged one would then read as whole with the new one's bytes in it: no writes at all.
-                _memoDamaged = true;
-                return;
-            }
-            if (_exclusive && missingTail is not null)
+            // A memo a record names that lost its end: a new memo would go where that end was, and
+            // the damaged one would then read as whole with the new one's bytes in it, so no writes at
+            // all. The header's end can't show it (a cut can take the header's new end too): the
+            // highest memo can, since memos don't overlap.
+            _memoDamaged = LastMemoCut();
+            // Every memo whole, but shorter than the header names: Visual FoxPro won't open an .fpt
+            // like that (error 41), so an exclusive open pads it. Jet leaves every .dbt's last block
+            // short, and dBASE and Jet read it as it is, so a .dbt is left alone.
+            if (!_memoDamaged && _exclusive && _memo.Format == DbfMemoFormat.FoxPro && _memo.MissingTail() is not null)
                 _memo.PadMissingTail();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)

@@ -354,7 +354,8 @@ public sealed class DbfDatabase : IDisposable
                 problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
                     "A memo a record names runs past the end of the memo file: a power cut lost its end (and with it, maybe, the header's new end).",
                     "Restore the memo file from a backup. Thunder.Dbf refuses writes to the table until then, since a new memo would land where the lost ones were.", path));
-            if (MemoMissingTail(table) is { } missing)
+            // Jet leaves a .dbt's last block short, and dBASE and Jet read it so: only a cut memo is a problem there.
+            if (MemoMissingTail(table) is { } missing && (table.MemoFormat == DbfMemoFormat.FoxPro || table.MemoCutThrough))
                 problems.Add(!table.MemoCutThrough
                     ? new DbfException(DbfErrorCode.MemoFileDamaged,
                         $"The memo file is {missing:N0} bytes shorter than its header says: a power cut kept the header and lost the end of the file. Visual FoxPro won't open the table (error 41), though every memo a record names is whole.",
