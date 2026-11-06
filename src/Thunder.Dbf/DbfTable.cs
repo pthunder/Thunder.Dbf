@@ -122,6 +122,8 @@ public sealed partial class DbfTable : IDisposable
         var nullFlags = Header.NullFlagsFieldIndex is { } n ? Fields[n] : null;
         var highest = 0;
         var length = Header.RecordLength;
+        if (length <= 0)
+            return false; // a damaged header: the table's own reads report it
         var rows = Math.Max(1, Math.Min(4096, (1 << 20) / length)); // about 1 MB a batch, whatever the header says
         var batch = new byte[length * rows];
         DiscardReadBuffer(_stream);
