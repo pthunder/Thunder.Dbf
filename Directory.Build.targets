@@ -11,6 +11,18 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
+  <!--
+    Release notes: this version's section of CHANGELOG.md, shown on nuget.org's Release Notes tab,
+    with a link to the whole changelog. A version the changelog doesn't list gets the link alone.
+  -->
+  <PropertyGroup Condition="'$(IsPackable)' == 'true' And Exists('$(MSBuildThisFileDirectory)CHANGELOG.md')">
+    <_ThunderChangelog>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)CHANGELOG.md').Replace('&#13;', ''))</_ThunderChangelog>
+    <_ThunderVersionNotes>$([System.Text.RegularExpressions.Regex]::Match($(_ThunderChangelog), '(?s)\n## \[$([System.Text.RegularExpressions.Regex]::Escape($(Version)))\][^\n]*\n(.*?)(?=\n## \[|$)').Groups[1].Value.Trim())</_ThunderVersionNotes>
+    <PackageReleaseNotes>$(_ThunderVersionNotes)
+
+Full changelog: https://github.com/pthunder/Thunder.Dbf/blob/main/CHANGELOG.md</PackageReleaseNotes>
+  </PropertyGroup>
+
   <ItemGroup Condition="'$(IsPackable)' == 'true'">
     <None Include="$(MSBuildThisFileDirectory)docs/images/package-icon.png" Pack="true" PackagePath="icon.png" Visible="false" />
     <None Include="$(MSBuildProjectDirectory)/README.md" Pack="true" PackagePath="README.md" />

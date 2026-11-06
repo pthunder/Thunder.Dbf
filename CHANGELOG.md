@@ -10,6 +10,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-05
+
+The memo guard 0.4.1 added, made whole: a power cut can no longer let a new memo land in the space of one it damaged, in any memo format or open mode, and Jet-maintained dBASE tables work again. Checked on the Windows test PC with real VFP and Jet memo files cut every way, and by a release audit.
+
+**Upgrading from 0.4.1:** nothing in the public API changed. A table whose highest memo was cut by a power cut now refuses writes (`MemoFileDamaged`) whatever its header says; restore its memo file from a backup.
+
+### Changed
+
+- The NuGet packages carry release notes: each version's section of this changelog, shown on nuget.org's Release Notes tab.
+
+### Fixed
+
+- **Gaps in 0.4.1's guard against writing over a power-cut memo.** Each let a new memo land in the space of one the cut damaged, so the old memo read back with the new one's bytes in it:
+  - **Tables opened from streams** (`DbfTable.Open(stream, memoStream: …)`) skipped the guard. They now refuse writes too. Like every table opened from streams, they aren't padded.
+  - **A memo file cut below its 512-byte header** counted as one with no memos yet, even when records named blocks in it. It's now checked like any other short memo file.
+  - **A dBASE III memo cut mid-text** read as shorter text, since it has an end marker but no length, so it counted as whole. Writes stayed on, and an exclusive open even padded over it. It now counts as cut.
+  - **A dBASE III record with two memos**, the first cut and the second whole: reading the second hid the first.
+  - **A header that lost its new end.** A cut can take a memo's tail and the header's updated next-free block with it, so the old header names an end inside the file. A dBASE IV memo file can show the same thing when a cut takes the last link of its chain of free blocks. For every memo format, the highest memo any record names is now checked to lie whole in the file. The block numbers are read straight from the records, ASCII or binary, skipping fields marked .NULL., and only one memo is read.
+
+  In each case, writes to the table are refused (`MemoFileDamaged`) and `Check()` says to restore the memo file from a backup. 0.4.0 had no guard at all.
+- **`Check()` no longer calls Jet-maintained dBASE memo files damaged.** Jet doesn't pad a `.dbt`'s last block, so the file ends before the block its header names. 0.4.1's `Check()` reported that as a power cut, quoting Visual FoxPro's error 41, after every Jet write, and an exclusive open padded the file each time. A `.dbt` whose memos are all whole is now left alone. A `.fpt` is still reported and padded, since Visual FoxPro needs that.
+- **A dBASE IV memo header a cut rolled back** points at a used memo block. That block's marker was read as a free-chain link, so `Check()` named a shortfall of hundreds of megabytes. It now says the memo runs past the end of the file.
+- **A dBASE IV append no longer writes over a memo a rolled-back header names.** A cut can keep a memo whole and lose only the header's new end, which then names that memo's block. The append's walk of the free chain took the memo's marker for a link and wrote over it. A link to a used block now counts as stale and is pointed at the new end.
+- **A healthy table whose highest memo is over 64 MiB** (Visual FoxPro allows that) no longer counts as cut. Whether the highest memo lies whole is now worked out from its stored length or its end marker, without loading it.
+- **Memos can be added to dBASE IV tables whose memos Jet rewrote.** Jet links freed blocks onto the head of the free chain, so its chain runs downward. Since 0.4.0, Thunder.Dbf took any link that went down for damage and threw `InvalidDataException` on every memo write, while `Check()` called the table clean. The chain is now followed in any order. A chain that really loops is reported by `Check()` and refuses memo writes with `MemoFileDamaged`, before a byte is written.
+- **A dBASE IV append that grows a file a cut left short** no longer writes over its own text. After writing the memo, the chain walk ran over the grown file, so a stale link that pointed inside the new memo took four bytes of its text as a link and overwrote them. The walk now stops at the file's old end.
+- **Writable opens of a memo file that ends early no longer read every memo.** Only the highest memo a record names is read, since memos don't overlap. On a Jet-maintained table, that was every writable open.
+
 ## [0.4.1] - 2026-11-05
 
 Compatibility with Jet and Visual FoxPro, found by testing 0.4.0 against them on Windows: Jet finds every record in a dBASE `.mdx` Thunder.Dbf writes, VFP datetimes read as VFP means them, and kills and power cuts that 0.4.0 left silently wrong are now reported or repaired. Checked on the Windows test PC with VFP 9, Jet, killed writers and Hyper-V power cuts, and by a release audit.

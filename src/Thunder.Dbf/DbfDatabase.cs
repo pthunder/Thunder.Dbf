@@ -350,8 +350,16 @@ public sealed class DbfDatabase : IDisposable
             if (table.Header.HasIncompleteTransaction)
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
-            if (MemoMissingTail(table) is { } missing)
-                problems.Add(table.MemosReadWhole()
+            if (table.MemoFreeChainDamaged)
+                problems.Add(DbfMemoFile.FreeChainDamagedException(path));
+            var memoCut = table.MemoCutThrough; // one scan of the records
+            if (MemoMissingTail(table) is null && memoCut)
+                problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
+                    "A memo a record names runs past the end of the memo file: a power cut lost its end (and with it, maybe, the header's new end).",
+                    "Restore the memo file from a backup. Thunder.Dbf refuses writes to the table until then, since a new memo would land where the lost ones were.", path));
+            // Jet leaves a .dbt's last block short, and dBASE and Jet read it so: only a cut memo is a problem there.
+            if (MemoMissingTail(table) is { } missing && (table.MemoFormat == DbfMemoFormat.FoxPro || memoCut))
+                problems.Add(!memoCut
                     ? new DbfException(DbfErrorCode.MemoFileDamaged,
                         $"The memo file is {missing:N0} bytes shorter than its header says: a power cut kept the header and lost the end of the file. Visual FoxPro won't open the table (error 41), though every memo a record names is whole.",
                         "Open the table with exclusive: true (writable), which pads the memo file back to its full length.", path)

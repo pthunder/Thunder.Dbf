@@ -99,27 +99,61 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>How many bytes the memo file falls short of the end its header names (see DbfMemoFile.MissingTail).</summary>
     internal long? MemoMissingTail => _memo?.MissingTail();
 
+    /// <summary>True when a dBASE IV memo file's free chain loops or links into its header: no memo can be added.</summary>
+    internal bool MemoFreeChainDamaged => _memo?.FreeChainDamaged ?? false;
+
+    /// <summary>True when a memo a record names doesn't lie whole in the file: a power cut lost its end.</summary>
+    internal bool MemoCutThrough => LastMemoCut();
+
     /// <summary>
-    /// True when every memo a record names reads whole: the tail a power cut took held only blocks
-    /// nobody uses yet. Padding over a memo that lost its end would make it read back with zeros in
-    /// place of its text, so then the file is left as it is, for a backup.
+    /// True when the highest memo any record names doesn't lie whole in the file. The header's end
+    /// can't be trusted to show a cut: a power cut can lose the header's new next-free block with the
+    /// tail (FoxPro, dBASE III), or a link of a dBASE IV free chain. Memos don't overlap, so a cut tail
+    /// shows in the highest one (or in one past the end, higher still). Block numbers are read from the
+    /// records' bytes, ASCII or binary, skipping fields marked .NULL.; one memo is read.
     /// </summary>
-    internal bool MemosReadWhole()
+    private bool LastMemoCut()
     {
-        var memoFields = Fields.Select((f, i) => (f, i)).Where(x => DbfValueCodec.IsMemoField(x.f)).Select(x => x.i).ToList();
-        try
-        {
-            foreach (var record in ReadAll())
-            {
-                foreach (var field in memoFields)
-                    _ = record[field];
-            }
-            return true;
-        }
-        catch (Exception ex) when (ex is InvalidDataException or FormatException or IOException or EndOfStreamException)
-        {
+        if (_memo is not { } memo)
             return false;
+        var fields = Fields.Where(f => DbfValueCodec.IsMemoField(f) && f.Length is 10 or 4).ToList();
+        if (fields.Count == 0)
+            return false;
+        var nullFlags = Header.NullFlagsFieldIndex is { } n ? Fields[n] : null;
+        var highest = 0;
+        var length = Header.RecordLength;
+        if (length <= 0)
+            return false; // a damaged header: the table's own reads report it
+        var rows = Math.Max(1, Math.Min(4096, (1 << 20) / length)); // about 1 MB a batch, whatever the header says
+        var batch = new byte[length * rows];
+        DiscardReadBuffer(_stream);
+        for (var first = 0; first < RecordCount; first += rows)
+        {
+            var count = Math.Min(rows, RecordCount - first);
+            _stream.Position = Header.HeaderLength + (long)first * length;
+            var read = _stream.ReadAtLeast(batch.AsSpan(0, count * length), count * length, throwOnEndOfStream: false) / length;
+            var lastBatch = read < count; // the file ran out before the header's count
+            for (var i = 0; i < read; i++)
+            {
+                var row = batch.AsSpan(i * length, length);
+                foreach (var field in fields)
+                {
+                    if (field.NullBit is { } bit && nullFlags is not null && IsBitSet(row.Slice(nullFlags.Offset, nullFlags.Length), bit))
+                        continue;
+                    var bytes = row.Slice(field.Offset, field.Length);
+                    int block;
+                    if (field.Length == 4)
+                        block = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes);
+                    else if (!int.TryParse(System.Text.Encoding.ASCII.GetString(bytes).Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out block))
+                        continue;
+                    if (block > highest)
+                        highest = block;
+                }
+            }
+            if (lastBatch)
+                break;
         }
+        return highest > 0 && memo.IsCut(highest);
     }
 
     /// <summary>
@@ -290,6 +324,8 @@ public sealed partial class DbfTable : IDisposable
             ignoreMissingMemo, allowUnmaintainedIndexes);
         if (indexStream is not null && header.HasProductionMdx && stream.CanWrite)
             table.AttachIndex(indexStream, leaveOpen);
+        if (stream.CanWrite)
+            table.RepairShortMemo(); // the guard only: a table opened from streams is never padded
         return table;
     }
 
@@ -1065,16 +1101,15 @@ public sealed partial class DbfTable : IDisposable
             return;
         try
         {
-            if (_memo.MissingTail() is null)
-                return;
-            if (!MemosReadWhole())
-            {
-                // A memo a record names lost its end. A new memo would go where that end was, and the
-                // damaged one would then read as whole with the new one's bytes in it: no writes at all.
-                _memoDamaged = true;
-                return;
-            }
-            if (_exclusive)
+            // A memo a record names that lost its end: a new memo would go where that end was, and
+            // the damaged one would then read as whole with the new one's bytes in it, so no writes at
+            // all. The header's end can't show it (a cut can take the header's new end too): the
+            // highest memo can, since memos don't overlap.
+            _memoDamaged = LastMemoCut();
+            // Every memo whole, but shorter than the header names: Visual FoxPro won't open an .fpt
+            // like that (error 41), so an exclusive open pads it. Jet leaves every .dbt's last block
+            // short, and dBASE and Jet read it as it is, so a .dbt is left alone.
+            if (!_memoDamaged && _exclusive && _memo.Format == DbfMemoFormat.FoxPro && _memo.MissingTail() is not null)
                 _memo.PadMissingTail();
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
