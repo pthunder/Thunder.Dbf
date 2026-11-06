@@ -100,7 +100,43 @@ public sealed partial class DbfTable : IDisposable
     internal long? MemoMissingTail => _memo?.MissingTail();
 
     /// <summary>True when the memo file is short (of its header's end, or of the header) and a memo a record names lost part of itself.</summary>
-    internal bool MemoCutThrough => _memo is not null && (_memo.MissingTail() is not null || _memo.ShorterThanHeader) && !MemosReadWhole();
+    internal bool MemoCutThrough => _memo is not null
+        && ((_memo.MissingTail() is not null || _memo.ShorterThanHeader) && !MemosReadWhole() || LastMemoCut());
+
+    /// <summary>
+    /// For a dBASE IV memo file, whose end is the last link of a free chain a cut can take away: true
+    /// when the highest memo any record names doesn't lie whole in the file. Memos don't overlap, so
+    /// a cut tail shows in that one (or in one past the end, which is higher still). Block numbers are
+    /// read from the records' bytes, without loading a memo; one memo is read.
+    /// </summary>
+    private bool LastMemoCut()
+    {
+        if (_memo is not { EndIsAChain: true } memo)
+            return false;
+        var fields = Fields.Where(f => DbfValueCodec.IsMemoField(f) && f.Length == 10).ToList();
+        if (fields.Count == 0)
+            return false;
+        var highest = 0;
+        var length = Header.RecordLength;
+        var batch = new byte[length * 4096];
+        DiscardReadBuffer(_stream);
+        for (var first = 0; first < RecordCount; first += 4096)
+        {
+            var count = Math.Min(4096, RecordCount - first);
+            _stream.Position = Header.HeaderLength + (long)first * length;
+            var read = _stream.ReadAtLeast(batch.AsSpan(0, count * length), count * length, throwOnEndOfStream: false) / length;
+            for (var i = 0; i < read; i++)
+            {
+                foreach (var field in fields)
+                {
+                    var text = System.Text.Encoding.ASCII.GetString(batch, i * length + field.Offset, field.Length).Trim();
+                    if (int.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var block) && block > highest)
+                        highest = block;
+                }
+            }
+        }
+        return highest > 0 && memo.IsCut(highest);
+    }
 
     /// <summary>
     /// True when every memo a record names reads whole: the tail a power cut took held only blocks
@@ -1080,7 +1116,10 @@ public sealed partial class DbfTable : IDisposable
             // fine, so is one whose memos all read whole; one that lost part of a memo takes no writes.
             var missingTail = _memo.MissingTail();
             if (missingTail is null && !_memo.ShorterThanHeader)
+            {
+                _memoDamaged = LastMemoCut(); // a dBASE IV chain can hide a short file: look at the last memo
                 return;
+            }
             if (!MemosReadWhole())
             {
                 // A memo a record names lost its end. A new memo would go where that end was, and the

@@ -249,6 +249,33 @@ internal abstract class DbfMemoFile : IDisposable
     /// </summary>
     public bool LastReadReachedEnd { get; set; }
 
+    /// <summary>
+    /// True when the memo at <paramref name="block"/> doesn't lie whole in the file: it starts past the
+    /// end, claims more bytes than remain, or (a memo with an end marker) runs into the end without it.
+    /// </summary>
+    public bool IsCut(int block)
+    {
+        DbfTable.DiscardReadBuffer(Stream);
+        if ((long)block * BlockSize >= Stream.Length)
+            return true;
+        LastReadReachedEnd = false;
+        try
+        {
+            Read(block);
+            return LastReadReachedEnd;
+        }
+        catch (InvalidDataException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// True when the file's own header can't be trusted to say where it ends: a dBASE IV free chain,
+    /// whose links a cut can take with it, so a lost link can look like the end of the file.
+    /// </summary>
+    public virtual bool EndIsAChain => false;
+
     /// <summary>True when the file is shorter than its 512-byte header (SIMATIC writes those before any memo).</summary>
     public bool ShorterThanHeader
     {
@@ -318,7 +345,7 @@ internal abstract class DbfMemoFile : IDisposable
         protected override DbfMemo ReadAt(long remaining)
         {
             var text = ReadToTerminator(Stream, remaining, out var terminated);
-            LastReadReachedEnd = !terminated;
+            LastReadReachedEnd |= !terminated; // across every memo of a record: a later whole one doesn't clear it
             return new(text, TextBlock);
         }
 
@@ -385,7 +412,7 @@ internal abstract class DbfMemoFile : IDisposable
             // Some tools write 0x8B tables with dBASE III-style memos; fall back to the terminator.
             Stream.Position = start;
             var text = DbaseIIIMemo.ReadToTerminator(Stream, remaining, out var terminated);
-            LastReadReachedEnd = !terminated;
+            LastReadReachedEnd |= !terminated; // across every memo of a record: a later whole one doesn't clear it
             return new(text, TextBlock);
         }
 
@@ -397,6 +424,8 @@ internal abstract class DbfMemoFile : IDisposable
             data.CopyTo(framed.AsSpan(BlockHeaderSize));
             return framed;
         }
+
+        public override bool EndIsAChain => true;
 
         // The free chain's last link points at the end of the file: the first link at or past the
         // blocks the file holds. A chain that goes backwards is damaged, and says nothing.

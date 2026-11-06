@@ -147,6 +147,54 @@ public sealed class MemoTailTests : IDisposable
     }
 
     [Fact]
+    public void A_cut_dBASE_III_memo_isnt_hidden_by_a_whole_one_in_the_same_record()
+    {
+        // A comes after B in the file (it was rewritten later); the cut takes A's end, not B's.
+        var path = Path.Combine(_dir.FullName, "TWO.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIII, [DbfFieldDefinition.Memo("A"), DbfFieldDefinition.Memo("B")]))
+        {
+            table.Append("a", "b");
+            table.UpdateFields(0, new Dictionary<string, object?> { ["A"] = new string('m', 800) });
+        }
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        File.WriteAllBytes(memoPath, bytes[..^512]); // through A's text
+
+        using (var shared = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => shared.Append("x", "y")).Code);
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged && p.Hint!.Contains("backup", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_dBASE_IV_free_chain_cut_with_its_last_memo_is_caught()
+    {
+        // The header names free block 2, whose link would name the end; the cut takes block 2 and the
+        // memo in block 3 a record names, so the header seems to point exactly at the file's end.
+        var path = Path.Combine(_dir.FullName, "IV.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Memo("NOTES")]))
+        {
+            table.Append("one");
+            table.Append("two");
+            table.Append("three");
+        }
+        var memoPath = MemoFile(path, ".DBT");
+        var bytes = File.ReadAllBytes(memoPath);
+        Assert.Equal(4 * 512, bytes.Length); // the header, then blocks 1, 2 and 3
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes, 2); // block 2 freed: the chain starts there
+        BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(2 * 512), 4); // and links on to the end
+        using (var table = DbfTable.Open(path, writable: true, allowUnmaintainedIndexes: true))
+            table.UpdateFields(1, new Dictionary<string, object?> { ["NOTES"] = null });
+        File.WriteAllBytes(memoPath, bytes[..1_024]); // the cut: blocks 2 and 3 are gone
+
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.Contains(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+        using (var table = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => table.Append("would land in block 2 and 3")).Code);
+        Assert.Equal(1_024, new FileInfo(memoPath).Length);
+    }
+
+    [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");
