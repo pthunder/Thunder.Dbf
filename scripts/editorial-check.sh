@@ -35,7 +35,7 @@ done
 # Lines in text files matching a regex, excluding the scripts and guidelines that quote the patterns.
 search() {
     grep -nIE -- "$1" "${text_files[@]}" 2>/dev/null \
-        | grep -v -e '^scripts/editorial-check.sh:' -e '^scripts/history-check.sh:' -e '^docs/maintainers/editorial-guidelines.md:'
+        | grep -v -e '^scripts/editorial-check.sh:' -e '^scripts/history-check.sh:' -e '^scripts/install-hooks.sh:' -e '^docs/maintainers/editorial-guidelines.md:'
 }
 
 section "Secrets"
@@ -57,6 +57,15 @@ while IFS= read -r hit; do fail "personal or machine path: $hit"; done < <(searc
 
 section "Brand"
 while IFS= read -r hit; do fail "write ProjectThunder as one word: $hit"; done < <(search 'Project Thunder')
+
+section "Internal names"
+# The review and test tools, hosts and machines behind the project stay out of what's published:
+# say "an automated review" or "the Windows test run" instead.
+internal='\b(Codex|gpt-[0-9][a-z0-9.-]*)\b|@[A-Za-z0-9-]+\.local\b'
+# Private names (our own hosts and machines) live in an untracked file, so this list doesn't publish them.
+private="$(git rev-parse --git-common-dir)/info/internal-names"
+[[ -s "$private" ]] && internal+="|$(grep -v '^#' "$private" | grep . | paste -sd'|' -)"
+while IFS= read -r hit; do fail "internal tool, host or machine name: $hit"; done < <(search "$internal")
 
 section "Banners"
 for f in "${text_files[@]}"; do

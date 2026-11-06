@@ -9,7 +9,7 @@
 // Removing a key never merges nodes: an emptied node goes back on the free list and its
 // pointer leaves the parent. Each interior key stays equal to its child's last key, as dBASE and
 // Jet keep it: Jet goes down by those keys and never on to the next leaf, so a key left above its
-// child's real last key hides the keys that come after it (found by the Jet tests on Windows).
+// child's real last key hides the keys that come after it (found by reading Thunder.Dbf's indexes with Jet on Windows).
 
 using System.Buffers.Binary;
 using System.Text;

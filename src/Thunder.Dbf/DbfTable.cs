@@ -1094,7 +1094,7 @@ public sealed partial class DbfTable : IDisposable
     // their keys for the missing records point past the end.
     // A memo file whose header names an end past the file's (a power cut kept the header, lost the tail)
     // is padded back to it by an exclusive writable open, as a short .dbf is cut back: Visual FoxPro then
-    // opens it again, and every memo a record names is where it was (found by the Hyper-V power cuts).
+    // opens it again, and every memo a record names is where it was (found by power cuts to a Windows VM).
     private void RepairShortMemo()
     {
         if (!_stream.CanWrite || _memo is null)
@@ -2531,7 +2531,7 @@ public sealed partial class DbfTable : IDisposable
                 "Open it with writable: true to rebuild its index.", _path);
         // A structural .cdx refused when the table opened, for what a rebuild replaces anyway (keys out
         // of step with the table, after a batch was cut off, say), is taken over and rebuilt with the
-        // rest, as MaintainIndex(path, rebuild: true) would (found by the Visual FoxPro kill tests).
+        // rest, as MaintainIndex(path, rebuild: true) would (found by killing writers beside Visual FoxPro).
         if (_maintainFoxProIndexes && !HasMaintainedStructuralCdx && _structuralCdxRebuildable && _path is not null
             && FindCompanion(_path, ".cdx") is { } structuralCdx)
         {

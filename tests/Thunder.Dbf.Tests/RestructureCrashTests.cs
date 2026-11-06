@@ -680,7 +680,7 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal("CITY", after.Fields.Last().Name);
     }
 
-    // ---- the audit's other cases ----------------------------------------------------------------
+    // ---- the review's other cases ---------------------------------------------------------------
 
     // A Visual FoxPro table with its .FPT and a leftover .DBT: the change replaces the .FPT, and the
     // .DBT is never touched.

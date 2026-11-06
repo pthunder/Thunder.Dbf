@@ -251,8 +251,9 @@ public sealed partial class CdxWriteTests
     }
 
     // A structural .cdx refused when the table opened (short of the table's records here) is what
-    // RebuildIndex() is for: it takes the index over and rebuilds it (found by the Visual FoxPro kill
-    // tests, where it said "no index open" and only MaintainIndex(path, rebuild: true) would do).
+    // RebuildIndex() is for: it takes the index over and rebuilds it. Found by killing writers
+    // beside Visual FoxPro, where it said "no index open" and only MaintainIndex(path, rebuild: true)
+    // would do.
     [Fact]
     public void RebuildIndex_takes_over_a_structural_cdx_that_was_refused_at_open()
     {
@@ -353,7 +354,7 @@ public sealed partial class CdxWriteTests
     }
 
     // A power cut can leave the header's count on disk and not the last records (the operating system
-    // wrote the pages back out of order): found 4 times in 50 Hyper-V cuts. An exclusive open cuts the
+    // wrote the pages back out of order): found 4 times in 50 power cuts to a VM. An exclusive open cuts the
     // count back to the whole records the file holds, keeps the part record's bytes beside the table,
     // and rebuilds the index; Check() reports it first, and a shared open leaves it alone.
     [Fact]

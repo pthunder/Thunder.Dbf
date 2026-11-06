@@ -65,7 +65,7 @@ public sealed class MdxDigitCountTests : IDisposable
     [Fact]
     public void Jet_finds_the_record_after_a_deleted_holder_of_its_key()
     {
-        // The repro from the Windows PC, on a table Jet indexed: delete #95, give #351 the number 95.
+        // The repro from Jet on Windows, on a table Jet indexed: delete #95, give #351 the number 95.
         var path = JetTable(rows: 400);
         using (var table = Writable(path))
         {
@@ -322,7 +322,7 @@ public sealed class MdxDigitCountTests : IDisposable
         File.WriteAllBytes(mdx, bytes);
     }
 
-    // ---- Jet, as the Windows PC measured it --------------------------------------------------
+    // ---- Jet, as measured on Windows ---------------------------------------------------------
 
     // Down the tree to the first child whose key is at or above the value (the last child past them
     // all), never on to the next leaf; there, from the first key at or above it, every key whose bytes
