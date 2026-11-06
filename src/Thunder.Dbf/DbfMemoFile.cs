@@ -194,6 +194,8 @@ internal abstract class DbfMemoFile : IDisposable
     public int Write(ReadOnlySpan<byte> data, int blockType)
     {
         Validate(data, blockType);
+        if (FreeChainDamaged)
+            throw FreeChainDamagedException(); // before a byte is written
         var framed = Frame(data, blockType);
         // Allocate from the physical end of the file; never trust a stored pointer to say where that is.
         var block = checked((int)Math.Max(FirstDataBlock, (Stream.Length + BlockSize - 1) / BlockSize));
@@ -227,6 +229,75 @@ internal abstract class DbfMemoFile : IDisposable
 
     protected abstract DbfMemo ReadAt(long remaining);
     protected abstract byte[] Frame(ReadOnlySpan<byte> data, int blockType);
+
+    /// <summary>
+    /// How many bytes the file falls short of the end its header names (its next free block), or null
+    /// when it doesn't. A power cut can keep the header's new end and lose the blocks before it, and
+    /// Visual FoxPro then won't open the table (error 41) though no record names a block past the end.
+    /// A file shorter than its header holds no memos yet (SIMATIC writes those) and is left alone.
+    /// </summary>
+    public long? MissingTail()
+    {
+        DbfTable.DiscardReadBuffer(Stream);
+        if (Stream.Length < HeaderSize || EndBlock() is not { } end)
+            return null;
+        var named = (long)end * BlockSize;
+        return named > Stream.Length ? named - Stream.Length : null;
+    }
+
+    /// <summary>
+    /// True when the memo at <paramref name="block"/> doesn't lie whole in the file: it starts past the
+    /// end, claims more bytes than remain, or (a memo with an end marker) runs into the end without it.
+    /// </summary>
+    public bool IsCut(int block)
+    {
+        DbfTable.DiscardReadBuffer(Stream);
+        long offset = (long)block * BlockSize;
+        if (block < FirstDataBlock || offset >= Stream.Length)
+            return true;
+        Stream.Position = offset;
+        return !LiesWhole(Stream.Length - offset); // from its length or end marker: no memo is loaded, so no size limit applies
+    }
+
+    /// <summary>True when the memo at the stream's position ends within <paramref name="remaining"/> bytes.</summary>
+    protected abstract bool LiesWhole(long remaining);
+
+    /// <summary>True when a 0x1A end marker comes within <paramref name="remaining"/> bytes of the stream's position.</summary>
+    protected bool TerminatorWithin(long remaining)
+    {
+        var chunk = new byte[64 * 1024];
+        while (remaining > 0)
+        {
+            var read = Stream.Read(chunk, 0, (int)Math.Min(chunk.Length, remaining));
+            if (read == 0)
+                return false;
+            if (Array.IndexOf(chunk, (byte)0x1A, 0, read) >= 0)
+                return true;
+            remaining -= read;
+        }
+        return false;
+    }
+
+    /// <summary>Pads the file with zeros to the end its header names, so every block it promises is there.</summary>
+    public void PadMissingTail()
+    {
+        if (MissingTail() is not { } missing)
+            return;
+        Stream.Position = Stream.Length;
+        Stream.Write(new byte[missing]);
+        Stream.Flush();
+        DbfTable.FlushToDisk(Stream);
+    }
+
+    /// <summary>True when a dBASE IV free chain loops or links into the header, so no memo can be added.</summary>
+    public virtual bool FreeChainDamaged => false;
+
+    internal static DbfException FreeChainDamagedException(string? path = null) => new(DbfErrorCode.MemoFileDamaged,
+        "The dBASE IV memo file's chain of free blocks loops or links into its header, so a new memo can't be added to it.",
+        "Pack the table in dBASE or Access (or copy it there), which rewrites the memo file; the memos themselves still read.", path);
+
+    /// <summary>The block the header (or, for dBASE IV, its free chain) says the file ends at; null if it can't tell.</summary>
+    protected virtual int? EndBlock() => ReadUInt32(0, BigEndian);
 
     /// <summary>Records that the file now ends at <paramref name="newEnd"/> instead of <paramref name="oldEnd"/>.</summary>
     protected virtual void MoveEndOfFile(int oldEnd, int newEnd) => WriteUInt32(0, newEnd, BigEndian);
@@ -270,7 +341,13 @@ internal abstract class DbfMemoFile : IDisposable
 
         public override DbfMemoFormat Format => DbfMemoFormat.DbaseIII;
 
-        protected override DbfMemo ReadAt(long remaining) => new(ReadToTerminator(Stream, remaining), TextBlock);
+        protected override DbfMemo ReadAt(long remaining)
+        {
+            return new(ReadToTerminator(Stream, remaining, out _), TextBlock);
+        }
+
+        // No length, only an end marker: a memo the end of the file cut through has none.
+        protected override bool LiesWhole(long remaining) => TerminatorWithin(remaining);
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
         {
@@ -279,8 +356,11 @@ internal abstract class DbfMemoFile : IDisposable
             return [.. data, Terminator, Terminator];
         }
 
-        internal static byte[] ReadToTerminator(Stream stream, long remaining)
+        internal static byte[] ReadToTerminator(Stream stream, long remaining) => ReadToTerminator(stream, remaining, out _);
+
+        internal static byte[] ReadToTerminator(Stream stream, long remaining, out bool terminated)
         {
+            terminated = true;
             using var memo = new MemoryStream();
             var chunk = new byte[512];
             while (remaining > 0)
@@ -299,6 +379,7 @@ internal abstract class DbfMemoFile : IDisposable
 
             // The file ended before a terminator. Keep the text (it's often the last memo of a
             // truncated file) but drop the zero padding that fills the rest of its block.
+            terminated = false;
             var data = memo.ToArray();
             var length = data.Length;
             while (length > 0 && data[length - 1] == 0)
@@ -330,7 +411,21 @@ internal abstract class DbfMemoFile : IDisposable
 
             // Some tools write 0x8B tables with dBASE III-style memos; fall back to the terminator.
             Stream.Position = start;
-            return new(DbaseIIIMemo.ReadToTerminator(Stream, remaining), TextBlock);
+            return new(DbaseIIIMemo.ReadToTerminator(Stream, remaining, out _), TextBlock);
+        }
+
+        protected override bool LiesWhole(long remaining)
+        {
+            var start = Stream.Position;
+            Span<byte> blockHeader = stackalloc byte[BlockHeaderSize];
+            if (remaining >= BlockHeaderSize)
+            {
+                Stream.ReadExactly(blockHeader);
+                if (blockHeader[..4].SequenceEqual(Signature))
+                    return BinaryPrimitives.ReadUInt32LittleEndian(blockHeader[4..]) <= remaining; // the length counts its own header
+            }
+            Stream.Position = start;
+            return TerminatorWithin(remaining); // a dBASE III-style memo in a 0x8B table
         }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
@@ -342,30 +437,52 @@ internal abstract class DbfMemoFile : IDisposable
             return framed;
         }
 
-        // Walk the free chain to the link that points at the old end of file and move it.
-        protected override void MoveEndOfFile(int oldEnd, int newEnd)
-        {
-            var current = ReadUInt32(0, bigEndian: false);
-            if (current < FirstDataBlock || current >= oldEnd)
-            {
-                WriteUInt32(0, newEnd, bigEndian: false);
-                return;
-            }
+        private const uint UsedBlock = 0x0008FFFF; // FF FF 08 00, a memo's signature, read as a link
 
-            for (var steps = 0; steps <= oldEnd; steps++)
+        // The free chain runs from the header through each free block's first four bytes, in any order
+        // (Jet links freed blocks onto its head, so its chains run downward), to a link at or past the
+        // blocks the file holds: the end of the file. Returns where that last link is (0: the header)
+        // and the end it names. Stale: the header names no data block, or a link names a memo's own
+        // block (a power cut rolled it back to where that memo now starts); the next write points it at
+        // the new end. Damaged: a loop, or a link into the header; nothing can be written through it.
+        // inFile: the blocks the file held before a write, which may have grown it since.
+        private (long LinkAt, int End, bool Stale, bool Damaged) WalkFreeChain(int? inFile = null)
+        {
+            var blocks = inFile ?? (int)Math.Min(int.MaxValue, (Stream.Length + BlockSize - 1) / BlockSize);
+            long linkAt = 0;
+            var current = ReadUInt32(0, bigEndian: false);
+            if (current < FirstDataBlock)
+                return (0, current, Stale: true, Damaged: false);
+            var seen = new HashSet<int>();
+            while (current < blocks)
             {
+                if (current < FirstDataBlock || !seen.Add(current))
+                    return (linkAt, current, Stale: false, Damaged: true);
                 var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
-                if (next >= oldEnd)
-                {
-                    WriteUInt32((long)current * BlockSize, newEnd, bigEndian: false);
-                    return;
-                }
-                if (next <= current)
-                    break;
+                if (next == UsedBlock)
+                    return (linkAt, current, Stale: true, Damaged: false);
+                linkAt = (long)current * BlockSize;
                 current = next;
             }
+            return (linkAt, current, Stale: false, Damaged: false);
+        }
 
-            throw new InvalidDataException("The memo file's free-block chain is damaged; refusing to write to it.");
+        protected override int? EndBlock()
+        {
+            var chain = WalkFreeChain();
+            return chain.Stale || chain.Damaged ? null : chain.End;
+        }
+
+        public override bool FreeChainDamaged => Stream.Length >= HeaderSize && WalkFreeChain().Damaged;
+
+        // Points the link that names the old end of the file (or a stale one) at the new end. The walk
+        // stops at the old end: past it lies the memo just written, whose text is no link.
+        protected override void MoveEndOfFile(int oldEnd, int newEnd)
+        {
+            var chain = WalkFreeChain(oldEnd);
+            if (chain.Damaged)
+                throw FreeChainDamagedException();
+            WriteUInt32(chain.LinkAt, newEnd, bigEndian: false);
         }
     }
 
@@ -385,6 +502,15 @@ internal abstract class DbfMemoFile : IDisposable
             var type = (int)BinaryPrimitives.ReadUInt32BigEndian(blockHeader);
             var length = BinaryPrimitives.ReadUInt32BigEndian(blockHeader[4..]);
             return new(ReadBounded(length, remaining - BlockHeaderSize), type);
+        }
+
+        protected override bool LiesWhole(long remaining)
+        {
+            if (remaining < BlockHeaderSize)
+                return false;
+            Span<byte> blockHeader = stackalloc byte[BlockHeaderSize];
+            Stream.ReadExactly(blockHeader);
+            return BinaryPrimitives.ReadUInt32BigEndian(blockHeader[4..]) <= remaining - BlockHeaderSize;
         }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)

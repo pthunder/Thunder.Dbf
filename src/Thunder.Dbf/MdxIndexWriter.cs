@@ -7,8 +7,9 @@
 //          [ 40 ]          new root        root splits too, and a new root grows above it.
 //
 // Removing a key never merges nodes: an emptied node goes back on the free list and its
-// pointer leaves the parent. A separator that's larger than its child's real last key still
-// routes searches correctly, so nothing else needs touching.
+// pointer leaves the parent. Each interior key stays equal to its child's last key, as dBASE and
+// Jet keep it: Jet goes down by those keys and never on to the next leaf, so a key left above its
+// child's real last key hides the keys that come after it (found by the Jet tests on Windows).
 
 using System.Buffers.Binary;
 using System.Text;
@@ -24,6 +25,46 @@ public sealed partial class MdxIndex
     internal bool CanWrite => _stream.CanWrite;
 
     private int PagesPerBlock => BlockSize / PageSize;
+
+    /// <summary>
+    /// Why the tags aren't in step with <paramref name="table"/>, or null when they are. A tag with no
+    /// FOR filter and no UNIQUE holds one key per record, deleted ones included, and every tag holds the
+    /// last two records' keys: a writer killed between the table and the index (an append that counted
+    /// its record but added no keys, an update with its new keys in and its old ones not yet out), or
+    /// Jet writing beside another writer, leaves a tag that fails one of them. The same checks a .cdx gets.
+    /// </summary>
+    /// <param name="table">The table the index belongs to.</param>
+    /// <param name="checkUnique">Also check each UNIQUE tag holds one key per distinct value: a read of every record, which Check() does.</param>
+    internal string? OutOfStep(DbfTable table, bool checkUnique = false)
+    {
+        var records = table.RecordCount;
+        foreach (var tag in Tags)
+        {
+            if (tag.ForExpression is null && !tag.IsUnique && tag.CountKeys() is var keys && keys != records)
+                return $"Tag {tag.Name} holds {keys:N0} keys for {records:N0} records, so it isn't in step with the table (a write reached the table but not the index, or the index but not the table)";
+        }
+        // A UNIQUE tag holds one key for each value the records have (deleted ones included, as dBASE
+        // keeps them). Kills that hand a key on between records can leave one short or over.
+        foreach (var tag in checkUnique ? Tags.Where(t => t.IsUnique && t.ForExpression is null) : [])
+        {
+            var values = new HashSet<string>();
+            foreach (var record in table.ReadAll())
+                values.Add(Convert.ToHexString(tag.KeyFor(record)));
+            if (tag.CountKeys() is var keys && keys != values.Count)
+                return $"UNIQUE tag {tag.Name} holds {keys:N0} keys for {values.Count:N0} distinct values, so it isn't in step with the table";
+        }
+        for (var index = Math.Max(0, records - 2); index < records; index++)
+        {
+            var record = table.Read(index);
+            // A UNIQUE tag keeps one record per key, so a record may rightly have none (as for a .cdx).
+            foreach (var tag in Tags.Where(t => !t.IsUnique))
+            {
+                if (tag.Includes(record) && !tag.Contains(tag.KeyFor(record), record.RecordNumber))
+                    return $"Tag {tag.Name} has no key for record {record.RecordNumber:N0}, so it isn't in step with the table (a write reached the table but not the index)";
+            }
+        }
+        return null;
+    }
 
     internal void WriteBlock(int page, byte[] block)
     {
@@ -291,14 +332,15 @@ public sealed partial class MdxTag
     internal byte[] KeyFor(DbfRecord record)
     {
         ParseExpressions();
-        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression);
+        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression, NumericStyle);
     }
 
     /// <summary>
     /// The stored bytes for one key value. Shared with INDEX ON, which encodes every key before a new
-    /// tag exists, so a value that can't be stored stops the command before the file changes.
+    /// tag exists, so a value that can't be stored stops the command before the file changes. A new
+    /// tag counts digits as Jet does (see <see cref="MdxTag.NumericStyle"/>).
     /// </summary>
-    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression)
+    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, NumericKeyStyle style = NumericKeyStyle.Jet)
     {
         switch (keyType)
         {
@@ -314,10 +356,10 @@ public sealed partial class MdxTag
             case 'N':
                 return value switch
                 {
-                    decimal d => MdxKeys.EncodeNumeric(d),
-                    double d => MdxKeys.EncodeNumeric(d),
-                    int or long => MdxKeys.EncodeNumeric(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture)),
-                    null => MdxKeys.EncodeNumeric(0m),
+                    decimal d => MdxKeys.EncodeNumeric(d, style),
+                    double d => MdxKeys.EncodeNumeric(d, style),
+                    int or long => MdxKeys.EncodeNumeric(Convert.ToDecimal(value, System.Globalization.CultureInfo.InvariantCulture), style),
+                    null => MdxKeys.EncodeNumeric(0m, style),
                     _ => throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a number."),
                 };
             default:
@@ -520,6 +562,36 @@ public sealed partial class MdxTag
     internal bool Contains(byte[] key, int recordNumber) =>
         Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found;
 
+    /// <summary>
+    /// How many keys the tag holds: the leaves' counts added up, without reading a key (a million
+    /// keys in three tags took 1.25 s decoded). Every page is read at most once.
+    /// </summary>
+    internal long CountKeys()
+    {
+        long keys = 0;
+        var visited = new HashSet<int>();
+        var pages = new Stack<(int Page, int Depth)>([(RootPage(), 0)]);
+        var block = new byte[_index.BlockSize];
+        while (pages.TryPop(out var at))
+        {
+            GuardDepth(at.Depth);
+            if (!visited.Add(at.Page))
+                throw new InvalidDataException($"Tag {Name} reaches index page {at.Page} twice; the index is corrupt.");
+            _index.ReadBlock(at.Page, block);
+            var count = NodeCount(block);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {at.Page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
+            if (BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + count * ItemLength)) == 0)
+            {
+                keys += count;
+                continue;
+            }
+            for (var i = 0; i <= count; i++)
+                pages.Push((BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + i * ItemLength)), at.Depth + 1));
+        }
+        return keys;
+    }
+
     /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
     internal bool Remove(byte[] key, int recordNumber)
     {
@@ -528,19 +600,27 @@ public sealed partial class MdxTag
             return false;
 
         // Remove the item from its leaf; if that empties a node (other than the root), drop the node
-        // and its pointer from the parent, and carry on upward while parents empty out too.
+        // and its pointer from the parent, and carry on upward while parents empty out too. When the
+        // node that's left has a new last key, the keys above it that named the old one follow it.
         for (var level = path.Count - 1; level >= 0; level--)
         {
             var (page, slot) = path[level];
             var (items, lastPointer, isLeaf) = ReadNode(page);
+            byte[]? newLast = null; // the node's new last key, when its old one left
             if (isLeaf)
+            {
                 items.RemoveAt(slot);
+                if (slot == items.Count && items.Count > 0)
+                    newLast = items[^1].Key;
+            }
             else if (slot < items.Count)
                 items.RemoveAt(slot);
             else if (items.Count > 0)
             {
-                // The last child went; the one before it becomes last, and keys for the last child aren't stored.
+                // The last child went; the one before it becomes last, and keys for the last child aren't
+                // stored. Its key was that child's last key, now the last key under this node.
                 lastPointer = items[^1].Pointer;
+                newLast = items[^1].Key;
                 items.RemoveAt(items.Count - 1);
             }
             else
@@ -550,6 +630,8 @@ public sealed partial class MdxTag
             if (!empty || level == 0)
             {
                 WriteNode(page, items, isLeaf ? 0 : lastPointer);
+                if (newLast is not null)
+                    LowerKeysAbove(path, level, newLast);
                 if (level == 0)
                     CollapseRoot();
                 return true;
@@ -557,6 +639,25 @@ public sealed partial class MdxTag
             _index.FreePage(page);
         }
         return true;
+    }
+
+    // The node at path[level] now ends at newLast: the parent's key for it becomes newLast. Under a
+    // parent's last pointer there's no key, but the parent's own last key changed, so on up the path.
+    private void LowerKeysAbove(List<(int Page, int Slot)> path, int level, byte[] newLast)
+    {
+        for (var parent = level - 1; parent >= 0; parent--)
+        {
+            var (page, slot) = path[parent];
+            var (items, lastPointer, _) = ReadNode(page);
+            if (slot < items.Count)
+            {
+                if (items[slot].Key.AsSpan().SequenceEqual(newLast))
+                    return; // a duplicate of the key that left: nothing above it changes
+                items[slot] = items[slot] with { Key = newLast };
+                WriteNode(page, items, lastPointer);
+                return;
+            }
+        }
     }
 
     // Each page is searched at most once: a damaged index whose nodes share children can't make this
@@ -738,6 +839,11 @@ public sealed partial class MdxTag
                     hi = mid;
             }
             var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + count * ItemLength));
+            // An insert equal to an interior key goes into the child that key covers, at its end, as Jet
+            // finds it, unless the next child starts with the same key (equal keys stay in record order).
+            if (upper && lastPointer != 0 && lo > 0 && CompareKeys(NodeKey(block, lo - 1), key) == 0
+                && !StartsWith(lo < count ? BinaryPrimitives.ReadInt32LittleEndian(block.AsSpan(8 + lo * ItemLength)) : lastPointer, key))
+                lo--;
             _pathPages[depth] = page;
             _pathSlots[depth] = lo;
             if (lastPointer == 0)
@@ -751,6 +857,23 @@ public sealed partial class MdxTag
     }
 
     private static int NodeCount(byte[] block) => BinaryPrimitives.ReadInt32LittleEndian(block);
+
+    // Whether the subtree at page starts with key: down its first children to the first leaf key.
+    private bool StartsWith(int page, byte[] key)
+    {
+        for (var depth = 0; ; depth++)
+        {
+            GuardDepth(depth);
+            var node = _index.ReadBlock(page);
+            var count = NodeCount(node);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
+            var lastPointer = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength));
+            if (lastPointer == 0)
+                return count > 0 && CompareKeys(NodeKey(node, 0), key) == 0;
+            page = count > 0 ? BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8)) : lastPointer;
+        }
+    }
 
     private ReadOnlySpan<byte> NodeKey(byte[] block, int slot) => block.AsSpan(8 + slot * ItemLength + 4, KeyLength);
 

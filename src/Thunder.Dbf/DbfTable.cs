@@ -96,6 +96,66 @@ public sealed partial class DbfTable : IDisposable
     /// <summary>The memo file's format, or null when the table has none (or it was missing and ignored).</summary>
     public DbfMemoFormat? MemoFormat => _memo?.Format;
 
+    /// <summary>How many bytes the memo file falls short of the end its header names (see DbfMemoFile.MissingTail).</summary>
+    internal long? MemoMissingTail => _memo?.MissingTail();
+
+    /// <summary>True when a dBASE IV memo file's free chain loops or links into its header: no memo can be added.</summary>
+    internal bool MemoFreeChainDamaged => _memo?.FreeChainDamaged ?? false;
+
+    /// <summary>True when a memo a record names doesn't lie whole in the file: a power cut lost its end.</summary>
+    internal bool MemoCutThrough => LastMemoCut();
+
+    /// <summary>
+    /// True when the highest memo any record names doesn't lie whole in the file. The header's end
+    /// can't be trusted to show a cut: a power cut can lose the header's new next-free block with the
+    /// tail (FoxPro, dBASE III), or a link of a dBASE IV free chain. Memos don't overlap, so a cut tail
+    /// shows in the highest one (or in one past the end, higher still). Block numbers are read from the
+    /// records' bytes, ASCII or binary, skipping fields marked .NULL.; one memo is read.
+    /// </summary>
+    private bool LastMemoCut()
+    {
+        if (_memo is not { } memo)
+            return false;
+        var fields = Fields.Where(f => DbfValueCodec.IsMemoField(f) && f.Length is 10 or 4).ToList();
+        if (fields.Count == 0)
+            return false;
+        var nullFlags = Header.NullFlagsFieldIndex is { } n ? Fields[n] : null;
+        var highest = 0;
+        var length = Header.RecordLength;
+        if (length <= 0)
+            return false; // a damaged header: the table's own reads report it
+        var rows = Math.Max(1, Math.Min(4096, (1 << 20) / length)); // about 1 MB a batch, whatever the header says
+        var batch = new byte[length * rows];
+        DiscardReadBuffer(_stream);
+        for (var first = 0; first < RecordCount; first += rows)
+        {
+            var count = Math.Min(rows, RecordCount - first);
+            _stream.Position = Header.HeaderLength + (long)first * length;
+            var read = _stream.ReadAtLeast(batch.AsSpan(0, count * length), count * length, throwOnEndOfStream: false) / length;
+            var lastBatch = read < count; // the file ran out before the header's count
+            for (var i = 0; i < read; i++)
+            {
+                var row = batch.AsSpan(i * length, length);
+                foreach (var field in fields)
+                {
+                    if (field.NullBit is { } bit && nullFlags is not null && IsBitSet(row.Slice(nullFlags.Offset, nullFlags.Length), bit))
+                        continue;
+                    var bytes = row.Slice(field.Offset, field.Length);
+                    int block;
+                    if (field.Length == 4)
+                        block = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(bytes);
+                    else if (!int.TryParse(System.Text.Encoding.ASCII.GetString(bytes).Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out block))
+                        continue;
+                    if (block > highest)
+                        highest = block;
+                }
+            }
+            if (lastBatch)
+                break;
+        }
+        return highest > 0 && memo.IsCut(highest);
+    }
+
     /// <summary>
     /// Opens a .dbf file and its .dbt/.fpt memo file. Files are opened shared, like dBASE does in
     /// multi-user mode, so the legacy app keeps working; writes coordinate with it through
@@ -169,8 +229,10 @@ public sealed partial class DbfTable : IDisposable
                         table.WatchFolder(); // before the first listing, so nothing made meanwhile is missed
                     table.AttachOtherIndexes(path, table.Header);
                     table.RepairShortTable();
+                    table.RepairShortMemo();
                     table.RepairUnfinishedAppends();
                     table.ClearMootBatchNote();
+                    table.CheckMdxInStep();
                 }
                 catch
                 {
@@ -262,6 +324,8 @@ public sealed partial class DbfTable : IDisposable
             ignoreMissingMemo, allowUnmaintainedIndexes);
         if (indexStream is not null && header.HasProductionMdx && stream.CanWrite)
             table.AttachIndex(indexStream, leaveOpen);
+        if (stream.CanWrite)
+            table.RepairShortMemo(); // the guard only: a table opened from streams is never padded
         return table;
     }
 
@@ -556,10 +620,47 @@ public sealed partial class DbfTable : IDisposable
     // ---- failed index updates -------------------------------------------------------------
 
     private bool _indexesNeedRebuild;
+    private string? _mdxOutOfStep; // why the production .mdx didn't match the table at open
+
+    // A .mdx whose tags don't match the table (see MdxIndex.OutOfStep) stops writes until it's rebuilt,
+    // as a .cdx does: a write would build on keys that are already wrong. Read under the table lock,
+    // so a write another program has in progress isn't mistaken for damage.
+    private void CheckMdxInStep()
+    {
+        // A journal note (a change or batch cut off) is finished, or refused with its own reason, by the
+        // next write, which leaves the tags in step: that comes first.
+        if (_index is null || _allowUnmaintainedIndexes || _indexesNeedRebuild || _journalPending)
+            return;
+        try
+        {
+            using var tableLock = Locks.Table();
+            Refresh();
+            // Every key is counted, by its leaves, on every writable open, as a .cdx is checked: an update
+            // cut off mid-table leaves an extra key only a count finds (about 0.1 s for a million records
+            // in three tags, well under a millisecond for an ordinary table).
+            _mdxOutOfStep = _index.OutOfStep(this);
+        }
+        catch (InvalidDataException ex)
+        {
+            _mdxOutOfStep = $"The .mdx index is damaged: {ex.Message}";
+        }
+        catch (Exception ex) when (ex is DbfException or NotSupportedException or InvalidOperationException or KeyNotFoundException
+                                       or FormatException or ArgumentException or ArithmeticException)
+        {
+            // The table is locked by another program, or a key expression can't be worked out here: the
+            // write path says so in its own words, and Check() reports what it can.
+        }
+    }
 
     // After a failed index update the index may hold half a change, so no write may build on it.
     private void ThrowIfIndexesNeedRebuild()
     {
+        if (_memoDamaged)
+            throw new DbfException(DbfErrorCode.MemoFileDamaged, "A memo a record names lost its end with the end of the memo file (a power cut), so writing would put new memo text where the old one's was.",
+                "Restore the memo file from a backup, then open the table again.", _path);
+        if (_mdxOutOfStep is { } reason)
+            throw new DbfException(DbfErrorCode.IndexDamaged, $"{reason}. Writing would build on keys that are already wrong.",
+                "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
         if (_indexesNeedRebuild)
             throw new DbfException(DbfErrorCode.IndexDamaged, "An earlier write couldn't update this table's indexes, so they may be out of step.",
                 "Close the legacy app, open the table with exclusive: true and call RebuildIndex() (or REINDEX in the legacy app) before writing again.", _path);
@@ -605,6 +706,7 @@ public sealed partial class DbfTable : IDisposable
         {
             _index = MdxIndex.Open(indexStream, Encoding, leaveOpen);
             _index.ForcesWrites = () => ForcesWrites;
+            _index.IsExclusive = () => _exclusive;
         }
         catch (InvalidDataException ex)
         {
@@ -990,6 +1092,34 @@ public sealed partial class DbfTable : IDisposable
     // where nobody can be appending, cuts the count back to the whole records the file has; the bytes
     // of a part record are kept beside the table first, and the indexes it keeps are rebuilt, since
     // their keys for the missing records point past the end.
+    // A memo file whose header names an end past the file's (a power cut kept the header, lost the tail)
+    // is padded back to it by an exclusive writable open, as a short .dbf is cut back: Visual FoxPro then
+    // opens it again, and every memo a record names is where it was (found by the Hyper-V power cuts).
+    private void RepairShortMemo()
+    {
+        if (!_stream.CanWrite || _memo is null)
+            return;
+        try
+        {
+            // A memo a record names that lost its end: a new memo would go where that end was, and
+            // the damaged one would then read as whole with the new one's bytes in it, so no writes at
+            // all. The header's end can't show it (a cut can take the header's new end too): the
+            // highest memo can, since memos don't overlap.
+            _memoDamaged = LastMemoCut();
+            // Every memo whole, but shorter than the header names: Visual FoxPro won't open an .fpt
+            // like that (error 41), so an exclusive open pads it. Jet leaves every .dbt's last block
+            // short, and dBASE and Jet read it as it is, so a .dbt is left alone.
+            if (!_memoDamaged && _exclusive && _memo.Format == DbfMemoFormat.FoxPro && _memo.MissingTail() is not null)
+                _memo.PadMissingTail();
+        }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException)
+        {
+            // A memo file that can't be read or written here: its own reads and writes report it.
+        }
+    }
+
+    private bool _memoDamaged; // a memo a record names was cut off by the lost tail of the file
+
     private void RepairShortTable()
     {
         if (!_exclusive || !_stream.CanWrite)
@@ -2208,7 +2338,8 @@ public sealed partial class DbfTable : IDisposable
     {
         var current = record is not null && tag.Includes(record) ? tag.KeyFor(record) : null;
         var done = new List<Action>();
-        static bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && a.AsSpan().SequenceEqual(b);
+        // As the tag compares them: a noted key in an earlier version's form is still the record's key.
+        bool Same(byte[]? a, byte[]? b) => a is not null && b is not null && tag.SameKey(a, b);
 
         if (!tag.IsUnique)
         {
@@ -2348,23 +2479,34 @@ public sealed partial class DbfTable : IDisposable
             // replay doesn't know how far the cut-off write got, so there it may be missing.)
             if (!tag.IsUnique && !mayBeMissing)
                 throw new InvalidDataException($"Index tag {tag.Name} has no entry for record {recordNumber}, which it should.");
+            // A replay can find the removal done and the hand-over not (the writer died between them):
+            // the next holder gets the key, unless a record already holds it.
+            if (tag.IsUnique && mayBeMissing && !tag.UniqueKeepsFirstIndexed && tag.FirstRecordFor(key) is null
+                && LowestOtherRecordWithKey(tag, key, recordNumber) is { } heir && tag.FirstRecordFor(heir.Key) is null)
+            {
+                tag.Insert(heir.Key, heir.Record);
+                done.Add(() => tag.Remove(heir.Key, heir.Record));
+            }
             return;
         }
         done.Add(() => tag.Insert(key, recordNumber));
         if (tag.IsUnique && !tag.UniqueKeepsFirstIndexed && LowestOtherRecordWithKey(tag, key, recordNumber) is { } next)
         {
-            tag.Insert(key, next);
-            done.Add(() => tag.Remove(key, next));
+            // The holder's own key, in the form this version writes: the one given may be a journal's
+            // note in an earlier version's form (an .mdx number's digit count).
+            tag.Insert(next.Key, next.Record);
+            done.Add(() => tag.Remove(next.Key, next.Record));
         }
     }
 
-    // When a unique tag's record leaves, the lowest-numbered other record with the same key takes its place.
-    private int? LowestOtherRecordWithKey(IMaintainedTag tag, byte[] key, int leaving)
+    // When a unique tag's record leaves, the lowest-numbered other record with the same key takes its
+    // place. Keys compare as the tag compares them, so one noted by 0.4.0 still finds its holder.
+    private (int Record, byte[] Key)? LowestOtherRecordWithKey(IMaintainedTag tag, byte[] key, int leaving)
     {
         foreach (var record in ReadAll())
         {
-            if (record.RecordNumber != leaving && tag.Includes(record) && tag.KeyFor(record).AsSpan().SequenceEqual(key))
-                return record.RecordNumber;
+            if (record.RecordNumber != leaving && tag.Includes(record) && tag.KeyFor(record) is var candidate && tag.SameKey(candidate, key))
+                return (record.RecordNumber, candidate);
         }
         return null;
     }
@@ -2432,6 +2574,7 @@ public sealed partial class DbfTable : IDisposable
             tag.ReplaceAll(keys);
         CommitIndexes();
         _indexesNeedRebuild = false;
+        _mdxOutOfStep = null;
         // Rebuilt from the table, so a note about these indexes is moot; one naming an index this
         // table doesn't keep stays for a process that does.
         if (_path is not null)

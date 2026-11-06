@@ -111,6 +111,38 @@ internal static class IndexKeys
         return julian == 0 || !(dayNumber >= 0 && dayNumber <= DateOnly.MaxValue.DayNumber) ? null : DateOnly.FromDayNumber((int)dayNumber);
     }
 
+    /// <summary>
+    /// A datetime as Visual FoxPro 9 keys it in a .cdx: Julian days with the time as a fraction of the
+    /// day, worked out as VFP does, whole seconds since day 0 (milliseconds rounded) times 1/86400 as a
+    /// double. (Adding seconds / 86400 to the day comes out one step off for about a quarter of real
+    /// values.) An empty one keys as 0.
+    /// </summary>
+    public static double JulianDateTime(DateTime moment) =>
+        (JulianDay(DateOnly.FromDateTime(moment)) * 86_400d
+         + Math.Round(moment.TimeOfDay.Ticks / (double)TimeSpan.TicksPerSecond, MidpointRounding.AwayFromZero)) * (1d / 86_400d);
+
+    /// <summary>A datetime key back as a <see cref="DateTime"/>, to the second; 0 is a blank datetime.</summary>
+    public static DateTime? FromJulianDateTime(double julian)
+    {
+        if (julian == 0)
+            return null;
+        var seconds = Math.Round(julian * 86_400d);
+        var day = Math.Floor(seconds / 86_400d);
+        var dayNumber = day - JulianDayOfDayNumberZero;
+        if (!(dayNumber >= 0 && dayNumber <= DateOnly.MaxValue.DayNumber))
+            return null;
+        return DateOnly.FromDayNumber((int)dayNumber).ToDateTime(TimeOnly.MinValue).AddSeconds(seconds - day * 86_400d);
+    }
+
+    /// <summary>Turns a seek value into a datetime key: a <see cref="DateTime"/>, a <see cref="DateOnly"/> (midnight) or null (blank).</summary>
+    public static double ToJulianDateTime(object? key, string tagName) => key switch
+    {
+        null => 0d,
+        DateTime dt => JulianDateTime(dt),
+        DateOnly d => JulianDateTime(d.ToDateTime(TimeOnly.MinValue)),
+        _ => throw new ArgumentException($"Tag {tagName} has datetime keys; seek with a DateTime (or null for a blank one), not {key.GetType().Name}."),
+    };
+
     /// <summary>Turns a seek value into a Julian day number: a <see cref="DateOnly"/>, a <see cref="DateTime"/> or null (blank).</summary>
     public static double ToJulianDay(object? key, string tagName) => key switch
     {
