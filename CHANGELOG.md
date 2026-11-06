@@ -10,6 +10,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Tests
+
+- **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. They haven't run against VFP yet; the [checklist](docs/maintainers/visual-foxpro-test.md) says how.
+
 ## [0.4.2] - 2026-11-05
 
 The memo guard 0.4.1 added, made whole: a power cut can no longer let a new memo land in the space of one it damaged, in any memo format or open mode, and Jet-maintained dBASE tables work again. Checked on the Windows test PC with real VFP and Jet memo files cut every way, and by a release audit.
@@ -67,10 +71,6 @@ Compatibility with Jet and Visual FoxPro, found by testing 0.4.0 against them on
 ### Added
 
 - `samples/Maui`: an iPhone CRM built with .NET MAUI. It opens any dBASE or FoxPro table from Files, with its memo and index files, and works out which fields hold the name, phone, follow-up date and so on from their names. Edits keep the `.cdx` or `.mdx` index up to date, and Share sends the files back out in their original format. Tested on the iOS 27 simulator.
-
-### Tests
-
-- **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. They haven't run against VFP yet; the [checklist](docs/maintainers/visual-foxpro-test.md) says how.
 
 ## [0.4.0] - 2026-11-03
 
