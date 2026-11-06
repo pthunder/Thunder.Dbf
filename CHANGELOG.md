@@ -10,6 +10,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-05
+
+The memo guard 0.4.1 added, made whole: a power cut can no longer let a new memo land in the space of one it damaged, in any memo format or open mode, and Jet-maintained dBASE tables work again. Checked on the Windows test PC with real VFP and Jet memo files cut every way, and by a release audit.
+
+**Upgrading from 0.4.1:** nothing in the public API changed. A table whose highest memo was cut by a power cut now refuses writes (`MemoFileDamaged`) whatever its header says; restore its memo file from a backup.
+
 ### Changed
 
 - The NuGet packages carry release notes: each version's section of this changelog, shown on nuget.org's Release Notes tab.
