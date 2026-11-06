@@ -57,7 +57,7 @@ Thunder.Dbf exists so people can put web apps on top of legacy data that often h
 | Secrets | key and token patterns, private keys, `Password=` in connection strings |
 | Personal paths | `/Users/x`, `C:\Users\x`, `/home/x`, temp-folder paths |
 | Brand | "Project Thunder" written as two words |
-| Internal names | AI tool and model names, addresses made from a machine's name, and the private names listed in `.git/info/internal-names` (kept out of the repo, so the list itself isn't published) |
+| Internal names | The review tools' names (Codex, ChatGPT, `gpt-*` models), addresses made from a machine's name (`user@host.local`), and the private names in `.git/info/internal-names`, which stays out of the repo so the list itself isn't published. The pattern lives in `scripts/internal-names.sh`. |
 | Banners | every `.cs` file starts with a ProjectThunder banner |
 | Fixtures | every fixture folder has a license and a SOURCES.md row |
 | Stray data | table, memo, index, CSV or database files outside `tests/fixtures` |

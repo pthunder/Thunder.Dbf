@@ -17,7 +17,7 @@ die() { echo "History check couldn't run: $*"; exit 2; }
 patterns='AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|sk-[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(Password|Pwd)=[^;"'"'"' ]+|/Users/[A-Za-z0-9._-]+/|[Cc]:\\\\Users\\\\[A-Za-z]|/home/[a-z][a-z0-9_-]*/|/private/tmp/|/var/folders/|scratch-workspaces'
 
 # The files that define the patterns would match themselves.
-excluded='^(scripts/editorial-check\.sh|scripts/history-check\.sh|scripts/install-hooks\.sh|docs/maintainers/.*)$'
+excluded='^(scripts/editorial-check\.sh|scripts/history-check\.sh|scripts/internal-names\.sh|docs/maintainers/.*)$'
 
 objects=$(git rev-list --all --objects) || die "git rev-list failed."
 commits=$(git rev-list --all --count) || die "git rev-list --count failed."
@@ -39,10 +39,7 @@ messages=$(grep -nE "$patterns" <<<"$log" | head -20)
 
 # Internal tool, host and machine names (see the editorial check), and author or committer
 # addresses made up from a machine's name, in commits after the ones already published with them.
-internal='\b(Codex|gpt-[0-9][a-z0-9.-]*)\b|@[A-Za-z0-9-]+\.local\b'
-# Private names (our own hosts and machines) live in an untracked file, so this list doesn't publish them.
-private="$(git rev-parse --git-common-dir)/info/internal-names"
-[[ -s "$private" ]] && internal+="|$(grep -v '^#' "$private" | grep . | paste -sd'|' -)"
+source scripts/internal-names.sh
 published=9e814ddfe64797b983ff3a6a023e7f001b006a29 # main once 0.4.2 and #52 were in
 internal_log=$(git log --all --format='%H %an <%ae> %cn <%ce>%n%s%n%b' "^$published") || die "git log of new commits failed."
 internal_hits=$(grep -nE "$internal" <<<"$internal_log" | head -20)
