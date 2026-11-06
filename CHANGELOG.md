@@ -22,6 +22,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   In each case, writes to the table are refused (`MemoFileDamaged`) and `Check()` says to restore the memo file from a backup. 0.4.0 had no guard at all.
 - **`Check()` no longer calls Jet-maintained dBASE memo files damaged.** Jet doesn't pad a `.dbt`'s last block, so the file ends before the block its header names. 0.4.1's `Check()` reported that as a power cut, quoting Visual FoxPro's error 41, after every Jet write, and an exclusive open padded the file each time. A `.dbt` whose memos are all whole is now left alone. A `.fpt` is still reported and padded, since Visual FoxPro needs that.
 - **A dBASE IV memo header a cut rolled back** points at a used memo block. That block's marker was read as a free-chain link, so `Check()` named a shortfall of hundreds of megabytes. It now says the memo runs past the end of the file.
+- **A dBASE IV append no longer writes over a memo a rolled-back header names.** A cut can keep a memo whole and lose only the header's new end, which then names that memo's block. The append's walk of the free chain took the memo's marker for a link and wrote over it. A link to a used block now counts as stale and is pointed at the new end.
+- **A healthy table whose highest memo is over 64 MiB** (Visual FoxPro allows that) no longer counts as cut. Whether the highest memo lies whole is now worked out from its stored length or its end marker, without loading it.
 - **Writable opens of a memo file that ends early no longer read every memo.** Only the highest memo a record names is read, since memos don't overlap. On a Jet-maintained table, that was every writable open.
 
 ## [0.4.1] - 2026-11-05

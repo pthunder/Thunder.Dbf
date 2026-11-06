@@ -287,6 +287,63 @@ public sealed class MemoTailTests : IDisposable
     }
 
     [Fact]
+    public void A_dBASE_IV_header_rolled_back_onto_a_whole_memo_isnt_written_over()
+    {
+        // The cut lost only the header's new end: it names the block where the last memo, whole, starts.
+        // The next append's chain walk must not take that memo's FF FF 08 00 for a link and overwrite it.
+        var path = Path.Combine(_dir.FullName, "IVBACK.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append("one");
+        var memoPath = MemoFile(path, ".DBT");
+        var before = File.ReadAllBytes(memoPath)[..4];
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append("two, kept whole");
+        var bytes = File.ReadAllBytes(memoPath);
+        before.CopyTo(bytes, 0);
+        File.WriteAllBytes(memoPath, bytes);
+
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append("three");
+        using (var reopened = DbfTable.Open(path))
+        {
+            Assert.Equal("one", reopened.Read(0)["NOTES"]);
+            Assert.Equal("two, kept whole", reopened.Read(1)["NOTES"]);
+            Assert.Equal("three", reopened.Read(2)["NOTES"]);
+        }
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.DoesNotContain(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+    }
+
+    [Fact]
+    public void A_whole_memo_past_the_read_limit_doesnt_block_writes()
+    {
+        // Visual FoxPro stores memos past Thunder.Dbf's 64 MiB read limit; a whole one isn't a cut one.
+        var path = Path.Combine(_dir.FullName, "BIGMEMO.DBF");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Memo("NOTES")]))
+            table.Append("attachment");
+        var memoPath = MemoFile(path, ".FPT");
+        const int huge = 65 * 1024 * 1024;
+        using (var memo = new FileStream(memoPath, FileMode.Open, FileAccess.ReadWrite))
+        {
+            var start = memo.Length - 64; // the one memo, in the last 64-byte block
+            Span<byte> length = stackalloc byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(length, huge);
+            memo.Position = start + 4;
+            memo.Write(length);
+            var end = (start + 8 + huge + 63) / 64 * 64;
+            memo.SetLength(end);
+            BinaryPrimitives.WriteUInt32BigEndian(length, (uint)(end / 64));
+            memo.Position = 0;
+            memo.Write(length);
+        }
+
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append("small");
+        using (var db = DbfDatabase.Open(_dir.FullName))
+            Assert.DoesNotContain(db.Check().Problems, p => p.Code == DbfErrorCode.MemoFileDamaged);
+    }
+
+    [Fact]
     public void A_shared_open_leaves_a_short_memo_file_to_the_exclusive_one()
     {
         var path = Path.Combine(_dir.FullName, "CALLS.DBF");

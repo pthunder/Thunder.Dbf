@@ -244,30 +244,36 @@ internal abstract class DbfMemoFile : IDisposable
     }
 
     /// <summary>
-    /// True when the last memo read ran into the end of the file without its end marker: a dBASE III
-    /// memo has no length, so one the file was cut through reads as shorter text, not as an error.
-    /// </summary>
-    public bool LastReadReachedEnd { get; set; }
-
-    /// <summary>
     /// True when the memo at <paramref name="block"/> doesn't lie whole in the file: it starts past the
     /// end, claims more bytes than remain, or (a memo with an end marker) runs into the end without it.
     /// </summary>
     public bool IsCut(int block)
     {
         DbfTable.DiscardReadBuffer(Stream);
-        if ((long)block * BlockSize >= Stream.Length)
+        long offset = (long)block * BlockSize;
+        if (block < FirstDataBlock || offset >= Stream.Length)
             return true;
-        LastReadReachedEnd = false;
-        try
+        Stream.Position = offset;
+        return !LiesWhole(Stream.Length - offset); // from its length or end marker: no memo is loaded, so no size limit applies
+    }
+
+    /// <summary>True when the memo at the stream's position ends within <paramref name="remaining"/> bytes.</summary>
+    protected abstract bool LiesWhole(long remaining);
+
+    /// <summary>True when a 0x1A end marker comes within <paramref name="remaining"/> bytes of the stream's position.</summary>
+    protected bool TerminatorWithin(long remaining)
+    {
+        var chunk = new byte[64 * 1024];
+        while (remaining > 0)
         {
-            Read(block);
-            return LastReadReachedEnd;
+            var read = Stream.Read(chunk, 0, (int)Math.Min(chunk.Length, remaining));
+            if (read == 0)
+                return false;
+            if (Array.IndexOf(chunk, (byte)0x1A, 0, read) >= 0)
+                return true;
+            remaining -= read;
         }
-        catch (Exception ex) when (ex is InvalidDataException or FormatException or EndOfStreamException)
-        {
-            return true;
-        }
+        return false;
     }
 
     /// <summary>Pads the file with zeros to the end its header names, so every block it promises is there.</summary>
@@ -328,10 +334,11 @@ internal abstract class DbfMemoFile : IDisposable
 
         protected override DbfMemo ReadAt(long remaining)
         {
-            var text = ReadToTerminator(Stream, remaining, out var terminated);
-            LastReadReachedEnd |= !terminated; // across every memo of a record: a later whole one doesn't clear it
-            return new(text, TextBlock);
+            return new(ReadToTerminator(Stream, remaining, out _), TextBlock);
         }
+
+        // No length, only an end marker: a memo the end of the file cut through has none.
+        protected override bool LiesWhole(long remaining) => TerminatorWithin(remaining);
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
         {
@@ -395,9 +402,21 @@ internal abstract class DbfMemoFile : IDisposable
 
             // Some tools write 0x8B tables with dBASE III-style memos; fall back to the terminator.
             Stream.Position = start;
-            var text = DbaseIIIMemo.ReadToTerminator(Stream, remaining, out var terminated);
-            LastReadReachedEnd |= !terminated; // across every memo of a record: a later whole one doesn't clear it
-            return new(text, TextBlock);
+            return new(DbaseIIIMemo.ReadToTerminator(Stream, remaining, out _), TextBlock);
+        }
+
+        protected override bool LiesWhole(long remaining)
+        {
+            var start = Stream.Position;
+            Span<byte> blockHeader = stackalloc byte[BlockHeaderSize];
+            if (remaining >= BlockHeaderSize)
+            {
+                Stream.ReadExactly(blockHeader);
+                if (blockHeader[..4].SequenceEqual(Signature))
+                    return BinaryPrimitives.ReadUInt32LittleEndian(blockHeader[4..]) <= remaining; // the length counts its own header
+            }
+            Stream.Position = start;
+            return TerminatorWithin(remaining); // a dBASE III-style memo in a 0x8B table
         }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
@@ -431,10 +450,12 @@ internal abstract class DbfMemoFile : IDisposable
         }
 
         // Walk the free chain to the link that points at the old end of file and move it.
+        // A link that names a memo's own block is stale (a power cut rolled the header or a free block
+        // back to where that memo now starts): it's pointed at the new end, never written over the memo.
         protected override void MoveEndOfFile(int oldEnd, int newEnd)
         {
             var current = ReadUInt32(0, bigEndian: false);
-            if (current < FirstDataBlock || current >= oldEnd)
+            if (current < FirstDataBlock || current >= oldEnd || ReadUInt32((long)current * BlockSize, bigEndian: false) == UsedBlock)
             {
                 WriteUInt32(0, newEnd, bigEndian: false);
                 return;
@@ -443,7 +464,7 @@ internal abstract class DbfMemoFile : IDisposable
             for (var steps = 0; steps <= oldEnd; steps++)
             {
                 var next = ReadUInt32((long)current * BlockSize, bigEndian: false);
-                if (next >= oldEnd)
+                if (next >= oldEnd || ReadUInt32((long)next * BlockSize, bigEndian: false) == UsedBlock)
                 {
                     WriteUInt32((long)current * BlockSize, newEnd, bigEndian: false);
                     return;
@@ -473,6 +494,15 @@ internal abstract class DbfMemoFile : IDisposable
             var type = (int)BinaryPrimitives.ReadUInt32BigEndian(blockHeader);
             var length = BinaryPrimitives.ReadUInt32BigEndian(blockHeader[4..]);
             return new(ReadBounded(length, remaining - BlockHeaderSize), type);
+        }
+
+        protected override bool LiesWhole(long remaining)
+        {
+            if (remaining < BlockHeaderSize)
+                return false;
+            Span<byte> blockHeader = stackalloc byte[BlockHeaderSize];
+            Stream.ReadExactly(blockHeader);
+            return BinaryPrimitives.ReadUInt32BigEndian(blockHeader[4..]) <= remaining - BlockHeaderSize;
         }
 
         protected override byte[] Frame(ReadOnlySpan<byte> data, int blockType)
