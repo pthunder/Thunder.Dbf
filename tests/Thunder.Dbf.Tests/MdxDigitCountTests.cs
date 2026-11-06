@@ -206,6 +206,41 @@ public sealed class MdxDigitCountTests : IDisposable
             key is null ? null : [key[0], (byte)((key[1] & 0x83) | (MdxKeys.PrintedDigits(key) << 2)), .. key[2..]];
     }
 
+    [Fact]
+    public void A_journal_note_0_4_0_left_hands_a_UNIQUE_key_to_its_next_holder()
+    {
+        // A UNIQUE tag over 95, 95, 100: 0.4.0 changes #1 to 96 and is killed after the record, before
+        // the tag. Finishing it takes #1's 95 out, and #2 (the other 95) must get the key, in Jet's form.
+        var path = Path.Combine(_dir.FullName, "U.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 10), DbfFieldDefinition.Character("NAME", 10)]))
+        {
+            foreach (var id in new[] { 95m, 95m, 100m })
+                table.Append(id, "row");
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("ID", "id", unique: true);
+        using (var table = Writable(path))
+        {
+            table.UseJournal = true;
+            table.CrashPoint = point => { if (point == "record") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["ID"] = 96m }));
+        }
+        Patch(path, key => MdxKeys.PrintedDigits(key));
+        var note = DbfJournal.Read(path)!;
+        DbfJournal.Write(path, note with { Changes = [.. note.Changes.Select(c => c with { OldKey = Printed(c.OldKey), NewKey = Printed(c.NewKey) })] });
+
+        using (var table = Writable(path))
+            table.UpdateFields(2, new Dictionary<string, object?> { ["NAME"] = "next write" });
+
+        using var reopened = DbfTable.Open(path);
+        using var mdx = reopened.OpenProductionIndex()!;
+        Assert.Equal(2, Assert.Single(mdx["ID"].SeekExact(95m)).RecordNumber); // the other 95 holds it now
+        Assert.Equal(1, Assert.Single(mdx["ID"].SeekExact(96m)).RecordNumber);
+
+        static byte[]? Printed(byte[]? key) =>
+            key is null ? null : [key[0], (byte)((key[1] & 0x83) | (MdxKeys.PrintedDigits(key) << 2)), .. key[2..]];
+    }
+
     private sealed class Killed : Exception;
 
     // ---- tables ---------------------------------------------------------------------------

@@ -185,7 +185,7 @@ public sealed class DbfDatabase : IDisposable
     {
         try
         {
-            return index.OutOfStep(table);
+            return index.OutOfStep(table, checkUnique: true);
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
                                        or FormatException or ArgumentException or ArithmeticException)
@@ -351,9 +351,13 @@ public sealed class DbfDatabase : IDisposable
                 warnings.Add("dBASE IV marked a transaction as unfinished; writes will be refused until the legacy app rolls it back.");
 
             if (MemoMissingTail(table) is { } missing)
-                problems.Add(new DbfException(DbfErrorCode.MemoFileDamaged,
-                    $"The memo file is {missing:N0} bytes shorter than its header says: a power cut kept the header and lost the end of the file. Visual FoxPro won't open the table (error 41), though no memo is lost.",
-                    "Open the table with exclusive: true (writable), which pads the memo file back to its full length.", path));
+                problems.Add(table.MemosReadWhole()
+                    ? new DbfException(DbfErrorCode.MemoFileDamaged,
+                        $"The memo file is {missing:N0} bytes shorter than its header says: a power cut kept the header and lost the end of the file. Visual FoxPro won't open the table (error 41), though every memo a record names is whole.",
+                        "Open the table with exclusive: true (writable), which pads the memo file back to its full length.", path)
+                    : new DbfException(DbfErrorCode.MemoFileDamaged,
+                        $"The memo file is {missing:N0} bytes shorter than its header says, and a memo a record names lost its end with it.",
+                        "Restore the memo file from a backup. Padding it would make that memo read back with zeros in place of its text, so Thunder.Dbf leaves it as it is.", path));
             if (table.Header.HasProductionMdx)
             {
                 try
