@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Tests
 
-- **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. They haven't run against VFP yet; the [checklist](docs/maintainers/visual-foxpro-test.md) says how.
+- **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. All eight pass against VFP 9 SP2 on the Windows test PC (on the 0.4.0 package, four of them failed); the [checklist](docs/maintainers/visual-foxpro-test.md) says how to run them.
 
 ## [0.4.2] - 2026-11-05
 
