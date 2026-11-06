@@ -80,7 +80,12 @@ public sealed class MemoTailTests : IDisposable
             Assert.Equal(bytes.Length - 100, new FileInfo(memoPath).Length); // not padded
             Assert.Equal("short", table.Read(0)["NOTES"]);
             Assert.ThrowsAny<Exception>(() => table.Read(1)["NOTES"]); // still reported, never read as zeros
+            // A new memo would land where the cut one's end was and make it read as whole: no writes.
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => table.Append(new string('z', 300))).Code);
         }
+        using (var shared = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.MemoFileDamaged, Assert.Throws<DbfException>(() => shared.Append("shared")).Code);
+        Assert.Equal(bytes.Length - 100, new FileInfo(memoPath).Length); // nothing written over it
     }
 
     [Fact]

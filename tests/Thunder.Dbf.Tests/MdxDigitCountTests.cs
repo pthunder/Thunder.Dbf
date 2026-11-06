@@ -241,6 +241,37 @@ public sealed class MdxDigitCountTests : IDisposable
             key is null ? null : [key[0], (byte)((key[1] & 0x83) | (MdxKeys.PrintedDigits(key) << 2)), .. key[2..]];
     }
 
+    [Fact]
+    public void A_replay_hands_a_UNIQUE_key_on_when_the_removal_was_already_done()
+    {
+        // UNIQUE over 95, 95, 100: #1 becomes 96, and the writer dies after taking (95, #1) out of the
+        // tag and before giving 95 to #2. Finishing the note must give #2 the key.
+        var path = Path.Combine(_dir.FullName, "H.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 10), DbfFieldDefinition.Character("NAME", 10)]))
+        {
+            foreach (var id in new[] { 95m, 95m, 100m })
+                table.Append(id, "row");
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("ID", "id", unique: true);
+        using (var table = Writable(path))
+        {
+            table.UseJournal = true;
+            table.CrashPoint = point => { if (point == "record") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["ID"] = 96m }));
+        }
+        using (var mdx = MdxIndex.Open(new FileStream(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)))
+            Assert.True(mdx["ID"].Remove(MdxKeys.EncodeNumeric(95m, NumericKeyStyle.Jet), 1)); // the removal got done
+
+        using (var table = Writable(path))
+            table.UpdateFields(2, new Dictionary<string, object?> { ["NAME"] = "next write" });
+
+        using var reopened = DbfTable.Open(path);
+        using var index = reopened.OpenProductionIndex()!;
+        Assert.Equal(2, Assert.Single(index["ID"].SeekExact(95m)).RecordNumber);
+        Assert.Equal(1, Assert.Single(index["ID"].SeekExact(96m)).RecordNumber);
+    }
+
     private sealed class Killed : Exception;
 
     // ---- tables ---------------------------------------------------------------------------

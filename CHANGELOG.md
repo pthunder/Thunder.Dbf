@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-05
+
+Compatibility with Jet and Visual FoxPro, found by testing 0.4.0 against them on Windows: Jet finds every record in a dBASE `.mdx` Thunder.Dbf writes, VFP datetimes read as VFP means them, and kills and power cuts that 0.4.0 left silently wrong are now reported or repaired. Checked on the Windows test PC with VFP 9, Jet, killed writers and Hyper-V power cuts, and by a release audit.
+
+**Upgrading from 0.4.0:** nothing in the public API was removed, and code compiled against 0.4.0 runs unchanged. Things to know:
+- If 0.4.0 or earlier wrote to a dBASE `.mdx` table that Jet or Access also reads, run `RebuildIndex()` once (the table opened `exclusive: true`). Until then Jet can still miss records whose keys 0.4.0 wrote.
+- A writable open now refuses writes (`IndexDamaged`) to a table whose `.mdx` doesn't match it, as it already did for a `.cdx`. `RebuildIndex()` clears it.
+- A `.cdx` tag on a Visual FoxPro datetime field reports `KeyType` `'T'`, not `'D'`, and its keys come back as `DateTime`.
+
 ### Fixed
 
 - **Jet could miss live records in a dBASE `.mdx` number tag** that Thunder.Dbf had written to. This affects 0.2.0 to 0.4.0. Jet compares key bytes when it steps from one match to the next, and goes down the tree by interior keys without moving on to the next leaf. On the Windows test PC, 2,000 ordinary writes left Jet missing 46 of 9,210 live IDs. Thunder.Dbf's own lookups, `Check()` and its rebuild comparison compare keys by value, so they saw nothing wrong. There were two causes:
@@ -19,7 +28,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **Visual FoxPro datetimes read a second early.** VFP often stores a whole second a millisecond short (03:42:47 as 13,366,999 ms), and VFP and its OLE DB provider read it as the second it meant. Thunder.Dbf now does the same: a time within a millisecond of a whole second reads as that second, so 23:59:59.999 reads as the next midnight. Any other time keeps its milliseconds. VFP itself has whole seconds only and rounds half up, so a time Thunder.Dbf writes as 08:00:00.500 reads with its .500 here and as 08:00:01 in VFP.
 - **A `.cdx` tag on a datetime field seeks and reads with its time.** It used to act as a date tag, so `SeekExact` with a `DateTime` found nothing and `Entries()` returned dates. Its `KeyType` is now `'T'`. The keys written were already right; LINQ queries still scan such a field.
 - **An `.mdx` with a key too many or too few is caught.** A writer killed between the table and the index can leave one, and so can Jet writing beside another program. A writable open now checks, as it does for a `.cdx`, that each tag holds one key per record and has the last two records' keys. Keys are counted from the index's leaves without being read: about 70 ms for a million records in three tags. If a check fails, writes stop with `IndexDamaged` until `RebuildIndex()`, and `Check()` reports it as a problem. `Check()` also checks that each UNIQUE tag holds one key per distinct value. On the Windows test PC, 12 of 30 kills had left one that went unnoticed.
-- **A memo file shorter than its header says is repaired.** A power cut can keep the `.fpt` or `.dbt` header's new end and lose the blocks before it. Visual FoxPro then refuses the table (error 41). `Check()` now reports it, and when every memo a record names still reads whole, an exclusive writable open pads the file back to its full length. If the lost tail took part of a memo, the file is left as it is and `Check()` says to restore it, because padding would make that memo read back with zeros in place of its text.
+- **A memo file shorter than its header says is repaired.** A power cut can keep the `.fpt` or `.dbt` header's new end and lose the blocks before it. Visual FoxPro then refuses the table (error 41). `Check()` now reports it, and when every memo a record names still reads whole, an exclusive writable open pads the file back to its full length. If the lost tail took part of a memo, the file is left as it is, writes to the table are refused (`MemoFileDamaged`), and `Check()` says to restore it: padding, or a new memo written where the lost end was, would make that memo read back with other bytes in place of its text.
 - **Finishing a journal note 0.4.0 left could remove the record's own number key.** The note holds 0.4.0's keys and the record's key is now in Jet's form, and the two were compared byte for byte, so the record's own key looked like the cut-off change's old one. They're now compared as the index compares them, by value. On the Windows test PC, 6 of 30 of 0.4.0's journal kills lost a key this way.
 - The tests that create symbolic links are skipped, not failed, on a machine that can't create links (Windows without Developer Mode or administrator rights).
 
