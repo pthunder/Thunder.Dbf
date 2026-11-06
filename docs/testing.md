@@ -72,6 +72,8 @@ Each run takes a FoxPro table with a `.cdx`, then:
 3. VFP appends, edits and deletes through its own index, under its own locks.
 4. Thunder.Dbf checks that every tag now holds exactly what a fresh rebuild would.
 
+Six more check what Thunder.Dbf has learned to write since VFP last judged it: Visual FoxPro and FoxPro 2 tables made by `DbfTable.Create`, a `.cdx` made by `CreateIndexTag`, appends that leave `_NullFlags` to the library, and a table after `ModifyStructure`. In each, VFP lists every value and must read exactly what Thunder.Dbf reads, before and after its own edits.
+
 Without `THUNDER_VFP` the tests do nothing. VFP isn't redistributable, so it never goes in the repo.
 
 The full checklist for a Windows machine (installing VFP, reading results, what to report) is in [Running the Visual FoxPro round-trip test](maintainers/visual-foxpro-test.md).

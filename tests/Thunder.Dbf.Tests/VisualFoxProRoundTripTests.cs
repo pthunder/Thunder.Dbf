@@ -15,13 +15,8 @@ using System.Text;
 
 namespace Thunder.Dbf.Tests;
 
-public sealed class VisualFoxProRoundTripTests : IDisposable
+public sealed class VisualFoxProRoundTripTests : VisualFoxProHarness
 {
-    private static readonly string? Vfp = Environment.GetEnvironmentVariable("THUNDER_VFP");
-    private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-vfp-");
-
-    public void Dispose() => _dir.Delete(recursive: true);
-
     public static TheoryData<string, string[]> Tables() => new()
     {
         // Written by Visual FoxPro itself. (contacts.dbf indexes long field names from a database
@@ -34,14 +29,13 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
     [MemberData(nameof(Tables))]
     public void VisualFoxPro_reads_the_cdx_Thunder_keeps_and_Thunder_reads_the_one_VFP_keeps(string table, string[] files)
     {
-        if (Vfp is null)
+        if (!HaveVfp())
             return;
-        Assert.True(File.Exists(Vfp), $"THUNDER_VFP points at {Vfp}, which doesn't exist.");
 
         foreach (var file in files)
             File.Copy(Path.Combine(Fixtures.Root, file), Path.Combine(_dir.FullName, Path.GetFileName(file)));
         var path = Path.Combine(_dir.FullName, table);
-        FreeFromMissingDatabase(Vfp, path);
+        FreeFromMissingDatabase(Vfp!, path);
 
         // 1. Thunder.Dbf writes: enough appends to split pages, plus updates, deletes and recalls.
         using (var dbf = OpenForWriting(path))
@@ -62,47 +56,11 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         }
 
         // 2. VFP walks every tag in order. Its order must be the order Thunder.Dbf's index holds.
-        var ours = TagOrders(path);
-        var theirs = RunVfp(path, edit: false);
-        Assert.Equal(ours.Keys.Order(), theirs.Keys.Order());
-        foreach (var (tag, records) in ours)
-            Assert.True(records.SequenceEqual(theirs[tag]), $"Tag {tag}: VFP walks {Show(theirs[tag])} but the index holds {Show(records)}.");
+        AssertVfpWalksEveryTagAsTheIndexHolds(path);
 
         // 3. VFP writes through its own index; Thunder.Dbf must find exactly what a rebuild gives.
-        RunVfp(path, edit: true);
-        var afterVfp = TagOrders(path);
-        var rebuilt = Path.Combine(_dir.FullName, "rebuilt");
-        Directory.CreateDirectory(rebuilt);
-        foreach (var file in Directory.GetFiles(_dir.FullName))
-            File.Copy(file, Path.Combine(rebuilt, Path.GetFileName(file)));
-        using (var copy = OpenForWriting(Path.Combine(rebuilt, table)))
-            copy.RebuildIndex();
-        var expected = TagOrders(Path.Combine(rebuilt, table));
-        foreach (var (tag, records) in expected)
-        {
-            // A UNIQUE tag keeps whichever record got the key first until FoxPro reindexes, so it
-            // matches a rebuild only right after one. VFP's walk in step 2 already checked it.
-            if (UniqueTags(path).Contains(tag))
-                continue;
-            Assert.True(records.SequenceEqual(afterVfp[tag]), $"Tag {tag} after VFP's edits: the file holds {Show(afterVfp[tag])}, a rebuild gives {Show(records)}.");
-        }
-    }
-
-    // Opens with the .cdx preview on, taking over an index sorted case-blind (X#'s TEST10K) by
-    // rebuilding it in byte order first, as MaintainIndex(path, rebuild: true) does.
-    private static DbfTable OpenForWriting(string path)
-    {
-        var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true);
-        if (!table.MaintainsIndex)
-            table.MaintainIndex(Path.ChangeExtension(path, Path.GetExtension(path).Any(char.IsUpper) ? ".CDX" : ".cdx"), rebuild: true);
-        return table;
-    }
-
-    private static HashSet<string> UniqueTags(string path)
-    {
-        using var table = DbfTable.Open(path);
-        using var index = table.OpenStructuralIndex()!;
-        return index.Tags.Where(t => ((IDbfIndexTag)t).IsUnique).Select(t => t.Name.ToUpperInvariant()).ToHashSet();
+        Edit(path);
+        AssertEveryTagMatchesARebuild(path);
     }
 
     // New records need their own values in whole-number fields, which is where candidate (primary)
@@ -134,131 +92,6 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
         return values;
     }
 
-    private static Dictionary<string, List<int>> TagOrders(string path)
-    {
-        using var table = DbfTable.Open(path);
-        using var index = table.OpenStructuralIndex()!;
-        return index.Tags.ToDictionary(t => t.Name.ToUpperInvariant(), t => ((IDbfIndexTag)t).Entries().Select(e => e.RecordNumber).ToList());
-    }
-
-    private static string Show(List<int> records) =>
-        records.Count <= 12 ? string.Join(",", records) : string.Join(",", records.Take(12)) + $",... ({records.Count})";
-
-    // Writes a .prg that either lists every tag's record order or edits the table through its
-    // indexes, runs VFP 9 hidden, and reads back what it wrote.
-    private Dictionary<string, List<int>> RunVfp(string table, bool edit)
-    {
-        var output = Path.Combine(_dir.FullName, edit ? "vfp-edit.txt" : "vfp-order.txt");
-        var errors = Path.Combine(_dir.FullName, "vfp-errors.txt");
-        var program = Path.Combine(_dir.FullName, edit ? "edit.prg" : "order.prg");
-        File.Delete(output);
-        File.Delete(errors);
-
-        var script = new StringBuilder($"""
-            _SCREEN.Visible = .F.
-            SET SAFETY OFF
-            SET DELETED OFF
-            SET EXCLUSIVE OFF
-            SET TALK OFF
-            SET CPDIALOG OFF
-            ON ERROR DO LogError WITH ERROR(), MESSAGE(), LINENO()
-            USE "{table}" SHARED
-            """);
-        script.AppendLine();
-        if (edit)
-        {
-            script.AppendLine($"""
-                LOCAL lnI, lnF, laF[1], lnCount
-                lnCount = AFIELDS(laF)
-                FOR lnI = 1 TO 150
-                    APPEND BLANK
-                    FOR lnF = 1 TO lnCount
-                        DO CASE
-                        CASE laF[lnF, 2] = "C"
-                            REPLACE (laF[lnF, 1]) WITH LEFT("V" + SYS(2015), laF[lnF, 3])
-                        CASE laF[lnF, 2] = "I" OR (laF[lnF, 2] = "N" AND laF[lnF, 4] = 0 AND laF[lnF, 3] >= 7)
-                            REPLACE (laF[lnF, 1]) WITH 800000 + lnI
-                        CASE laF[lnF, 2] $ "NF"
-                            REPLACE (laF[lnF, 1]) WITH INT(RAND() * 10 ^ MAX(MIN(laF[lnF, 3] - laF[lnF, 4] - 2, 3), 0))
-                        CASE laF[lnF, 2] $ "BY"
-                            REPLACE (laF[lnF, 1]) WITH INT(RAND() * 1000)
-                        CASE laF[lnF, 2] $ "DT"
-                            REPLACE (laF[lnF, 1]) WITH DATE() - INT(RAND() * 3000)
-                        ENDCASE
-                    ENDFOR
-                ENDFOR
-                FOR lnI = 1 TO 40
-                    GO INT(RAND() * RECCOUNT()) + 1
-                    IF RLOCK()
-                        FOR lnF = 1 TO lnCount
-                            IF laF[lnF, 2] = "C"
-                                REPLACE (laF[lnF, 1]) WITH LEFT("E" + SYS(2015), laF[lnF, 3])
-                            ENDIF
-                        ENDFOR
-                        IF lnI % 4 = 0
-                            DELETE
-                        ENDIF
-                        UNLOCK
-                    ENDIF
-                ENDFOR
-                STRTOFILE("done", "{output}")
-                """);
-        }
-        else
-        {
-            script.AppendLine($"""
-                * Opening and appending to the file once per record is slow enough on a busy PC to
-                * time out a 10,000-record table, so the lines are gathered and written in 1 MB pieces.
-                LOCAL lnT, lcTag, lcOut
-                lcOut = ""
-                FOR lnT = 1 TO TAGCOUNT()
-                    lcTag = TAG(lnT)
-                    SET ORDER TO TAG (lcTag)
-                    lcOut = lcOut + "TAG " + UPPER(lcTag) + CHR(13) + CHR(10)
-                    SCAN
-                        lcOut = lcOut + TRANSFORM(RECNO()) + CHR(13) + CHR(10)
-                        IF LEN(lcOut) > 1000000
-                            STRTOFILE(lcOut, "{output}", .T.)
-                            lcOut = ""
-                        ENDIF
-                    ENDSCAN
-                ENDFOR
-                STRTOFILE(lcOut, "{output}", .T.)
-                """);
-        }
-        script.AppendLine($"""
-            USE
-            QUIT
-
-            PROCEDURE LogError(tnError, tcMessage, tnLine)
-                STRTOFILE(TRANSFORM(tnError) + " " + tcMessage + " at line " + TRANSFORM(tnLine) + CHR(13) + CHR(10), "{errors}", .T.)
-                QUIT
-            ENDPROC
-            """);
-        File.WriteAllText(program, script.ToString(), Encoding.Latin1);
-        File.Delete(Path.ChangeExtension(program, ".fxp")); // VFP -T runs a stale compiled .fxp over a newer .prg
-
-        using var process = Process.Start(new ProcessStartInfo(Vfp!, $"-T \"{program}\"") { UseShellExecute = false, WorkingDirectory = _dir.FullName })!;
-        if (!process.WaitForExit(TimeSpan.FromMinutes(5)))
-        {
-            process.Kill();
-            Assert.Fail("VFP didn't finish within 5 minutes.");
-        }
-        Assert.False(File.Exists(errors), File.Exists(errors) ? "VFP reported: " + File.ReadAllText(errors) : "");
-        Assert.True(File.Exists(output), "VFP finished without writing its results.");
-
-        var orders = new Dictionary<string, List<int>>();
-        List<int>? current = null;
-        foreach (var line in File.ReadLines(output))
-        {
-            if (line.StartsWith("TAG ", StringComparison.Ordinal))
-                orders[line[4..].Trim()] = current = [];
-            else if (int.TryParse(line, out var record))
-                current!.Add(record);
-        }
-        return orders;
-    }
-
     // calls.dbf belongs to a database container the fixtures don't carry, and VFP won't open it
     // without one. FREE TABLE drops the link, as it does after a .dbc has been deleted.
     internal static void FreeFromMissingDatabase(string vfp, string table)
@@ -284,5 +117,4 @@ public sealed class VisualFoxProRoundTripTests : IDisposable
             return 0;
         return header.AsSpan(length - 263, 263).IndexOf((byte)0) is var end and >= 0 ? end : 263;
     }
-
 }
