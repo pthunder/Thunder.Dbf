@@ -218,7 +218,7 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal(0x8B, table.Header.Version);
     }
 
-    // The audit's case: a narrowing (keys cut to 4) killed before the decision, then the open undoing
+    // The review's case: a narrowing (keys cut to 4) killed before the decision, then the open undoing
     // it killed at each step of the undoing. It must never mistake the half-undone folder for a
     // finished change and put the narrow index beside the old table.
     [Theory]
@@ -618,7 +618,7 @@ public sealed class RestructureCrashTests : IDisposable
 
     // ---- two opens recovering at once ------------------------------------------------------------
 
-    // The audit's case: one open reads the staged folder's id and pauses; another undoes that change,
+    // The review's case: one open reads the staged folder's id and pauses; another undoes that change,
     // and a new change begins. The paused one, resumed, must not touch the new change's folder.
     [Fact]
     public void An_open_paused_over_an_ended_change_never_touches_the_next_one()
@@ -680,7 +680,7 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal("CITY", after.Fields.Last().Name);
     }
 
-    // ---- the audit's other cases ----------------------------------------------------------------
+    // ---- the review's other cases ---------------------------------------------------------------
 
     // A Visual FoxPro table with its .FPT and a leftover .DBT: the change replaces the .FPT, and the
     // .DBT is never touched.
@@ -1005,7 +1005,7 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.False(File.Exists(mdx + ".droptag"));
     }
 
-    // ---- third audit ------------------------------------------------------------------------------
+    // ---- third review -----------------------------------------------------------------------------
 
     // A. A look for the decision that fails (access denied, a share gone) isn't "not decided": an
     // exclusive open stops rather than undo a decided change, and finishes it once it can look.
@@ -1381,7 +1381,7 @@ public sealed class RestructureCrashTests : IDisposable
         Assert.Equal(4, table.RecordCount);
     }
 
-    // ---- fourth audit ------------------------------------------------------------------------------
+    // ---- fourth review -----------------------------------------------------------------------------
 
     // 1. A blank number can't become an integer, double or currency: those have no blank, only 0,
     // and a nullable target's .NULL. isn't a blank either.

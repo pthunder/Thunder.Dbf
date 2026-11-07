@@ -35,7 +35,7 @@ done
 # Lines in text files matching a regex, excluding the scripts and guidelines that quote the patterns.
 search() {
     grep -nIE -- "$1" "${text_files[@]}" 2>/dev/null \
-        | grep -v -e '^scripts/editorial-check.sh:' -e '^scripts/history-check.sh:' -e '^docs/maintainers/editorial-guidelines.md:'
+        | grep -v -e '^scripts/editorial-check.sh:' -e '^scripts/history-check.sh:' -e '^scripts/internal-names.sh:' -e '^docs/maintainers/editorial-guidelines.md:'
 }
 
 section "Secrets"
@@ -57,6 +57,12 @@ while IFS= read -r hit; do fail "personal or machine path: $hit"; done < <(searc
 
 section "Brand"
 while IFS= read -r hit; do fail "write ProjectThunder as one word: $hit"; done < <(search 'Project Thunder')
+
+section "Internal names"
+# The review and test tools, hosts and machines behind the project stay out of what's published:
+# say "an automated review" or "the Windows test run" instead.
+source scripts/internal-names.sh
+while IFS= read -r hit; do fail "internal tool, host or machine name: $hit"; done < <(search "$internal")
 
 section "Banners"
 for f in "${text_files[@]}"; do

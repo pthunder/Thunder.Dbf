@@ -27,6 +27,7 @@ Thunder.Dbf exists so people can put web apps on top of legacy data that often h
 1. **No real people's data in the repo.** Fixtures must be openly licensed test data or generated. Customer databases, CRM exports (including "sample" data from commercial products) and anything with real names, phone numbers or addresses stay out. Use `THUNDER_TEST_DATA` to test against private data locally.
 2. **Every fixture has a source.** Each folder in `tests/fixtures` has its license file and a row in `tests/fixtures/SOURCES.md`: where it came from, the pinned commit and the license.
 3. **No personal paths.** Nothing like `/Users/<name>`, `C:\Users\<name>` or `/home/<name>`, and no machine-specific temp paths, in committed files.
+4. **Commit as an address you mean to publish.** Every commit's author and committer are public. Set `user.email` (your GitHub no-reply address is a good choice), or git makes one up from your user and machine names.
 
 ## 3. Correctness
 
@@ -39,7 +40,8 @@ Thunder.Dbf exists so people can put web apps on top of legacy data that often h
 1. **Plain, specific, kind.** Comments say *why* (a format quirk, a legacy app's behavior, a trade-off) rather than restating the code. Error messages say what happened, which thing it happened to, and what to do next.
 2. **Match the surroundings.** File-scoped namespaces, XML doc comments on public members, and the existing comment density and naming.
 3. **The brand is one word:** ProjectThunder. Every source file starts with an ASCII-art banner containing `ProjectThunder :: <project>`. Banners can be fun; diagrams of byte layouts are better still.
-4. **No leftovers.** No `TODO`, `FIXME` or `HACK` without an issue link, no commented-out code, and no debugging output.
+4. **Say what was tested, not who or what tested it.** Comments, commit messages and pull requests describe the test ("killing writers beside Visual FoxPro", "power cuts to a Windows VM", "an automated review"), not the tools, models, hosts or machines behind it. Readers can't look those up, and they shouldn't have to.
+5. **No leftovers.** No `TODO`, `FIXME` or `HACK` without an issue link, no commented-out code, and no debugging output.
 
 ## 5. Docs
 
@@ -55,12 +57,15 @@ Thunder.Dbf exists so people can put web apps on top of legacy data that often h
 | Secrets | key and token patterns, private keys, `Password=` in connection strings |
 | Personal paths | `/Users/x`, `C:\Users\x`, `/home/x`, temp-folder paths |
 | Brand | "Project Thunder" written as two words |
+| Internal names | The review tools' names (Codex, ChatGPT, `gpt-*` models), addresses made from a machine's name (`user@host.local`), and the private names in `.git/info/internal-names`, which stays out of the repo so the list itself isn't published. The pattern lives in `scripts/internal-names.sh`. |
 | Banners | every `.cs` file starts with a ProjectThunder banner |
 | Fixtures | every fixture folder has a license and a SOURCES.md row |
 | Stray data | table, memo, index, CSV or database files outside `tests/fixtures` |
 | Leftovers | `TODO`, `FIXME`, `HACK` and `XXX` without an issue link |
 | Workflows | every GitHub Action pinned to a full commit SHA |
 | Size | files over 5 MB |
+
+`scripts/history-check.sh` checks the whole history for secrets and personal paths, and the messages and authors of commits since 0.4.2 for internal names. `scripts/install-hooks.sh` installs a pre-commit hook that runs the editorial check, and a commit-msg hook that checks the message and author before the commit is made.
 
 CI also runs the full test suite on Windows, Linux and macOS, a vulnerable-package scan, CodeQL, and `scripts/check-packages.sh` on freshly packed NuGet packages. The libraries fail to build if a public member has no XML doc comment.
 
