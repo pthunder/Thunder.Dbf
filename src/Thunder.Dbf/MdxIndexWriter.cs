@@ -849,7 +849,6 @@ public sealed partial class MdxTag
     /// </summary>
     internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
-        IReadOnlyList<int> unused = [];
         try
         {
             if (_index.PagesToReuse(this) is { } pages)
@@ -882,8 +881,7 @@ public sealed partial class MdxTag
             _index.ForgetRebuildPlan();
             throw;
         }
-        unused = _index.TakeBackPages();
-        foreach (var page in unused)
+        foreach (var page in _index.TakeBackPages())
             _index.FreePage(page);
     }
 

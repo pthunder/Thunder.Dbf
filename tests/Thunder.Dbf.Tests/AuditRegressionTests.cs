@@ -593,9 +593,13 @@ public sealed class AuditRegressionTests : IDisposable
 
         CdxIndex index;
         using (var table = DbfTable.Open(path))
+        {
             index = table.OpenStructuralIndex()!;
+        }
         using (index)
+        {
             Assert.Equal(1m, Convert.ToDecimal(Assert.Single(index["HB"].Entries()).Key, CultureInfo.InvariantCulture)); // not 460,718,241,880,001.7408
+        }
     }
 
     [Fact]

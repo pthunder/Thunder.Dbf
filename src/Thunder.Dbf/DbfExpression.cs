@@ -96,12 +96,12 @@ public sealed class DbfExpression
     /// a division by zero gives 0 instead of failing. A blank record has every number at 0, and the
     /// type of TOTAL/QTY, or of STR(A/(B-C)), is the same whatever the numbers are.
     /// </summary>
-    internal object? EvaluateForType(DbfRecord record)
+    internal static object? EvaluateForType(DbfExpression expression, DbfRecord record)
     {
         t_divisionByZeroIsZero = true;
         try
         {
-            return Evaluate(record);
+            return expression.Evaluate(record);
         }
         finally
         {
