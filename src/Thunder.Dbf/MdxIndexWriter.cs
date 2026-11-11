@@ -157,7 +157,10 @@ public sealed partial class MdxIndex
     /// </summary>
     internal Func<bool>? ForcesWrites { get; set; }
 
-    /// <summary>Called after each key a rebuild puts in a tag: where a test cuts a rebuild off partway.</summary>
+    /// <summary>
+    /// Called after each key a rebuild goes through, whether the tag took it or (a unique tag, a key
+    /// it already holds) left it out: where a test cuts a rebuild off partway.
+    /// </summary>
     internal Action? RebuildPoint { get; set; }
 
     /// <summary>Forces what's written so far to disk before a write that depends on it, when the table forces writes.</summary>

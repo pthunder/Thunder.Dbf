@@ -707,7 +707,7 @@ public sealed class AuditRegressionTests : IDisposable
     }
 
     [Theory]
-    [InlineData(1)]   // cut off right after the old root was emptied and took its first key
+    [InlineData(1)]   // cut off after the first key went in
     [InlineData(150)] // halfway through the first tag
     [InlineData(450)] // halfway through the second, with the first whole
     public void A_rebuild_cut_off_partway_is_put_right_by_rebuilding_again(int keys)
