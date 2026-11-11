@@ -173,6 +173,8 @@ public sealed class DbfException : IOException
     {
         try
         {
+            if (share == FileShare.None && mode == FileMode.Open)
+                DbfLocks.ThrowIfHeldHere(path);
             return new FileStream(path, mode, access, share, bufferSize);
         }
         catch (Exception ex) when (Translate(ex, path, access) is { } translated)

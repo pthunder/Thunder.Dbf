@@ -282,10 +282,36 @@ internal sealed class DbfLocks
     /// </summary>
     internal static void CloseWhenSafe(FileStream stream)
     {
-        if (FileRegistry.TryGet(stream.Name) is { } registry && registry.DeferIfLocked(stream))
-            return;
-        stream.Dispose();
+        if (FileRegistry.TryGet(stream.Name) is { } registry)
+            registry.CloseOrDefer(stream);
+        else
+            stream.Dispose();
     }
+
+    /// <summary>
+    /// <see cref="CloseWhenSafe"/> for any stream: a handle that took no lock itself (a reader, a
+    /// probe, an open that failed) still drops the process's locks on its file when it closes.
+    /// </summary>
+    internal static void Close(Stream? stream)
+    {
+        if (stream is FileStream file)
+            CloseWhenSafe(file);
+        else
+            stream?.Dispose();
+    }
+
+    /// <summary>
+    /// Refuses an unshared open of a file this process holds locks on. It would fail anyway (the
+    /// file is open here), but off Windows the failed open closes its descriptor on the way out,
+    /// and that close drops those locks.
+    /// </summary>
+    internal static void ThrowIfHeldHere(string path)
+    {
+        if (!OperatingSystem.IsWindows() && FileRegistry.TryGet(path) is { AnyHeld: true })
+            throw new IOException("The file is being used by another process: this one, which holds locks on it through another table.", SharingViolation);
+    }
+
+    private const int SharingViolation = unchecked((int)0x80070020);
 
     /// <summary>Process-wide bookkeeping for one file: who holds which range, and handles waiting to close.</summary>
     private sealed class FileRegistry
@@ -386,14 +412,24 @@ internal sealed class DbfLocks
             }
         }
 
-        public bool DeferIfLocked(FileStream stream)
+        public bool AnyHeld
+        {
+            get
+            {
+                lock (_gate)
+                    return _held.Count > 0;
+            }
+        }
+
+        // Closed under the gate: a lock claimed between the look and the close would be dropped by it.
+        public void CloseOrDefer(FileStream stream)
         {
             lock (_gate)
             {
                 if (_held.Count == 0)
-                    return false;
-                _deferred.Add(stream);
-                return true;
+                    stream.Dispose();
+                else if (!_deferred.Contains(stream))
+                    _deferred.Add(stream);
             }
         }
 

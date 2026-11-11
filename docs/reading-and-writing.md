@@ -89,7 +89,7 @@ Record numbers change and index pages are replaced, so, as dBASE and FoxPro requ
 
 It's built not to lose data:
 - Every surviving record's index keys are worked out before anything changes.
-- A copy of the table (`NAME.dbf.packing`) is kept beside it until the pack has finished.
+- A copy of the table (`NAME.dbf.packing`) is kept beside it until the pack has finished. It gets that name only once it's complete and on disk, and no record moves before then: a pack that fails while copying (a full disk) leaves the table as it was and writable.
 - The smaller record count is on disk before the file is shortened.
 
 If the process dies halfway, every write to that table is refused until it's restored. Replace the `.dbf` with the `.packing` copy, delete the copy, then call `RebuildIndex()`.

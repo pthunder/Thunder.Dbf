@@ -291,4 +291,214 @@ public sealed class AuditRegressionTests : IDisposable
         using var after = reopened.OpenProductionIndex()!;
         Assert.NotNull(reopened.Seek(after["NAME"], "Name-new"));
     }
+
+    // ---- PACK -----------------------------------------------------------------------------
+
+    private string PackTable()
+    {
+        var path = PathOf("pack.dbf");
+        using var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]);
+        table.AppendRange(Enumerable.Range(0, 40).Select(i => new object?[] { "N" + i }));
+        table.Delete(3);
+        return path;
+    }
+
+    [Fact]
+    public void A_pack_whose_safety_copy_fails_leaves_the_table_as_it_was_and_writable()
+    {
+        var path = PackTable();
+        var before = File.ReadAllBytes(path);
+        using (var failing = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            failing.CrashPoint = point => { if (point == "pack copy") throw new IOException("There is not enough space on the disk."); };
+            Assert.Throws<IOException>(() => failing.Pack());
+        }
+
+        // No copy under the name that means "a pack didn't finish", and none left half made: that
+        // name tells whoever finds it to put the copy in the table's place.
+        Assert.False(File.Exists(path + ".packing"));
+        Assert.False(File.Exists(path + ".packing.tmp"));
+        Assert.Equal(before, File.ReadAllBytes(path));
+
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
+        table.Update(0, "still ok"); // writes aren't refused
+        Assert.Equal(1, table.Pack()); // and the pack can be tried again
+        Assert.Equal(39, table.RecordCount);
+        Assert.False(File.Exists(path + ".packing"));
+    }
+
+    [Fact]
+    public void A_half_made_copy_a_killed_pack_left_is_not_an_unfinished_pack()
+    {
+        var path = PackTable();
+        File.WriteAllBytes(path + ".packing.tmp", [1, 2, 3]); // the process died while copying
+
+        using var table = DbfTable.Open(path, writable: true, exclusive: true);
+        table.Update(0, "fine");
+        Assert.Equal(1, table.Pack());
+        Assert.False(File.Exists(path + ".packing.tmp"));
+    }
+
+    // ---- a commit that fails --------------------------------------------------------------
+
+    [Fact]
+    public void An_append_whose_commit_fails_doesnt_leave_its_keys_for_the_next_record()
+    {
+        var path = PathOf("keys.dbf");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+        {
+            created.Append("ONE");
+            created.Append("TWO");
+        }
+        using (var exclusive = DbfTable.Open(path, writable: true, exclusive: true))
+            exclusive.CreateIndexTag("NAME", "NAME");
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            // The disk fills as the header is about to be written: the row was never counted.
+            table.CrashPoint = point => { if (point == "committing") throw new IOException("There is not enough space on the disk."); };
+            Assert.Throws<IOException>(() => table.Append("STALE"));
+            table.CrashPoint = null;
+            Assert.Equal(2, table.RecordCount);
+
+            table.Append("FRESH"); // record 3, with its own key and no one else's
+            Assert.Equal(3, table.RecordCount);
+            using var index = table.OpenProductionIndex()!;
+            Assert.Equal(["FRESH", "ONE", "TWO"], index["NAME"].Entries().Select(e => (string)e.Key!));
+            Assert.Null(table.Seek(index["NAME"], "STALE"));
+            Assert.Equal(3, table.Seek(index["NAME"], "FRESH")!.RecordNumber);
+        }
+
+        // In step: a writable open checks every tag's key count against the records.
+        using var reopened = DbfTable.Open(path, writable: true);
+        reopened.Append("LATER");
+        Assert.Equal(4, reopened.RecordCount);
+    }
+
+    // ---- memo files -----------------------------------------------------------------------
+
+    private (string Path, int PointerOffset) VfpMemoTable(string name)
+    {
+        var path = PathOf(name);
+        using var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Character("NAME", 5), DbfFieldDefinition.Memo("NOTE")]);
+        table.Append("a", "hello");
+        return (path, table.Header.HeaderLength + table.Fields[1].Offset);
+    }
+
+    [Fact]
+    public void A_FoxPro_memo_file_with_one_byte_blocks_is_read_and_written()
+    {
+        // SET BLOCKSIZE TO 0 in Visual FoxPro: a block is one byte, so a memo's block number is its offset.
+        var (path, pointer) = VfpMemoTable("tiny.dbf");
+        var fpt = new byte[512 + 8 + 5];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(fpt, (uint)fpt.Length); // next free block
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16BigEndian(fpt.AsSpan(6), 1);     // block size
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(fpt.AsSpan(512), 1);   // a text memo
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(fpt.AsSpan(516), 5);
+        "hello"u8.CopyTo(fpt.AsSpan(520));
+        File.WriteAllBytes(Path.ChangeExtension(path, ".fpt"), fpt);
+        var dbf = File.ReadAllBytes(path);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(dbf.AsSpan(pointer), 512);
+        File.WriteAllBytes(path, dbf);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            Assert.Equal("hello", table.Read(0)["NOTE"]);
+            table.Append("b", "a second memo");
+            Assert.Equal("a second memo", table.Read(1)["NOTE"]);
+        }
+        using var reopened = DbfTable.Open(path, writable: true, exclusive: true);
+        Assert.Equal(["hello", "a second memo"], reopened.ReadAll().Select(r => (string)r["NOTE"]!));
+        Assert.Equal(512 + 8 + 5 + 8 + 13, new FileInfo(Path.ChangeExtension(path, ".fpt")).Length);
+    }
+
+    [Fact]
+    public void A_memo_header_naming_an_end_past_2_GB_is_not_padded_to()
+    {
+        var (path, _) = VfpMemoTable("wild.dbf");
+        var memoPath = Path.ChangeExtension(path, ".fpt");
+        var fpt = File.ReadAllBytes(memoPath);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(fpt, 0x7FFF_FFFF); // garbage: 137 GB of 64-byte blocks
+        File.WriteAllBytes(memoPath, fpt);
+
+        // An exclusive writable open pads a short .fpt to the end its header names. Not to this one:
+        // it used to ask for the whole gap as one array.
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            Assert.Equal("hello", table.Read(0)["NOTE"]);
+            table.Append("b", "after");
+            Assert.Equal("after", table.Read(1)["NOTE"]);
+        }
+        Assert.True(new FileInfo(memoPath).Length < 4096);
+    }
+
+    // ---- table names ----------------------------------------------------------------------
+
+    [Fact]
+    public void A_table_with_a_dot_in_its_name_opens_by_the_name_it_is_listed_under()
+    {
+        using (var table = DbfTable.Create(PathOf("SALES.2019.dbf"), DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 5)]))
+            table.Append("dot");
+        using (var table = DbfTable.Create(PathOf("PLAIN.dbf"), DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 5)]))
+            table.Append("plain");
+
+        using var database = DbfDatabase.Open(_dir.FullName);
+        Assert.Equal(["PLAIN", "SALES.2019"], database.TableNames);
+        foreach (var name in new[] { "SALES.2019", "sales.2019.DBF" })
+        {
+            using var table = database.OpenTable(name);
+            Assert.Equal("dot", table.Read(0)["NAME"]);
+        }
+        Assert.All(database.Check().Tables, t => Assert.True(t.CanRead));
+
+        // A companion file's name still gets the message that says what a table name is.
+        var error = Assert.Throws<DbfException>(() => database.OpenTable("PLAIN.DBT"));
+        Assert.Equal(DbfErrorCode.TableNotFound, error.Code);
+        Assert.Contains("isn't a table name", error.Message);
+        Assert.Equal(DbfErrorCode.TableNotFound, Assert.Throws<DbfException>(() => database.OpenTable("SALES.2020")).Code);
+
+        // ADO.NET's schema lists and opens it too.
+        using var connection = new DbfConnection($"Data Source={_dir.FullName}");
+        connection.Open();
+        var columns = connection.GetSchema("Columns");
+        Assert.Contains(columns.Rows.Cast<System.Data.DataRow>(), r => (string)r["TABLE_NAME"] == "SALES.2019" && (string)r["COLUMN_NAME"] == "NAME");
+    }
+
+    // ---- locks, where a process's locks on a file go when any handle to it closes ----------
+
+    [Fact]
+    public void An_exclusive_open_that_fails_doesnt_drop_this_processes_locks_on_the_table()
+    {
+        if (!OperatingSystem.IsLinux())
+            return; // Windows locks belong to handles; macOS has no byte-range locks through .NET
+
+        var path = PathOf("held.dbf");
+        using (var created = DbfTable.Create(path, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("one");
+
+        using var table = DbfTable.Open(path, writable: true);
+        using var held = table.LockRecord(0);
+        Assert.Equal("held", ProbeLock(path, DbfLocks.HeaderByte - 1));
+
+        // The file is open here, so this fails. It used to fail inside the open, whose descriptor was
+        // closed on the way out, and on Linux that close let go of the record lock above.
+        var error = Assert.Throws<DbfException>(() => DbfTable.Open(path, writable: true, exclusive: true));
+        Assert.Equal(DbfErrorCode.FileInUse, error.Code);
+        Assert.Equal("held", ProbeLock(path, DbfLocks.HeaderByte - 1));
+
+        // A second table on the same file, opened and closed, leaves it held too.
+        DbfTable.Open(path).Dispose();
+        Assert.Equal("held", ProbeLock(path, DbfLocks.HeaderByte - 1));
+    }
+
+    // Another process asks for one byte without waiting.
+    private static string ProbeLock(string path, long offset)
+    {
+        var script = $"import fcntl,sys\nf=open(sys.argv[1],'r+b')\ntry:\n    fcntl.lockf(f,fcntl.LOCK_EX|fcntl.LOCK_NB,1,{offset})\n    print('free')\nexcept OSError:\n    print('held')";
+        using var process = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo("python3", ["-I", "-c", script, path]) { RedirectStandardOutput = true })!;
+        var answer = process.StandardOutput.ReadLine();
+        process.WaitForExit();
+        return answer ?? "no answer";
+    }
 }

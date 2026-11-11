@@ -108,7 +108,9 @@ internal abstract class DbfMemoFile : IDisposable
             DbfMemoFormat.DbaseIV => OrDefault(BinaryPrimitives.ReadUInt16LittleEndian(fileHeader.AsSpan(20, 2)), 512),
             _ => OrDefault(BinaryPrimitives.ReadUInt16BigEndian(fileHeader.AsSpan(6, 2)), 64),
         };
-        if (blockSize < 16)
+        // A dBASE IV block starts with an 8-byte header, and a free one holds a link. A FoxPro memo
+        // only starts on a block boundary: SET BLOCKSIZE TO 0 makes that every byte (a block size of 1).
+        if (format == DbfMemoFormat.DbaseIV && blockSize < 16)
             throw new InvalidDataException($"The memo file's block size of {blockSize} bytes is too small to hold a memo header.");
 
         return format switch
@@ -279,15 +281,25 @@ internal abstract class DbfMemoFile : IDisposable
     }
 
     /// <summary>Pads the file with zeros to the end its header names, so every block it promises is there.</summary>
+    /// <remarks>
+    /// The end comes from the header, which a cut or another program's bug can leave holding anything:
+    /// one past the 2 GB a memo file can be isn't an end any program wrote, and nothing is padded.
+    /// The zeros go out in pieces, never as one array the size of the gap.
+    /// </remarks>
     public void PadMissingTail()
     {
-        if (MissingTail() is not { } missing)
+        if (MissingTail() is not { } missing || Stream.Length + missing > MaxFileBytes)
             return;
         Stream.Position = Stream.Length;
-        Stream.Write(new byte[missing]);
+        var zeros = new byte[(int)Math.Min(missing, 81920)];
+        for (var left = missing; left > 0; left -= Math.Min(left, zeros.Length))
+            Stream.Write(zeros, 0, (int)Math.Min(left, zeros.Length));
         Stream.Flush();
         DbfTable.FlushToDisk(Stream);
     }
+
+    /// <summary>The largest memo file Visual FoxPro and dBASE open: 2 GB.</summary>
+    internal const long MaxFileBytes = int.MaxValue;
 
     /// <summary>True when a dBASE IV free chain loops or links into the header, so no memo can be added.</summary>
     public virtual bool FreeChainDamaged => false;

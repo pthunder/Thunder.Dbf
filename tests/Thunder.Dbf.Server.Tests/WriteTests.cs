@@ -262,4 +262,43 @@ public sealed class WriteTests : IDisposable
         var response = await _harness.Client(ServerHarness.AdminKey).PatchAsJsonAsync("/tables/STAFF/records/99", new { NAME = "Ghost" });
         await response.Problem(404, _harness);
     }
+
+    [Fact]
+    public async Task Settings_in_a_Data_Folder_connection_string_apply_to_writes_as_well_as_reads()
+    {
+        // Code page 850 stores é as 0x82; the table's own header says Windows-1252, where it's 0xE9.
+        var client = _harness.Client(ServerHarness.AdminKey,
+            settings => settings["Thunder:Data:Folder"] = $"Data Source={_harness.DataFolder};Code Page=850");
+
+        var created = await client.PostAsJsonAsync("/tables/staff/records", new { NAME = "Renée", SALARY = 1 });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        Assert.Equal("Renée", (await created.Json()).GetProperty("NAME").GetString());
+
+        using var table = DbfTable.Open(Path.Combine(_harness.DataFolder, "STAFF.DBF"));
+        var bytes = File.ReadAllBytes(Path.Combine(_harness.DataFolder, "STAFF.DBF"));
+        var name = bytes.AsSpan(table.Header.HeaderLength + 2 * table.Header.RecordLength + table.Fields[0].Offset, 5).ToArray();
+        Assert.Equal([(byte)'R', (byte)'e', (byte)'n', 0x82, (byte)'e'], name); // written as the reads decode it
+    }
+
+    [Fact]
+    public async Task A_table_with_a_dot_in_its_name_is_served_and_each_name_opens_its_own_file()
+    {
+        // SALES.2019.dbf is listed as SALES.2019. STAFF.dbf.dbf is listed as STAFF.dbf, which must
+        // not open STAFF.DBF: a key allowed one of them would otherwise read the other.
+        File.Copy(Path.Combine(_harness.DataFolder, "people.dbf"), Path.Combine(_harness.DataFolder, "SALES.2019.dbf"));
+        File.Copy(Path.Combine(_harness.DataFolder, "people.dbf"), Path.Combine(_harness.DataFolder, "STAFF.dbf.dbf"));
+        var client = _harness.Client(ServerHarness.AdminKey);
+        var people = await (await client.GetAsync("/tables/people/records?take=1")).Json();
+
+        var dotted = await client.GetAsync("/tables/SALES.2019/records?take=1");
+        Assert.Equal(HttpStatusCode.OK, dotted.StatusCode);
+        Assert.Equal(people.GetProperty("records").ToString(), (await dotted.Json()).GetProperty("records").ToString());
+
+        var doubled = await client.GetAsync("/tables/STAFF.dbf.dbf/records?take=1");
+        Assert.Equal(HttpStatusCode.OK, doubled.StatusCode);
+        Assert.Equal(people.GetProperty("records").ToString(), (await doubled.Json()).GetProperty("records").ToString());
+
+        var staff = await (await client.GetAsync("/tables/STAFF/records?take=1")).Json();
+        Assert.Equal("Ada", staff.GetProperty("records")[0].GetProperty("NAME").GetString());
+    }
 }

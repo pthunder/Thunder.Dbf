@@ -514,19 +514,44 @@ public sealed partial class DbfTable
                 "Replace the .dbf with the .packing copy beside it (the table as it was before the pack), delete the copy, then open the table with exclusive: true and call RebuildIndex().", _path);
     }
 
+    // Written under a temporary name and renamed once it's whole and on disk. Under its final name
+    // the copy means "the table as it was before a pack that didn't finish", and the way out of that
+    // is to put it in the table's place: a copy that failed (a full disk) or was cut off must never
+    // carry that name. The table isn't touched until the rename has happened.
     private void BackUpForPack(string backup, long bytes)
     {
-        using var output = new FileStream(backup, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        _stream.Position = 0;
-        var buffer = new byte[81920];
-        for (long copied = 0; copied < bytes;)
+        var temporary = backup + ".tmp";
+        File.Delete(temporary); // a copy cut off earlier: never whole, and the table was still untouched
+        try
         {
-            var read = _stream.Read(buffer, 0, (int)Math.Min(buffer.Length, bytes - copied));
-            if (read == 0)
-                break;
-            output.Write(buffer, 0, read);
-            copied += read;
+            using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                _stream.Position = 0;
+                var buffer = new byte[81920];
+                for (long copied = 0; copied < bytes;)
+                {
+                    var read = _stream.Read(buffer, 0, (int)Math.Min(buffer.Length, bytes - copied));
+                    if (read == 0)
+                        break;
+                    output.Write(buffer, 0, read);
+                    copied += read;
+                    CrashPoint?.Invoke("pack copy");
+                }
+                output.Flush(flushToDisk: true);
+            }
+            File.Move(temporary, backup);
         }
-        output.Flush(flushToDisk: true);
+        catch
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Left behind: the next pack deletes it, and nothing takes it for a finished copy.
+            }
+            throw;
+        }
     }
 }

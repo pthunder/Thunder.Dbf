@@ -63,6 +63,7 @@ public sealed record DbfDatabaseOptions
 public sealed class DbfDatabase : IDisposable
 {
     private static readonly string[] CompanionExtensions = [".dbt", ".fpt", ".mdx", ".cdx", ".cpg"];
+    private static readonly string[] OtherIndexExtensions = [".ndx", ".ntx", ".idx"];
 
     private readonly Dictionary<string, DbfTable> _open = new(StringComparer.OrdinalIgnoreCase);
 
@@ -234,12 +235,8 @@ public sealed class DbfDatabase : IDisposable
                 "Use just the table's name, like CONTACT1 or CONTACT1.DBF. Paths, '..' and drive letters are refused so a request can't reach files outside the data folder.");
         }
 
-        var extension = Path.GetExtension(name);
-        if (extension.Length > 0 && !extension.Equals(".dbf", StringComparison.OrdinalIgnoreCase))
-            throw new DbfException(DbfErrorCode.TableNotFound, $"'{name}' isn't a table name.",
-                "Tables end in .dbf. Memo (.dbt/.fpt) and index (.mdx/.cdx) files are opened with their table automatically.");
-
-        var wanted = Path.GetFileNameWithoutExtension(name);
+        // Only a trailing ".dbf" is an extension here: SALES.2019 is the table in SALES.2019.dbf.
+        var wanted = name.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase) ? name[..^4] : name;
         var path = Directory.EnumerateFiles(Folder)
             .FirstOrDefault(p => Path.GetExtension(p).Equals(".dbf", StringComparison.OrdinalIgnoreCase)
                 && Path.GetFileNameWithoutExtension(p).Equals(wanted, StringComparison.OrdinalIgnoreCase));
@@ -252,6 +249,9 @@ public sealed class DbfDatabase : IDisposable
             .Select(t => Path.Combine(Folder, t))
             .FirstOrDefault();
 
+        if (path is null && CompanionExtensions.Concat(OtherIndexExtensions).Contains(Path.GetExtension(name), StringComparer.OrdinalIgnoreCase))
+            throw new DbfException(DbfErrorCode.TableNotFound, $"'{name}' isn't a table name.",
+                "Tables end in .dbf. Memo (.dbt/.fpt) and index (.mdx/.cdx) files are opened with their table automatically.");
         if (path is null)
         {
             // The list of tables is useful to an administrator and to an attacker, so it's diagnostic only.
@@ -312,7 +312,7 @@ public sealed class DbfDatabase : IDisposable
 
         try
         {
-            var path = ResolveTablePath(name);
+            var path = ResolveTablePath(name + ".dbf"); // a listed name: SALES.2019 is SALES.2019.dbf
             // A table this database already has open is looked at as it is: opening the file again
             // would collide with it when it's held exclusively. Otherwise the probe opens the way the
             // database would, so an exclusive open that would fail shows up here.

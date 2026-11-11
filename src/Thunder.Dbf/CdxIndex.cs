@@ -83,7 +83,7 @@ public sealed partial class CdxIndex : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             throw;
         }
     }
@@ -159,8 +159,10 @@ public sealed partial class CdxIndex : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        // On Linux closing any handle drops this process's locks on the file: the FoxPro index lock
+        // another table's CdxIndex holds, too. So the close waits while any are held.
         if (!_leaveOpen)
-            _stream.Dispose();
+            DbfLocks.Close(_stream);
     }
 
     /// <summary>Reads <paramref name="length"/> bytes at <paramref name="offset"/>, which must be page-aligned and inside the file.</summary>

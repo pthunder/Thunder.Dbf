@@ -245,7 +245,7 @@ public sealed partial class DbfTable : IDisposable
         catch
         {
             memoStream?.Dispose();
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream); // another table in this process may hold locks on the .dbf
             throw;
         }
     }
@@ -279,7 +279,7 @@ public sealed partial class DbfTable : IDisposable
             }
             catch (Exception ex)
             {
-                stream.Dispose();
+                DbfLocks.CloseWhenSafe(stream);
                 if (ex is DbfException)
                     throw;
                 throw DbfException.Translate(ex, path, access) ?? new DbfException(DbfErrorCode.WriteFailed,
@@ -287,7 +287,7 @@ public sealed partial class DbfTable : IDisposable
             }
             if (same is not false)
                 return stream;
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             // Three tries: a swap finishes between two of them. One that never settles is refused,
             // never taken on trust: the handle could be writing into a backup.
             if (attempt == 3)
@@ -505,7 +505,7 @@ public sealed partial class DbfTable : IDisposable
             finally
             {
                 index?.Dispose();
-                stream?.Dispose();
+                DbfLocks.Close(stream); // an index another table here may hold locked
             }
             return false;
         }
@@ -687,7 +687,7 @@ public sealed partial class DbfTable : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             throw;
         }
     }
@@ -1476,16 +1476,48 @@ public sealed partial class DbfTable : IDisposable
         return index;
     }
 
+    // A commit failed before its rows' keys were applied. The keys are dropped: left queued, the next
+    // append on this table would write them for whatever record takes those rows' place. If the header
+    // on disk doesn't count the rows, they were never added and the indexes are as they should be. If
+    // it does (the header went out and the flush after it failed), or that can't be read, the rows
+    // are there without their keys and the indexes wait for a rebuild.
+    private void DropUncommittedKeys()
+    {
+        if (_pendingIndexChanges.Count == 0)
+            return;
+        var attempted = Header.RecordCount;
+        _pendingIndexChanges.Clear();
+        try
+        {
+            ReloadHeader();
+            if (Header.RecordCount >= attempted)
+                _indexesNeedRebuild = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or DbfException)
+        {
+            _indexesNeedRebuild = true;
+        }
+    }
+
     // Makes everything appended so far durable: end-of-file marker, counters and the header (which
     // makes the rows visible), then the index entries for those rows.
     private void Commit()
     {
-        Seek(RecordCount, forAppend: true);
-        _stream.WriteByte(EndOfFile);
-        foreach (var field in _dirtyCounters)
-            Header.WriteAutoIncrement(_stream, field);
-        _dirtyCounters.Clear();
-        CommitHeader();
+        try
+        {
+            CrashPoint?.Invoke("committing");
+            Seek(RecordCount, forAppend: true);
+            _stream.WriteByte(EndOfFile);
+            foreach (var field in _dirtyCounters)
+                Header.WriteAutoIncrement(_stream, field);
+            _dirtyCounters.Clear();
+            CommitHeader();
+        }
+        catch
+        {
+            DropUncommittedKeys();
+            throw;
+        }
         CrashPoint?.Invoke("counted");
 
         var pending = _pendingIndexChanges.ToList();
