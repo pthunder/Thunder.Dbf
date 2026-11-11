@@ -35,7 +35,7 @@ internal static class IndexKeys
         {
             // A blank record has every number at 0, so TOTAL/QTY divides by zero on it. Only the
             // type is wanted, and that's the same whatever the numbers are.
-            value = DbfExpression.Parse(expression).EvaluateForType(BlankRecord(table));
+            value = DbfExpression.EvaluateForType(DbfExpression.Parse(expression), BlankRecord(table));
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
                                        or FormatException or ArgumentException or ArithmeticException)

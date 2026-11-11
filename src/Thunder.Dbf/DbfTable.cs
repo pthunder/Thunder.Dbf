@@ -706,6 +706,7 @@ public sealed partial class DbfTable : IDisposable
         {
             _index = MdxIndex.Open(indexStream, Encoding, leaveOpen);
             _index.ForcesWrites = () => ForcesWrites;
+            _index.RebuildPoint = () => CrashPoint?.Invoke("rebuilding tag");
             _index.IsExclusive = () => _exclusive;
         }
         catch (InvalidDataException ex)
@@ -1338,7 +1339,6 @@ public sealed partial class DbfTable : IDisposable
         return ReadBuffered(index);
     }
 
-    // Reads through FileStream's buffer: fast for scans, but only fresh as of the last discard.
     /// <summary>
     /// Reads one field's stored bytes of record <paramref name="recordNumber"/> (1-based) without the
     /// record buffer, which may be holding a record on its way to disk, and puts the stream back
@@ -1363,6 +1363,7 @@ public sealed partial class DbfTable : IDisposable
         }
     }
 
+    // Reads through FileStream's buffer: fast for scans, but only fresh as of the last discard.
     private DbfRecord ReadBuffered(int index)
     {
         Seek(index);
