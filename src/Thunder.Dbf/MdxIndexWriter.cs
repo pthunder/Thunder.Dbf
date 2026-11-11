@@ -157,6 +157,9 @@ public sealed partial class MdxIndex
     /// </summary>
     internal Func<bool>? ForcesWrites { get; set; }
 
+    /// <summary>Called after each key a rebuild puts in a tag: where a test cuts a rebuild off partway.</summary>
+    internal Action? RebuildPoint { get; set; }
+
     /// <summary>Forces what's written so far to disk before a write that depends on it, when the table forces writes.</summary>
     internal void Barrier()
     {
@@ -837,6 +840,12 @@ public sealed partial class MdxTag
     /// the file, up to the 2 GB limit. Nodes left over (fewer keys than before) are freed for
     /// programs that reuse them. When the index can't prove whose each page is, the new tree starts
     /// in new pages and the old ones are left alone.
+    /// <para>
+    /// A rebuild cut off partway leaves the tag half filled, in either case and as it always did (the
+    /// tag was emptied first before, too): the table is held exclusively meanwhile, the next writable
+    /// open finds the tag's key count out of step with the records and refuses writes, and running
+    /// the rebuild again puts it right. Pages the cut-off rebuild hadn't got to yet are left unused.
+    /// </para>
     /// </summary>
     internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
@@ -864,6 +873,7 @@ public sealed partial class MdxTag
                 // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
                 if (!IsUnique || FirstRecordFor(key) is null)
                     Insert(key, record);
+                _index.RebuildPoint?.Invoke();
             }
         }
         catch

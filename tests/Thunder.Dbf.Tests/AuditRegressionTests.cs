@@ -702,6 +702,35 @@ public sealed class AuditRegressionTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(1)]   // cut off right after the old root was emptied and took its first key
+    [InlineData(150)] // halfway through the first tag
+    [InlineData(450)] // halfway through the second, with the first whole
+    public void A_rebuild_cut_off_partway_is_put_right_by_rebuilding_again(int keys)
+    {
+        var (path, _) = TwoTagTable(PathOf("cut.dbf"));
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            var done = 0;
+            table.CrashPoint = point => { if (point == "rebuilding tag" && ++done == keys) throw new IOException("The power went."); };
+            Assert.Throws<IOException>(() => table.RebuildIndex());
+            table.CrashPoint = null;
+            // Half built, in the pages the old tree was in: this table knows, and won't build on it.
+            Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => table.Append("x", "y")).Code);
+        }
+
+        // So does the next program to open it: the tag's keys don't add up to the records.
+        using (var table = DbfTable.Open(path, writable: true))
+            Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => table.Append("x", "y")).Code);
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.RebuildIndex();
+        AssertBothTagsWhole(path);
+        using var after = DbfTable.Open(path, writable: true);
+        after.Append("x", "y");
+        Assert.Equal(301, after.RecordCount);
+    }
+
     [Fact]
     public void Rebuilding_an_mdx_whose_tags_share_a_page_doesnt_build_one_tag_in_anothers_new_tree()
     {
