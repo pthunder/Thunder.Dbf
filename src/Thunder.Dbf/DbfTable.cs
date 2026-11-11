@@ -1339,6 +1339,29 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // Reads through FileStream's buffer: fast for scans, but only fresh as of the last discard.
+    /// <summary>
+    /// Reads one field's stored bytes of record <paramref name="recordNumber"/> (1-based) without the
+    /// record buffer, which may be holding a record on its way to disk, and puts the stream back
+    /// where it was. For an index checking a key against its record. False when it can't be read.
+    /// </summary>
+    internal bool TryReadStored(int recordNumber, DbfField field, Span<byte> target)
+    {
+        if (recordNumber < 1 || recordNumber > RecordCount || target.Length != field.Length)
+            return false;
+        try
+        {
+            var position = _stream.Position;
+            _stream.Position = Header.HeaderLength + (long)(recordNumber - 1) * Header.RecordLength + field.Offset;
+            var read = _stream.ReadAtLeast(target, target.Length, throwOnEndOfStream: false);
+            _stream.Position = position;
+            return read == target.Length;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private DbfRecord ReadBuffered(int index)
     {
         Seek(index);

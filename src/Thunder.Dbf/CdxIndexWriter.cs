@@ -910,6 +910,11 @@ public sealed partial class CdxTag : IMaintainedTag
         }
 
         var bareType = BareField(table)?.Type;
+        // A currency tag keyed the way Harbour keys one (see IsCurrencyKey) is read, not written: its
+        // key is the value as a double, worked out by Harbour's own arithmetic, and a key one bit off
+        // wouldn't be found again.
+        if (bareType == 'Y' && KeyLength == 8 && !IsCurrencyKey)
+            return "its currency keys are stored as numbers, the way Harbour keys a currency field, and Harbour's conversion of the value isn't reproduced exactly here";
         KeyKind? kind = blank switch
         {
             _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,
@@ -1194,14 +1199,6 @@ public sealed partial class CdxTag : IMaintainedTag
                     DateTime moment => IndexKeys.JulianDateTime(moment),
                     null => 0d,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a datetime."),
-                });
-            case KeyKind.Currency when !IsCurrencyKey:
-                // A tag Harbour keyed: the currency value as a number, like any other (see IsCurrencyKey).
-                return IndexKeys.WriteOrderedDouble(value switch
-                {
-                    decimal d => double.Parse(d.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture),
-                    null => 0d,
-                    _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
                 });
             case KeyKind.Currency:
             {

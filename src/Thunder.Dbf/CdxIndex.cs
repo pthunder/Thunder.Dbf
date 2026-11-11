@@ -267,62 +267,57 @@ public sealed partial class CdxTag
     // A currency field's key is its stored ten-thousandths, big-endian with the sign bit flipped, not a
     // double. A nullable character field's key has a marker byte in front: 0x80 then the value, and
     // all zeros for .NULL.
-    private bool IsBareCurrencyField { get; init; }
+    private DbfField? CurrencyField { get; init; }
+    private DbfTable? Table { get; init; }
     private bool HasNullMarker { get; init; }
 
-    // Harbour keys a currency field as a number, an ordered double like any other, so the tag's own
-    // keys say which it is. A Harbour key is the double of a currency value: at least 0.0001 in size,
-    // within currency's range, and with no more than four decimals. Ten-thousandths read as a double
-    // are none of that: under 2^52 of them (some 450 billion in currency) they're subnormal, and above
-    // it they'd have to land on a four-decimal number between 454 and 484 trillion, bit for bit. Zero
-    // is the same eight bytes both ways and says nothing. The lowest and highest keys are looked at:
-    // one that can't be Harbour's settles it as Visual FoxPro's, and the answer is kept once there is one.
+    // Harbour keys a currency field as a number, an ordered double like any other. Nothing in the
+    // file says which a tag holds, and the bytes alone can't: ten-thousandths can spell a believable
+    // double (460,718,241,880,001.7408 in currency is, bit for bit, the double 1.0). So a key is
+    // checked against the record it points at: the tag's lowest and highest keys, each compared with
+    // its record's stored value keyed both ways. Zero is the same eight bytes either way and says
+    // nothing, and neither does a key that matches neither (an index out of step). The answer is kept
+    // once there is one; until then (an empty tag, or all zeros) the tag counts as Visual FoxPro's.
     private bool? _currencyLayout;
 
     internal bool IsCurrencyKey
     {
         get
         {
-            if (!IsBareCurrencyField)
+            if (CurrencyField is not { } currency || Table is not { } table)
                 return false;
             if (_currencyLayout is { } known)
                 return known;
-            var sawHarbours = false;
             try
             {
+                Span<byte> stored = stackalloc byte[8];
+                Span<byte> asCurrency = stackalloc byte[8];
                 foreach (var last in new[] { false, true })
                 {
-                    if (EdgeKey(last) is not { } key || key.AsSpan().SequenceEqual(ZeroKey))
+                    if (EdgeEntry(last) is not { } edge || !table.TryReadStored(edge.Record, currency, stored))
                         continue;
-                    if (!CouldBeHarbourCurrency(IndexKeys.ReadOrderedDouble(key)))
+                    var scaled = BinaryPrimitives.ReadInt64LittleEndian(stored);
+                    if (scaled == 0)
+                        continue;
+                    BinaryPrimitives.WriteUInt64BigEndian(asCurrency, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
+                    if (edge.Key.AsSpan().SequenceEqual(asCurrency))
                         return (_currencyLayout = true).Value;
-                    sawHarbours = true;
+                    // Harbour's double for the value, give or take how it rounds one.
+                    var value = scaled / 10_000d;
+                    if (Math.Abs(IndexKeys.ReadOrderedDouble(edge.Key) - value) <= Math.Max(0.00005, Math.Abs(value) * 1e-12))
+                        return (_currencyLayout = false).Value;
                 }
             }
             catch (InvalidDataException)
             {
-                return true; // a damaged tree: whatever reads it next reports that
+                // A damaged tree: whatever reads it next reports that.
             }
-            if (sawHarbours)
-                return (_currencyLayout = false).Value;
-            // Empty, or every key zero: nothing in the file says which, and Visual FoxPro's is the
-            // format's own. Not kept, so the next look can see keys that have arrived since.
             return true;
         }
     }
 
-    private static ReadOnlySpan<byte> ZeroKey => [0x80, 0, 0, 0, 0, 0, 0, 0];
-
-    private static bool CouldBeHarbourCurrency(double number)
-    {
-        if (!double.IsFinite(number) || Math.Abs(number) < 0.00005 || Math.Abs(number) > 922_337_203_685_478d)
-            return false;
-        var exact = decimal.Parse(number.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture);
-        return (double)decimal.Round(exact, 4) == number;
-    }
-
-    // The tag's lowest or highest stored key, or null when there's none (or the tree can't be followed).
-    private byte[]? EdgeKey(bool last)
+    // The tag's lowest or highest stored key and its record, or null when there's none (or the tree can't be followed).
+    private (byte[] Key, int Record)? EdgeEntry(bool last)
     {
         var offset = RootOffset();
         for (var depth = 0; depth <= MaxDepth; depth++)
@@ -333,7 +328,10 @@ public sealed partial class CdxTag
             if (attributes > 7 || count == 0)
                 return null;
             if ((attributes & LeafAttribute) != 0)
-                return DecodeLeaf(page, count, offset).Keys[last ? count - 1 : 0];
+            {
+                var (keys, records) = DecodeLeaf(page, count, offset);
+                return (keys[last ? count - 1 : 0], records[last ? count - 1 : 0]);
+            }
             var itemLength = KeyLength + 8;
             if (InteriorHeaderLength + (long)count * itemLength > PageLength)
                 return null;
@@ -382,7 +380,8 @@ public sealed partial class CdxTag
 
         return new CdxTag(index, headerOffset, root, name)
         {
-            IsBareCurrencyField = bare is { Type: 'Y' } && keyLength == 8,
+            CurrencyField = bare is { Type: 'Y' } && keyLength == 8 ? bare : null,
+            Table = table,
             HasNullMarker = bare is { Type: 'C', IsNullable: true } && keyLength == bare.Length + 1,
             KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,

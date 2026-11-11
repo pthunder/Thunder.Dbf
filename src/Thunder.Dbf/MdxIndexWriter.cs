@@ -328,6 +328,9 @@ public sealed partial class MdxIndex
             return null; // a batch orders its writes by which pages are new
         // Every page of every block is claimed once: a tag header, a node or a free block may not
         // even partly cover another, and each must lie whole inside the file, past the header area.
+        // A tag header counts as a block, which is how dBASE, Jet and this library lay them out and
+        // how they're read and written here. A file that packs them closer isn't damaged; it only
+        // fails this and is rebuilt in new pages, as every index was before pages were reused.
         var firstNode = HeaderAreaSize / PageSize;
         var claimed = new HashSet<int>();
         bool Claim(int block)

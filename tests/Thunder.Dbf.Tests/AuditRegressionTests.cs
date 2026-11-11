@@ -543,23 +543,14 @@ public sealed class AuditRegressionTests : IDisposable
                 Assert.Contains(tag.SeekExact(record["PRICE"]), e => e.RecordNumber == record.RecordNumber);
         }
 
-        // Kept up to date the same way: a new record's key is a double too.
+        // It's read, not written: Harbour's own arithmetic makes the double, and a key one bit off
+        // wouldn't be found again. So writes are refused rather than guessed at.
         using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
         {
-            table.Append(77.25m, 77.25m);
-            using var kept = table.OpenStructuralIndex()!;
-            Assert.Equal(prices.Append(77.25m).Order(), kept["HB"].Entries().Select(e => Convert.ToDecimal(e.Key, CultureInfo.InvariantCulture)));
-            Assert.Contains(kept["HB"].SeekExact(77.25m), e => e.RecordNumber == 7);
+            var error = Assert.Throws<DbfException>(() => table.Append(77.25m, 77.25m));
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
+            Assert.Equal(prices.Length, table.RecordCount);
         }
-        prices = [.. prices, 77.25m];
-
-        // And one Visual FoxPro's way, on the same field, is read its way.
-        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
-            table.CreateIndexTag("VFP", "PRICE");
-        using var again = DbfTable.Open(path);
-        using var both = again.OpenStructuralIndex()!;
-        Assert.Equal(prices.Order(), both["VFP"].Entries().Select(e => (decimal)e.Key!));
-        Assert.Equal(prices.Order(), both["HB"].Entries().Select(e => Convert.ToDecimal(e.Key, CultureInfo.InvariantCulture)));
     }
 
     public sealed class Nullable
@@ -714,6 +705,7 @@ public sealed class AuditRegressionTests : IDisposable
     [InlineData("460000000000000.1234")] // in the range where a key could pass for a double, but for its digits
     [InlineData("-450359962737.0497")]
     [InlineData("922337203685477.5807")]
+    [InlineData("460718241880001.7408")] // bit for bit the double 1.0: only its record says it's currency
     [InlineData("-0.0001")]
     public void A_Visual_FoxPro_currency_tag_holding_only_a_huge_value_is_still_read_as_currency(string text)
     {
