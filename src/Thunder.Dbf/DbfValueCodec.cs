@@ -321,7 +321,14 @@ internal static class DbfValueCodec
             }
         }
 
-        var number = Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+        // A double or float goes through its shortest round-trip text: the direct conversion to
+        // decimal keeps only 15 significant digits (7 for a float), so 9007199254740992 would lose its last.
+        var number = value switch
+        {
+            double d => decimal.Parse(d.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture),
+            float f => decimal.Parse(f.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture),
+            _ => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+        };
         return number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
     }
 

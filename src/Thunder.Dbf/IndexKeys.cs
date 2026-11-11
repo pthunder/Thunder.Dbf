@@ -11,7 +11,8 @@ namespace Thunder.Dbf;
 /// <summary>
 /// One key in an .ndx, .ntx or .cdx index, and the 1-based record number it points at.
 /// <see cref="Key"/> is a <see cref="string"/>, a number (<see cref="decimal"/>, or <see cref="double"/>
-/// beyond decimal's range), a <see cref="DateOnly"/>? (null for a blank date) or a <see cref="bool"/>.
+/// beyond decimal's range), a <see cref="DateOnly"/>? (null for a blank date) or a <see cref="bool"/>;
+/// null too for a Visual FoxPro <c>.NULL.</c> in a tag on a nullable field.
 /// </summary>
 public readonly record struct IndexEntry(object? Key, int RecordNumber);
 
@@ -32,10 +33,20 @@ internal static class IndexKeys
         object? value;
         try
         {
-            value = DbfExpression.Parse(expression).Evaluate(BlankRecord(table));
+            var parsed = DbfExpression.Parse(expression);
+            try
+            {
+                value = parsed.Evaluate(BlankRecord(table));
+            }
+            catch (DivideByZeroException)
+            {
+                // TOTAL/QTY on a blank record divides by zero. The type is the same whatever the
+                // numbers are, so ask again with every number 1.
+                value = parsed.Evaluate(BlankRecord(table, number: 1));
+            }
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
-                                       or FormatException or ArgumentException or OverflowException)
+                                       or FormatException or ArgumentException or ArithmeticException)
         {
             return fallback;
         }
@@ -52,7 +63,7 @@ internal static class IndexKeys
 
     // Every field empty: spaces, zero, false, blank date. Built by hand rather than decoded from a
     // space-filled buffer so binary fields (I, Y, B) and nullable fields still produce their type.
-    internal static DbfRecord BlankRecord(DbfTable table)
+    internal static DbfRecord BlankRecord(DbfTable table, int number = 0)
     {
         var values = new object?[table.Fields.Count];
         for (var i = 0; i < values.Length; i++)
@@ -61,8 +72,8 @@ internal static class IndexKeys
             values[i] = DbfValueCodec.IsMemoField(field) ? "" : field.Type switch
             {
                 'C' or 'V' => "",
-                'N' or 'F' or 'B' or 'Y' => 0m,
-                'I' or '+' => 0,
+                'N' or 'F' or 'B' or 'Y' => (decimal)number,
+                'I' or '+' => number,
                 'L' => false,
                 _ => null,
             };

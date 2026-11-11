@@ -260,6 +260,13 @@ public sealed partial class CdxTag
 
     /// <summary>True when keys were upper-cased as they were stored (a CLIP / Harbour extension).</summary>
     internal bool IgnoreCase { get; private init; }
+
+    // Two Visual FoxPro key layouts that aren't the plain ones, as VFP 9 writes them for a bare field.
+    // A currency field's key is its stored ten-thousandths, big-endian with the sign bit flipped, not a
+    // double. A nullable character field's key has a marker byte in front: 0x80 then the value, and
+    // all zeros for .NULL.
+    private bool IsCurrencyKey { get; init; }
+    private bool HasNullMarker { get; init; }
     internal long HeaderOffset { get; }
 
     /// <summary>A collation name or code page some writer stored in the tag header, or null when there's none.</summary>
@@ -294,8 +301,13 @@ public sealed partial class CdxTag
         if (!directory && expression.Length == 0)
             throw new InvalidDataException($"{label} has no key expression.");
 
+        var bare = directory || table is null ? null
+            : table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase));
+
         return new CdxTag(index, headerOffset, root, name)
         {
+            IsCurrencyKey = bare is { Type: 'Y' } && keyLength == 8,
+            HasNullMarker = bare is { Type: 'C', IsNullable: true } && keyLength == bare.Length + 1,
             KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,
             IsDescending = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(DescendingOffset)) != 0,
@@ -519,6 +531,8 @@ public sealed partial class CdxTag
     /// </summary>
     private byte[] Probe(object? key) => KeyType switch
     {
+        _ when IsCurrencyKey => EncodeCurrency(key),
+        _ when HasNullMarker => EncodeNullable(key),
         'N' when KeyLength == 4 => EncodeInteger(key),
         'N' => IndexKeys.WriteOrderedDouble(IndexKeys.ToDouble(key, Name)),
         'D' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDay(key, Name)),
@@ -537,8 +551,31 @@ public sealed partial class CdxTag
         return bytes;
     }
 
+    private byte[] EncodeCurrency(object? key)
+    {
+        var value = Convert.ToDecimal(key ?? throw new ArgumentNullException(nameof(key), $"Tag {Name} has currency keys; seek with a number."),
+            CultureInfo.InvariantCulture);
+        var bytes = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes, unchecked((ulong)decimal.ToInt64(decimal.Round(value * 10_000m)) ^ 0x8000_0000_0000_0000));
+        return bytes;
+    }
+
+    // A null seeks the .NULL. keys (all zeros); text seeks by prefix behind the marker byte.
+    private byte[] EncodeNullable(object? key)
+    {
+        if (key is null)
+            return new byte[KeyLength];
+        var text = _index.Encoding.GetBytes(IndexKeys.ToText(key, Name));
+        var bytes = new byte[text.Length + 1];
+        bytes[0] = 0x80;
+        text.CopyTo(bytes, 1);
+        return bytes;
+    }
+
     private object? DecodeKey(byte[] key) => KeyType switch
     {
+        _ when IsCurrencyKey => unchecked((long)(BinaryPrimitives.ReadUInt64BigEndian(key) ^ 0x8000_0000_0000_0000)) / 10_000m,
+        _ when HasNullMarker => key[0] == 0 ? null : _index.Encoding.GetString(key.AsSpan(1)).TrimEnd(' ', '\0'),
         'N' when KeyLength == 4 => (decimal)unchecked((int)(BinaryPrimitives.ReadUInt32BigEndian(key) - 0x80000000)),
         'N' => IndexKeys.FromDouble(IndexKeys.ReadOrderedDouble(key)),
         'D' => IndexKeys.FromJulianDay(IndexKeys.ReadOrderedDouble(key)),

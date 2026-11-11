@@ -904,7 +904,7 @@ public sealed partial class CdxTag : IMaintainedTag
             blank = _keyExpression.Evaluate(IndexKeys.BlankRecord(table));
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
-                                       or FormatException or ArgumentException or OverflowException)
+                                       or FormatException or ArgumentException or ArithmeticException) // A/B on a blank record divides by zero
         {
             return $"its expression can't be evaluated here ({ex.Message})";
         }

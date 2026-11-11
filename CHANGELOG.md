@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+Found by reading the whole library through for bugs; each has a test that fails without the fix.
+
+### Fixed
+
+- **Rebuilding an `.mdx` no longer grows the file.** `RebuildIndex()` and `Pack()` freed every tag's old nodes to a list that's never read back and built the new tree at the end of the file, so each one added the index's whole size again. At 2 GB the rebuild failed partway and the table refused writes. A rebuild now builds the new tree in the old one's nodes. A file that has already grown keeps its size.
+- **A FoxPro `.cdx` tag on a currency field, or on a nullable character field, is read correctly.** `Seek` and `SeekExact` found nothing in either, and `Entries()` gave wrong keys: the reader took a currency key for a double and didn't know the marker byte Visual FoxPro puts in front of a nullable field's key. Writing those tags was already right. `SeekExact(null)` finds the `.NULL.` records, whose key reads as `null`.
+- **SQL `LIKE` with a `%` in the text.** `NOTE LIKE '%50%'` missed "50% off", and `'100%'` missed "100% sure": a `%` in the pattern was taken as a literal wherever the text had one.
+- **Reading a record into a class and updating it no longer fills in its blank fields.** A blank date read as `DateTime.MinValue` (or `DateOnly.MinValue`) and a blank character as `'\0'`, and `UpdateRecord` and `AppendRecord` wrote those back as 0001-01-01 and a NUL byte. They're written as blank. A non-nullable `bool` or number property still writes `F` or `0` over a blank, since those can't be told from real values; make the property nullable to keep the blank.
+- **A `double` written to a numeric field keeps all its digits.** It was rounded to 15 significant digits on the way, so `9007199254740992` was stored as `9007199254740990`. A `float` keeps its own digits (`0.1f` is still `0.1`). `ModifyStructure` therefore carries a 16- or 17-digit double into a numeric field wide enough for it, where it used to call that a loss.
+- **An index whose key divides by a field** (`TOTAL/QTY`) stopped the index, and a writable open of its table, with a `DivideByZeroException`: the key's type is worked out on a blank record, where the field is 0. It's now worked out with the numbers at 1 when that happens.
+- **A number right before `.AND.`, `.OR.` or `.NOT.`** (`TYPE=1.AND.ACTIVE`, written without spaces) no longer fails to parse. The dot was read as the number's decimal point, and a tag with such a filter counted as one that can't be kept up to date.
+- **A `.cpg` file naming a code page .NET doesn't have** (`895`, say) made `Open` throw `NotSupportedException`. The table now opens with its header's code page, as it does for a name that isn't an encoding at all.
+- **`DbfDataReader.GetFieldValue<DateOnly?>`** threw for every row that had a date; only null rows worked.
+- **`DbfDataReader.HasRows`** turned false once the rows had been read to the end. It stays true, as other ADO.NET providers do.
+
 ### Tests
 
 - **The Visual FoxPro round-trip test covers FoxPro writing added since 0.2.0:** tables made by `DbfTable.Create` in both FoxPro formats, a `.cdx` made by `CreateIndexTag`, appends without a `_NullFlags` value, and `ModifyStructure` with `DropIndexTag`. VFP lists every value and must read what Thunder.Dbf reads. All eight pass against VFP 9 SP2 on the Windows test PC (on the 0.4.0 package, four of them failed); the [checklist](docs/maintainers/visual-foxpro-test.md) says how to run them.

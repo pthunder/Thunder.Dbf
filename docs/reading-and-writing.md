@@ -179,6 +179,8 @@ A seek is only used when it must agree with a scan:
 
 Deleted records are left out. Typed records must be classes.
 
+A blank field reads as `null` into a nullable property and as the type's default into one that isn't. Written back, a default date (`DateTime.MinValue`, `DateOnly.MinValue`) or a `'\0'` character is a blank again, so reading a record and updating it leaves its blank fields as they were. A non-nullable `bool` or number can't say "blank": it writes `F` or `0`. Declare the property nullable (`bool?`, `decimal?`) where the difference matters.
+
 Typed records are safe in trimmed and Native AOT apps (iOS, for one): the class's public properties are kept for you. `AsQueryable<T>()` isn't, and is marked so your build warns; there, use `ReadAll<T>()` with ordinary LINQ, or `Seek` through the tag. See [Mobile and AOT](getting-started.md#mobile-and-aot).
 
 ## Creating tables

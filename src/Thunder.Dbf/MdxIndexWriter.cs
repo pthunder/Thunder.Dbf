@@ -269,6 +269,14 @@ public sealed partial class MdxIndex
     /// </summary>
     internal int AllocatePage()
     {
+        // A rebuild hands over the pages of the tree it is replacing (see MdxTag.Refill).
+        if (_reusable is { Count: > 0 } reusable)
+        {
+            var reused = reusable.Dequeue();
+            WriteBlock(reused, new byte[BlockSize]);
+            return reused;
+        }
+
         // The stored page count is only advice; the file's real length decides.
         var page = (int)((Length + PageSize - 1) / PageSize);
         page = (page + PagesPerBlock - 1) / PagesPerBlock * PagesPerBlock;
@@ -277,6 +285,25 @@ public sealed partial class MdxIndex
         WriteBlock(page, new byte[BlockSize]);
         WriteHeaderInt(PageCountOffset, page + PagesPerBlock);
         return page;
+    }
+
+    // Pages a rebuild may take before the file grows: the nodes of the tree being replaced, which the
+    // rebuild itself just walked. That isn't the free list, whose pointers come from the file.
+    private Queue<int>? _reusable;
+
+    /// <summary>False inside a batch of deferred writes, which orders its writes by which pages are new.</summary>
+    internal bool OfferPages(IEnumerable<int> pages)
+    {
+        _reusable = _batch is null ? new Queue<int>(pages) : null;
+        return _reusable is not null;
+    }
+
+    /// <summary>Ends <see cref="OfferPages"/> and returns the pages nothing took.</summary>
+    internal IReadOnlyList<int> TakeBackPages()
+    {
+        var unused = _reusable?.ToList() ?? [];
+        _reusable = null;
+        return unused;
     }
 
     /// <summary>Puts a node back on the free list (its bytes 4-7 link to the next free node).</summary>
@@ -750,6 +777,50 @@ public sealed partial class MdxTag
         var root = _index.AllocatePage();
         WriteNode(root, [], 0);
         SetRoot(root);
+    }
+
+    /// <summary>
+    /// Replaces every key, building the new tree in the old one's nodes. <see cref="Clear"/> alone
+    /// frees those to a list that's never read back, so each rebuild or PACK added the tag's whole
+    /// size to the file, up to the 2 GB limit. Nodes left over (fewer keys than before) are freed for
+    /// programs that reuse them; a damaged tree's nodes can't be trusted, so it starts in new ones.
+    /// </summary>
+    internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
+    {
+        var pages = new List<int>();
+        try
+        {
+            Collect(RootPage(), pages, [], depth: 0); // the old root first, so the root stays where it is
+        }
+        catch (InvalidDataException)
+        {
+            pages.Clear();
+        }
+
+        if (!_index.OfferPages(pages))
+        {
+            foreach (var page in pages)
+                _index.FreePage(page); // as Clear() does
+        }
+        IReadOnlyList<int> unused;
+        try
+        {
+            var root = _index.AllocatePage();
+            WriteNode(root, [], 0);
+            SetRoot(root);
+            foreach (var (key, record) in keys)
+            {
+                // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
+                if (!IsUnique || FirstRecordFor(key) is null)
+                    Insert(key, record);
+            }
+        }
+        finally
+        {
+            unused = _index.TakeBackPages(); // on a failure too: nothing else may take these pages
+        }
+        foreach (var page in unused)
+            _index.FreePage(page);
     }
 
     private void Collect(int page, List<int> pages, HashSet<int> visited, int depth)

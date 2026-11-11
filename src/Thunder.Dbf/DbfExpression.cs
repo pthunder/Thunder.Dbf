@@ -565,9 +565,25 @@ public sealed class DbfExpression
 
         private decimal ReadNumber()
         {
+            // One decimal point at most, and not the dot that opens .AND., .OR. or .NOT.:
+            // "QTY=1.AND.ACTIVE" is the number 1 and then the operator.
             var start = _pos;
-            while (_pos < text.Length && (char.IsAsciiDigit(text[_pos]) || text[_pos] == '.'))
+            var seenPoint = false;
+            while (_pos < text.Length)
+            {
+                var c = text[_pos];
+                if (c == '.')
+                {
+                    if (seenPoint || (_pos + 1 < text.Length && char.IsAsciiLetter(text[_pos + 1])))
+                        break;
+                    seenPoint = true;
+                }
+                else if (!char.IsAsciiDigit(c))
+                {
+                    break;
+                }
                 _pos++;
+            }
             return decimal.Parse(text[start.._pos], CultureInfo.InvariantCulture);
         }
 

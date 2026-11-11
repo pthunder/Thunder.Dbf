@@ -33,6 +33,7 @@ public sealed class DbfDataReader : DbDataReader
     private IEnumerator<DbfRecord>? _rows;
     private DbfRecord? _current;
     private DbfRecord? _peeked;
+    private bool _hadRows;
     private object?[]? _values;
     private bool _closed;
 
@@ -80,12 +81,13 @@ public sealed class DbfDataReader : DbDataReader
         get
         {
             ThrowIfClosed();
-            if (_current is not null || _peeked is not null)
+            // "The result has rows", not "rows are left": it stays true after the last one is read.
+            if (_hadRows || _current is not null || _peeked is not null)
                 return true;
             if (_rows is not null && _rows.MoveNext())
             {
                 _peeked = _rows.Current;
-                return true;
+                return _hadRows = true;
             }
             return false;
         }
@@ -116,7 +118,7 @@ public sealed class DbfDataReader : DbDataReader
         if (_rows is not null && _rows.MoveNext())
         {
             _current = _rows.Current;
-            return true;
+            return _hadRows = true;
         }
         _current = null;
         return false;
@@ -333,7 +335,7 @@ public sealed class DbfDataReader : DbDataReader
     public override T GetFieldValue<T>(int ordinal)
     {
         var value = GetValue(ordinal);
-        if (typeof(T) == typeof(DateOnly) && value is DateTime moment)
+        if ((Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T)) == typeof(DateOnly) && value is DateTime moment)
             return (T)(object)DateOnly.FromDateTime(moment);
         if (value is T typed)
             return typed;

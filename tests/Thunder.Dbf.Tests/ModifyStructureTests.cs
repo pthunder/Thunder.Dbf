@@ -544,14 +544,29 @@ public sealed class ModifyStructureTests : IDisposable
     }
 
     [Theory]
-    [InlineData(0.12345678901234567, 20, 18)] // 17 significant digits: decimal keeps only 15
-    [InlineData(1234567.8901234567, 20, 10)]
-    [InlineData(0.1 + 0.2, 20, 18)]
+    [InlineData(0.12345678901234567, 20, 10)] // 17 significant digits, and the field has room for 10 decimals
+    [InlineData(1234567.8901234567, 20, 5)]
+    [InlineData(0.1 + 0.2, 20, 10)]
     public void A_double_with_more_digits_than_the_field_writes_is_a_loss(double value, int length, int decimals)
     {
         using var table = VfpTable("DIGITS", DbfFieldDefinition.Double("X"));
         table.Append(value);
         Assert.Equal(DbfErrorCode.InvalidValue, Assert.Throws<DbfException>(() => table.AlterField("X", DbfFieldDefinition.Numeric("X", length, decimals))).Code);
+    }
+
+    // A numeric field writes every digit a double has (it used to keep 15, so these counted as losses).
+    [Theory]
+    [InlineData(0.12345678901234567, 20, 18)]
+    [InlineData(1234567.8901234567, 20, 10)]
+    [InlineData(0.1 + 0.2, 20, 18)]
+    [InlineData(9007199254740992d, 20, 0)]
+    public void A_double_with_seventeen_digits_is_carried_when_the_field_has_room(double value, int length, int decimals)
+    {
+        using var table = VfpTable("ROOM", DbfFieldDefinition.Double("X"));
+        table.Append(value);
+        using var number = table.AlterField("X", DbfFieldDefinition.Numeric("X", length, decimals));
+        Assert.Equal(value, Convert.ToDouble(number.Read(0)["X"]));
+        Assert.Equal(0, number.StructureValuesChanged);
     }
 
     [Fact]

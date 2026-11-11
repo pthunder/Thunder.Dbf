@@ -135,9 +135,18 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
         return changes;
     }
 
-    // Enums are stored as their number, as legacy code stored codes.
-    private static object? ToField(object? value) =>
-        value is Enum e ? System.Convert.ChangeType(e, Enum.GetUnderlyingType(e.GetType()), CultureInfo.InvariantCulture) : value;
+    // Enums are stored as their number, as legacy code stored codes. A blank date or character reads
+    // as the property type's default (0001-01-01, '\0'), which no record holds as a real value, so it
+    // is written back as blank: reading a record and updating it leaves its blank fields blank.
+    private static object? ToField(object? value) => value switch
+    {
+        Enum e => System.Convert.ChangeType(e, Enum.GetUnderlyingType(e.GetType()), CultureInfo.InvariantCulture),
+        DateTime t when t == default => null,
+        DateOnly d when d == default => null,
+        DateTimeOffset o when o == default => null,
+        '\0' => null,
+        _ => value,
+    };
 
     private static int IndexOf(IReadOnlyList<DbfField> fields, string name)
     {
