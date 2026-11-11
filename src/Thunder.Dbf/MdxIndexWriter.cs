@@ -326,26 +326,37 @@ public sealed partial class MdxIndex
     {
         if (_batch is not null)
             return null; // a batch orders its writes by which pages are new
+        // Every page of every block is claimed once: a tag header, a node or a free block may not
+        // even partly cover another, and each must lie whole inside the file, past the header area.
         var firstNode = HeaderAreaSize / PageSize;
-        var owned = Tags.Select(t => t.HeaderPage).ToHashSet();
+        var claimed = new HashSet<int>();
+        bool Claim(int block)
+        {
+            if (block < firstNode || (long)(block + PagesPerBlock) * PageSize > Length)
+                return false;
+            for (var page = block; page < block + PagesPerBlock; page++)
+            {
+                if (!claimed.Add(page))
+                    return false;
+            }
+            return true;
+        }
+
         var plan = new Dictionary<int, List<int>>();
         try
         {
+            if (!Tags.All(t => Claim(t.HeaderPage)))
+                return null;
             foreach (var tag in Tags)
             {
                 var pages = tag.OwnPages();
-                foreach (var page in pages)
-                {
-                    if (page < firstNode || page % PagesPerBlock != 0 || (long)(page + PagesPerBlock) * PageSize > Length || !owned.Add(page))
-                        return null;
-                }
+                if (!pages.All(Claim))
+                    return null;
                 plan[tag.HeaderPage] = pages;
             }
-
-            var free = new HashSet<int>();
-            for (var page = ReadHeaderInt(FreePageOffset); page != 0; page = BinaryPrimitives.ReadInt32LittleEndian(ReadBlock(page).AsSpan(4)))
+            for (var block = ReadHeaderInt(FreePageOffset); block != 0; block = BinaryPrimitives.ReadInt32LittleEndian(ReadBlock(block).AsSpan(4)))
             {
-                if (page < firstNode || (long)(page + PagesPerBlock) * PageSize > Length || owned.Contains(page) || !free.Add(page))
+                if (!Claim(block))
                     return null;
             }
         }
@@ -814,35 +825,15 @@ public sealed partial class MdxTag
 
     // ---- rebuild --------------------------------------------------------------------------
 
-    /// <summary>
-    /// Empties the tag: frees every node and starts again with one empty leaf as root. A damaged tree
-    /// (a batch cut off mid-write can leave one reaching a page twice) frees nothing: its pages can't be
-    /// trusted to be its own, and dBASE reuses freed pages. They're left unused; the new tree doesn't need them.
-    /// </summary>
-    internal void Clear()
-    {
-        var pages = new List<int>();
-        try
-        {
-            Collect(RootPage(), pages, [], depth: 0);
-        }
-        catch (InvalidDataException)
-        {
-            pages.Clear();
-        }
-        foreach (var page in pages)
-            _index.FreePage(page);
-
-        var root = _index.AllocatePage();
-        WriteNode(root, [], 0);
-        SetRoot(root);
-    }
+    /// <summary>Empties the tag: a rebuild to no keys (see <see cref="Refill"/>).</summary>
+    internal void Clear() => Refill([]);
 
     /// <summary>
-    /// Replaces every key, building the new tree in the old one's nodes. <see cref="Clear"/> alone
-    /// frees those to a list that's never read back, so each rebuild or PACK added the tag's whole
-    /// size to the file, up to the 2 GB limit. Nodes left over (fewer keys than before) are freed for
-    /// programs that reuse them; a damaged tree's nodes can't be trusted, so it starts in new ones.
+    /// Replaces every key, building the new tree in the old one's nodes. Freeing those instead puts
+    /// them on a list that's never read back, so each rebuild or PACK added the tag's whole size to
+    /// the file, up to the 2 GB limit. Nodes left over (fewer keys than before) are freed for
+    /// programs that reuse them. When the index can't prove whose each page is, the new tree starts
+    /// in new pages and the old ones are left alone.
     /// </summary>
     internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
@@ -858,7 +849,12 @@ public sealed partial class MdxTag
             }
             else
             {
-                Clear(); // an index whose pages can't be proven each tag's own: new pages, as before
+                // Pages that can't be proven this tag's own are neither reused nor freed: freeing one
+                // that's already on the free list, or that another tag reaches, would loop the list
+                // or hand a live node to a program that reuses it. They're left as unused space.
+                var root = _index.AllocatePage();
+                WriteNode(root, [], 0);
+                SetRoot(root);
             }
             foreach (var (key, record) in keys)
             {

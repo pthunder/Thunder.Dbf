@@ -271,9 +271,12 @@ public sealed partial class CdxTag
     private bool HasNullMarker { get; init; }
 
     // Harbour keys a currency field as a number, an ordered double like any other, so the tag's own
-    // keys say which it is. Read as a double, a key of ten-thousandths is zero or subnormal (under
-    // 2^52 of them, some 450 billion in currency), which no stored number is; a real double is neither.
-    // Zero is the same eight bytes both ways. The lowest and highest keys are looked at, once.
+    // keys say which it is. A Harbour key is the double of a currency value: at least 0.0001 in size,
+    // within currency's range, and with no more than four decimals. Ten-thousandths read as a double
+    // are none of that: under 2^52 of them (some 450 billion in currency) they're subnormal, and above
+    // it they'd have to land on a four-decimal number between 454 and 484 trillion, bit for bit. Zero
+    // is the same eight bytes both ways and says nothing. The lowest and highest keys are looked at:
+    // one that can't be Harbour's settles it as Visual FoxPro's, and the answer is kept once there is one.
     private bool? _currencyLayout;
 
     internal bool IsCurrencyKey
@@ -284,29 +287,38 @@ public sealed partial class CdxTag
                 return false;
             if (_currencyLayout is { } known)
                 return known;
-            var sawNumber = false;
+            var sawHarbours = false;
             try
             {
                 foreach (var last in new[] { false, true })
                 {
-                    if (EdgeKey(last) is not { } key)
+                    if (EdgeKey(last) is not { } key || key.AsSpan().SequenceEqual(ZeroKey))
                         continue;
-                    var number = IndexKeys.ReadOrderedDouble(key);
-                    if (number == 0)
-                        continue;
-                    if (double.IsSubnormal(number))
+                    if (!CouldBeHarbourCurrency(IndexKeys.ReadOrderedDouble(key)))
                         return (_currencyLayout = true).Value;
-                    sawNumber = true;
+                    sawHarbours = true;
                 }
             }
             catch (InvalidDataException)
             {
                 return true; // a damaged tree: whatever reads it next reports that
             }
-            if (sawNumber)
+            if (sawHarbours)
                 return (_currencyLayout = false).Value;
-            return true; // empty, or all zero: nothing to go by yet, and Visual FoxPro's is the table's own
+            // Empty, or every key zero: nothing in the file says which, and Visual FoxPro's is the
+            // format's own. Not kept, so the next look can see keys that have arrived since.
+            return true;
         }
+    }
+
+    private static ReadOnlySpan<byte> ZeroKey => [0x80, 0, 0, 0, 0, 0, 0, 0];
+
+    private static bool CouldBeHarbourCurrency(double number)
+    {
+        if (!double.IsFinite(number) || Math.Abs(number) < 0.00005 || Math.Abs(number) > 922_337_203_685_478d)
+            return false;
+        var exact = decimal.Parse(number.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture);
+        return (double)decimal.Round(exact, 4) == number;
     }
 
     // The tag's lowest or highest stored key, or null when there's none (or the tree can't be followed).

@@ -543,6 +543,16 @@ public sealed class AuditRegressionTests : IDisposable
                 Assert.Contains(tag.SeekExact(record["PRICE"]), e => e.RecordNumber == record.RecordNumber);
         }
 
+        // Kept up to date the same way: a new record's key is a double too.
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
+        {
+            table.Append(77.25m, 77.25m);
+            using var kept = table.OpenStructuralIndex()!;
+            Assert.Equal(prices.Append(77.25m).Order(), kept["HB"].Entries().Select(e => Convert.ToDecimal(e.Key, CultureInfo.InvariantCulture)));
+            Assert.Contains(kept["HB"].SeekExact(77.25m), e => e.RecordNumber == 7);
+        }
+        prices = [.. prices, 77.25m];
+
         // And one Visual FoxPro's way, on the same field, is read its way.
         using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
             table.CreateIndexTag("VFP", "PRICE");
@@ -634,6 +644,37 @@ public sealed class AuditRegressionTests : IDisposable
         using (var table = DbfTable.Open(path, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
             table.RebuildIndex();
         AssertBothTagsWhole(path);
+
+        // Nothing of the damaged index was reused or freed: the page two tags reached is as it was,
+        // and the free list is still empty.
+        var after = File.ReadAllBytes(mdx);
+        var shared = BitConverter.ToInt32(bytes, headers[0] * 512);
+        Assert.Equal(bytes.AsSpan(shared * 512, 1024).ToArray(), after.AsSpan(shared * 512, 1024).ToArray());
+        Assert.Equal(0, BitConverter.ToInt32(after, 36));
+    }
+
+    [Theory]
+    [InlineData(1)]  // a free block that half covers a tag's root
+    [InlineData(-1)] // and one that half covers the block before it
+    public void Rebuilding_an_mdx_doesnt_reuse_pages_a_free_block_partly_covers(int shift)
+    {
+        var (path, mdx) = TwoTagTable(PathOf("overlap.dbf"));
+        var bytes = File.ReadAllBytes(mdx);
+        int header;
+        using (var table = DbfTable.Open(path))
+        using (var index = table.OpenProductionIndex()!)
+            header = index["CITY"].HeaderPage;
+        var root = BitConverter.ToInt32(bytes, header * 512);
+        BitConverter.GetBytes(root + shift).CopyTo(bytes, 36); // blocks are two pages: this one straddles two
+        File.WriteAllBytes(mdx, bytes);
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
+            table.RebuildIndex();
+        AssertBothTagsWhole(path);
+        var after = File.ReadAllBytes(mdx);
+        Assert.True(after.Length > bytes.Length); // new pages
+        Assert.Equal(bytes.AsSpan(root * 512, 1024).ToArray(), after.AsSpan(root * 512, 1024).ToArray());
+        Assert.Equal(root + shift, BitConverter.ToInt32(after, 36));
     }
 
     [Fact]
@@ -662,6 +703,36 @@ public sealed class AuditRegressionTests : IDisposable
         using var check = DbfTable.Open(path);
         using var rebuilt = check.OpenProductionIndex()!;
         Assert.All(new[] { "NAME", "CITY" }, name => Assert.NotEqual(root, BitConverter.ToInt32(after, rebuilt[name].HeaderPage * 512)));
+
+        // And the list is as it was: the page wasn't freed a second time, which would link it to itself.
+        Assert.Equal(root, BitConverter.ToInt32(after, 36));
+        Assert.Equal(bytes.AsSpan(root * 512, 1024).ToArray(), after.AsSpan(root * 512, 1024).ToArray());
+    }
+
+    [Theory]
+    [InlineData("450359962737.0496")]   // 2^52 ten-thousandths: the first key that isn't a subnormal double
+    [InlineData("460000000000000.1234")] // in the range where a key could pass for a double, but for its digits
+    [InlineData("-450359962737.0497")]
+    [InlineData("922337203685477.5807")]
+    [InlineData("-0.0001")]
+    public void A_Visual_FoxPro_currency_tag_holding_only_a_huge_value_is_still_read_as_currency(string text)
+    {
+        var price = decimal.Parse(text, CultureInfo.InvariantCulture);
+        var path = PathOf("huge.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Currency("PRICE")]))
+            table.Append(price);
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("P", "PRICE");
+
+        using var opened = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true);
+        using (var index = opened.OpenStructuralIndex()!)
+        {
+            Assert.Equal([price], index["P"].Entries().Select(e => (decimal)e.Key!));
+            Assert.Single(index["P"].SeekExact(price));
+        }
+        opened.Append(1.5m); // and kept up to date the same way
+        using var after = opened.OpenStructuralIndex()!;
+        Assert.Equal(new[] { price, 1.5m }.Order(), after["P"].Entries().Select(e => (decimal)e.Key!));
     }
 
     [Fact]
