@@ -912,7 +912,7 @@ public sealed partial class CdxTag : IMaintainedTag
         var bareType = BareField(table)?.Type;
         KeyKind? kind = blank switch
         {
-            _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,
+            _ when bareType == 'Y' && KeyLength == 8 && IsCurrencyKey => KeyKind.Currency, // else Harbour's: a double, below
             _ when bareType == 'T' && KeyLength == 8 => KeyKind.DateTime,
             string when KeyType == 'C' => KeyKind.Character,
             decimal or double when KeyLength == 8 => KeyKind.Double,

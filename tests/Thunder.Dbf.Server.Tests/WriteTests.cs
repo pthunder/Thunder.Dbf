@@ -294,9 +294,14 @@ public sealed class WriteTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, dotted.StatusCode);
         Assert.Equal(people.GetProperty("records").ToString(), (await dotted.Json()).GetProperty("records").ToString());
 
-        var doubled = await client.GetAsync("/tables/STAFF.dbf.dbf/records?take=1");
-        Assert.Equal(HttpStatusCode.OK, doubled.StatusCode);
-        Assert.Equal(people.GetProperty("records").ToString(), (await doubled.Json()).GetProperty("records").ToString());
+        // By its file name, and by the name it's listed under (which isn't STAFF.DBF's).
+        foreach (var name in new[] { "STAFF.dbf.dbf", "STAFF.dbf" })
+        {
+            var doubled = await client.GetAsync($"/tables/{name}/records?take=1");
+            Assert.Equal(HttpStatusCode.OK, doubled.StatusCode);
+            Assert.Equal(people.GetProperty("records").ToString(), (await doubled.Json()).GetProperty("records").ToString());
+        }
+        Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/tables/people.dbf/records?take=1")).StatusCode); // the optional extension
 
         var staff = await (await client.GetAsync("/tables/STAFF/records?take=1")).Json();
         Assert.Equal("Ada", staff.GetProperty("records")[0].GetProperty("NAME").GetString());

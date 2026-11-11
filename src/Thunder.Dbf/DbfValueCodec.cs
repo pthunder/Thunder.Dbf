@@ -193,6 +193,8 @@ internal static class DbfValueCodec
 
             case 'D':
             {
+                if (value is string text && string.IsNullOrWhiteSpace(text))
+                    break; // empty text is a blank date, as it is a blank character field: blank, and not .NULL.
                 var date = value switch
                 {
                     DateOnly d => d,
@@ -244,6 +246,8 @@ internal static class DbfValueCodec
                 BinaryPrimitives.WriteDoubleLittleEndian(target, Convert.ToDouble(value, CultureInfo.InvariantCulture));
                 break;
             case 'T':
+                if (value is string empty && string.IsNullOrWhiteSpace(empty))
+                    break; // a blank datetime (zeros), and not .NULL.
                 var moment = value switch
                 {
                     DateTime dt => dt,

@@ -1048,12 +1048,9 @@ public sealed partial class DbfTable
     // anything moves. One opened after this is caught by the moves themselves on Windows, and by an
     // open's identity check elsewhere (see OpenTableFile).
     // An unshared open of a table's file, as a test that nothing else has it or to hold it. Refused
-    // up front when this process holds locks on it: see DbfLocks.ThrowIfHeldHere.
-    private static FileStream OpenUnshared(string file)
-    {
-        DbfLocks.ThrowIfHeldHere(file);
-        return new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-    }
+    // without being tried when this process holds locks on it: see DbfLocks.OpenUnshared.
+    private static FileStream OpenUnshared(string file) =>
+        DbfLocks.OpenUnshared(file, () => new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None));
 
     private static void ThrowIfAnyInUse(string path, RestructureManifest manifest)
     {

@@ -72,10 +72,13 @@ public sealed class TableStore : IDisposable
     /// </summary>
     public string? Find(string requested)
     {
-        var bare = requested.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase) ? requested[..^4] : requested;
+        // A name as it's listed wins: with X.dbf and X.dbf.dbf side by side, "X.dbf" is the second
+        // one's listed name. Only then is a trailing ".dbf" taken as the optional extension.
         var names = _reader.TableNames;
-        return names.FirstOrDefault(t => string.Equals(t, bare, StringComparison.OrdinalIgnoreCase))
-            ?? names.FirstOrDefault(t => string.Equals(t, requested, StringComparison.OrdinalIgnoreCase)); // X.dbf.dbf, asked for as X.dbf
+        if (names.FirstOrDefault(t => string.Equals(t, requested, StringComparison.OrdinalIgnoreCase)) is { } listed)
+            return listed;
+        var bare = requested.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase) ? requested[..^4] : requested;
+        return names.FirstOrDefault(t => string.Equals(t, bare, StringComparison.OrdinalIgnoreCase));
     }
 
     public IReadOnlyList<string> TableNames => _reader.TableNames;

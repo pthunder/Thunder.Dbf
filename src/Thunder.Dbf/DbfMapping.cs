@@ -115,11 +115,11 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
     }
 
     /// <summary>Values in field order for Append; unmapped fields are left empty.</summary>
-    public object?[] ToValues(T item, int fieldCount)
+    public object?[] ToValues(T item, IReadOnlyList<DbfField> fields)
     {
-        var values = new object?[fieldCount];
+        var values = new object?[fields.Count];
         foreach (var (property, field) in _fields)
-            values[field] = ToField(property.GetValue(item));
+            values[field] = ToField(property.GetValue(item), fields[field]);
         return values;
     }
 
@@ -130,7 +130,7 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
         foreach (var (property, field) in _fields)
         {
             if (property.CanRead)
-                changes[fields[field].Name] = ToField(property.GetValue(item));
+                changes[fields[field].Name] = ToField(property.GetValue(item), fields[field]);
         }
         return changes;
     }
@@ -138,15 +138,20 @@ internal sealed class DbfMapper<[DynamicallyAccessedMembers(DbfMapper.Members)] 
     // Enums are stored as their number, as legacy code stored codes. A blank date or character reads
     // as the property type's default (0001-01-01, '\0'), which no record holds as a real value, so it
     // is written back as blank: reading a record and updating it leaves its blank fields blank.
-    private static object? ToField(object? value) => value switch
+    private static object? ToField(object? value, DbfField field) => value switch
     {
         Enum e => System.Convert.ChangeType(e, Enum.GetUnderlyingType(e.GetType()), CultureInfo.InvariantCulture),
-        DateTime t when t == default => null,
-        DateOnly d when d == default => null,
-        DateTimeOffset o when o == default => null,
-        '\0' => null,
+        DateTime t when t == default => Blank(field, value),
+        DateOnly d when d == default => Blank(field, value),
+        DateTimeOffset o when o == default => Blank(field, value),
+        '\0' => Blank(field, value),
         _ => value,
     };
+
+    // In a field that can hold a Visual FoxPro .NULL., a null means .NULL., and a blank isn't one:
+    // there the blank is written as empty text, which a character, date or datetime field takes as blank.
+    private static object? Blank(DbfField field, object value) =>
+        !field.IsNullable ? null : field.Type is 'C' or 'V' or 'D' or 'T' ? "" : value;
 
     private static int IndexOf(IReadOnlyList<DbfField> fields, string name)
     {
@@ -247,7 +252,7 @@ public static class DbfTypedRecords
 
     /// <summary>Appends <paramref name="item"/> and returns the new record's 0-based index. Unmapped fields are left blank.</summary>
     public static int AppendRecord<[DynamicallyAccessedMembers(DbfMapper.Members)] T>(this DbfTable table, T item) where T : class, new() =>
-        table.Append(DbfMapper<T>.For(table).ToValues(item, table.Fields.Count));
+        table.Append(DbfMapper<T>.For(table).ToValues(item, table.Fields));
 
     /// <summary>
     /// Writes every mapped property of <paramref name="item"/> to record <paramref name="index"/>, through

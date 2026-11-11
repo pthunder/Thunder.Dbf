@@ -1512,6 +1512,7 @@ public sealed partial class DbfTable : IDisposable
                 Header.WriteAutoIncrement(_stream, field);
             _dirtyCounters.Clear();
             CommitHeader();
+            CrashPoint?.Invoke("header committed");
         }
         catch
         {
@@ -1525,7 +1526,11 @@ public sealed partial class DbfTable : IDisposable
         foreach (var (changes, recordNumber) in pending)
             ApplyIndexChanges(changes, recordNumber);
         CommitIndexes();
-        if (_appendNoted)
+        // An earlier commit of this batch that failed after its rows were counted dropped their keys
+        // (DropUncommittedKeys): the note is what tells the next writer, here or in another process,
+        // that those rows' keys are still owed. AppendRange commits again on its way out of a failure,
+        // and that commit must not take the note with it.
+        if (_appendNoted && !_indexesNeedRebuild)
         {
             DbfJournal.Clear(_path!);
             _appendNoted = false;

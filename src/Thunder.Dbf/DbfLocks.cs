@@ -301,15 +301,13 @@ internal sealed class DbfLocks
     }
 
     /// <summary>
-    /// Refuses an unshared open of a file this process holds locks on. It would fail anyway (the
-    /// file is open here), but off Windows the failed open closes its descriptor on the way out,
-    /// and that close drops those locks.
+    /// An unshared open of a file that may be open in this process. While locks are held on it here
+    /// it's refused without being tried: it would fail anyway, but off Windows a failed open closes
+    /// its descriptor on the way out, and that close drops those locks. The look and the open happen
+    /// under the file's gate, so no lock can be taken between them.
     /// </summary>
-    internal static void ThrowIfHeldHere(string path)
-    {
-        if (!OperatingSystem.IsWindows() && FileRegistry.TryGet(path) is { AnyHeld: true })
-            throw new IOException("The file is being used by another process: this one, which holds locks on it through another table.", SharingViolation);
-    }
+    internal static FileStream OpenUnshared(string path, Func<FileStream> open) =>
+        OperatingSystem.IsWindows() ? open() : FileRegistry.For(path).OpenUnlessHeld(open);
 
     private const int SharingViolation = unchecked((int)0x80070020);
 
@@ -412,12 +410,13 @@ internal sealed class DbfLocks
             }
         }
 
-        public bool AnyHeld
+        public FileStream OpenUnlessHeld(Func<FileStream> open)
         {
-            get
+            lock (_gate)
             {
-                lock (_gate)
-                    return _held.Count > 0;
+                if (_held.Count > 0)
+                    throw new IOException("The file is being used by another process: this one, which holds locks on it through another table.", SharingViolation);
+                return open();
             }
         }
 
@@ -435,16 +434,15 @@ internal sealed class DbfLocks
 
         public void CloseDeferredIfIdle()
         {
-            List<FileStream>? closing = null;
+            // Closed under the gate, like CloseOrDefer: a lock claimed while these close would be dropped.
             lock (_gate)
             {
-                if (_held.Count == 0 && _deferred.Count > 0)
-                {
-                    closing = [.. _deferred];
-                    _deferred.Clear();
-                }
+                if (_held.Count != 0 || _deferred.Count == 0)
+                    return;
+                foreach (var stream in _deferred)
+                    stream.Dispose();
+                _deferred.Clear();
             }
-            closing?.ForEach(s => s.Dispose());
         }
     }
 }

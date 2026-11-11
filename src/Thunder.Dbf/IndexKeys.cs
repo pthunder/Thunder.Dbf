@@ -33,17 +33,9 @@ internal static class IndexKeys
         object? value;
         try
         {
-            var parsed = DbfExpression.Parse(expression);
-            try
-            {
-                value = parsed.Evaluate(BlankRecord(table));
-            }
-            catch (DivideByZeroException)
-            {
-                // TOTAL/QTY on a blank record divides by zero. The type is the same whatever the
-                // numbers are, so ask again with every number 1.
-                value = parsed.Evaluate(BlankRecord(table, number: 1));
-            }
+            // A blank record has every number at 0, so TOTAL/QTY divides by zero on it. Only the
+            // type is wanted, and that's the same whatever the numbers are.
+            value = DbfExpression.Parse(expression).EvaluateForType(BlankRecord(table));
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
                                        or FormatException or ArgumentException or ArithmeticException)
@@ -63,7 +55,7 @@ internal static class IndexKeys
 
     // Every field empty: spaces, zero, false, blank date. Built by hand rather than decoded from a
     // space-filled buffer so binary fields (I, Y, B) and nullable fields still produce their type.
-    internal static DbfRecord BlankRecord(DbfTable table, int number = 0)
+    internal static DbfRecord BlankRecord(DbfTable table)
     {
         var values = new object?[table.Fields.Count];
         for (var i = 0; i < values.Length; i++)
@@ -72,8 +64,8 @@ internal static class IndexKeys
             values[i] = DbfValueCodec.IsMemoField(field) ? "" : field.Type switch
             {
                 'C' or 'V' => "",
-                'N' or 'F' or 'B' or 'Y' => (decimal)number,
-                'I' or '+' => number,
+                'N' or 'F' or 'B' or 'Y' => 0m,
+                'I' or '+' => 0,
                 'L' => false,
                 _ => null,
             };

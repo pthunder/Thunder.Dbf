@@ -287,15 +287,73 @@ public sealed partial class MdxIndex
         return page;
     }
 
-    // Pages a rebuild may take before the file grows: the nodes of the tree being replaced, which the
-    // rebuild itself just walked. That isn't the free list, whose pointers come from the file.
+    // Pages a rebuild may take before the file grows: the nodes of the tree being replaced. That isn't
+    // the free list, whose pointers come from the file and aren't followed.
     private Queue<int>? _reusable;
 
-    /// <summary>False inside a batch of deferred writes, which orders its writes by which pages are new.</summary>
-    internal bool OfferPages(IEnumerable<int> pages)
+    internal void OfferPages(IEnumerable<int> pages) => _reusable = new Queue<int>(pages);
+
+    // Which pages each tag may reuse, by tag header page: worked out for the whole index before a
+    // rebuild changes any tag, and only when the file proves each page is one tag's alone.
+    private Dictionary<int, List<int>>? _rebuildPages;
+    private bool _rebuildPlanned;
+
+    /// <summary>
+    /// The nodes of <paramref name="tag"/>'s tree, for its rebuild to build the new tree in; null when
+    /// the rebuild must use new pages. A page is reused only if nothing else could own it: every
+    /// tag's tree was walked whole, no page is reached twice (in one tree or in two), none is a tag
+    /// header or lies outside the file, and none is on the free list. An index that fails any of
+    /// that (a cut-off write can leave one so) is rebuilt as before, in new pages.
+    /// </summary>
+    internal List<int>? PagesToReuse(MdxTag tag)
     {
-        _reusable = _batch is null ? new Queue<int>(pages) : null;
-        return _reusable is not null;
+        if (!_rebuildPlanned)
+        {
+            _rebuildPages = PlanReuse();
+            _rebuildPlanned = true;
+        }
+        return _rebuildPages is { } plan && plan.Remove(tag.HeaderPage, out var pages) ? pages : null;
+    }
+
+    /// <summary>The plan covers one rebuild: it's dropped when that ends, in a commit or a failure.</summary>
+    internal void ForgetRebuildPlan()
+    {
+        _rebuildPages = null;
+        _rebuildPlanned = false;
+    }
+
+    private Dictionary<int, List<int>>? PlanReuse()
+    {
+        if (_batch is not null)
+            return null; // a batch orders its writes by which pages are new
+        var firstNode = HeaderAreaSize / PageSize;
+        var owned = Tags.Select(t => t.HeaderPage).ToHashSet();
+        var plan = new Dictionary<int, List<int>>();
+        try
+        {
+            foreach (var tag in Tags)
+            {
+                var pages = tag.OwnPages();
+                foreach (var page in pages)
+                {
+                    if (page < firstNode || page % PagesPerBlock != 0 || (long)(page + PagesPerBlock) * PageSize > Length || !owned.Add(page))
+                        return null;
+                }
+                plan[tag.HeaderPage] = pages;
+            }
+
+            var free = new HashSet<int>();
+            for (var page = ReadHeaderInt(FreePageOffset); page != 0; page = BinaryPrimitives.ReadInt32LittleEndian(ReadBlock(page).AsSpan(4)))
+            {
+                if (page < firstNode || (long)(page + PagesPerBlock) * PageSize > Length || owned.Contains(page) || !free.Add(page))
+                    return null;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException)
+        {
+            return null;
+        }
+        return plan;
     }
 
     /// <summary>Ends <see cref="OfferPages"/> and returns the pages nothing took.</summary>
@@ -321,6 +379,7 @@ public sealed partial class MdxIndex
     {
         var today = DateTime.Today;
         WriteRaw(UpdatedOffset, [(byte)(today.Year - 1900), (byte)today.Month, (byte)today.Day]);
+        ForgetRebuildPlan();
         if (_batch is null)
             DbfTable.FlushToDisk(_stream, toDisk); // a batch writes and flushes when it ends
     }
@@ -787,27 +846,20 @@ public sealed partial class MdxTag
     /// </summary>
     internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
-        var pages = new List<int>();
+        IReadOnlyList<int> unused = [];
         try
         {
-            Collect(RootPage(), pages, [], depth: 0); // the old root first, so the root stays where it is
-        }
-        catch (InvalidDataException)
-        {
-            pages.Clear();
-        }
-
-        if (!_index.OfferPages(pages))
-        {
-            foreach (var page in pages)
-                _index.FreePage(page); // as Clear() does
-        }
-        IReadOnlyList<int> unused;
-        try
-        {
-            var root = _index.AllocatePage();
-            WriteNode(root, [], 0);
-            SetRoot(root);
+            if (_index.PagesToReuse(this) is { } pages)
+            {
+                _index.OfferPages(pages); // the old root first, so the root stays where it is
+                var root = _index.AllocatePage();
+                WriteNode(root, [], 0);
+                SetRoot(root);
+            }
+            else
+            {
+                Clear(); // an index whose pages can't be proven each tag's own: new pages, as before
+            }
             foreach (var (key, record) in keys)
             {
                 // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
@@ -815,12 +867,23 @@ public sealed partial class MdxTag
                     Insert(key, record);
             }
         }
-        finally
+        catch
         {
-            unused = _index.TakeBackPages(); // on a failure too: nothing else may take these pages
+            _index.TakeBackPages(); // nothing else may take these pages
+            _index.ForgetRebuildPlan();
+            throw;
         }
+        unused = _index.TakeBackPages();
         foreach (var page in unused)
             _index.FreePage(page);
+    }
+
+    /// <summary>Every node of the tag's tree, the root first. Throws <see cref="InvalidDataException"/> for a tree that reaches a page twice.</summary>
+    internal List<int> OwnPages()
+    {
+        var pages = new List<int>();
+        Collect(RootPage(), pages, [], depth: 0);
+        return pages;
     }
 
     private void Collect(int page, List<int> pages, HashSet<int> visited, int depth)

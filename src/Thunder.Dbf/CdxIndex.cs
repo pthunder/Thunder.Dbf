@@ -267,8 +267,70 @@ public sealed partial class CdxTag
     // A currency field's key is its stored ten-thousandths, big-endian with the sign bit flipped, not a
     // double. A nullable character field's key has a marker byte in front: 0x80 then the value, and
     // all zeros for .NULL.
-    private bool IsCurrencyKey { get; init; }
+    private bool IsBareCurrencyField { get; init; }
     private bool HasNullMarker { get; init; }
+
+    // Harbour keys a currency field as a number, an ordered double like any other, so the tag's own
+    // keys say which it is. Read as a double, a key of ten-thousandths is zero or subnormal (under
+    // 2^52 of them, some 450 billion in currency), which no stored number is; a real double is neither.
+    // Zero is the same eight bytes both ways. The lowest and highest keys are looked at, once.
+    private bool? _currencyLayout;
+
+    internal bool IsCurrencyKey
+    {
+        get
+        {
+            if (!IsBareCurrencyField)
+                return false;
+            if (_currencyLayout is { } known)
+                return known;
+            var sawNumber = false;
+            try
+            {
+                foreach (var last in new[] { false, true })
+                {
+                    if (EdgeKey(last) is not { } key)
+                        continue;
+                    var number = IndexKeys.ReadOrderedDouble(key);
+                    if (number == 0)
+                        continue;
+                    if (double.IsSubnormal(number))
+                        return (_currencyLayout = true).Value;
+                    sawNumber = true;
+                }
+            }
+            catch (InvalidDataException)
+            {
+                return true; // a damaged tree: whatever reads it next reports that
+            }
+            if (sawNumber)
+                return (_currencyLayout = false).Value;
+            return true; // empty, or all zero: nothing to go by yet, and Visual FoxPro's is the table's own
+        }
+    }
+
+    // The tag's lowest or highest stored key, or null when there's none (or the tree can't be followed).
+    private byte[]? EdgeKey(bool last)
+    {
+        var offset = RootOffset();
+        for (var depth = 0; depth <= MaxDepth; depth++)
+        {
+            var page = _index.Read(offset, PageLength);
+            var attributes = BinaryPrimitives.ReadUInt16LittleEndian(page);
+            var count = BinaryPrimitives.ReadUInt16LittleEndian(page.AsSpan(2));
+            if (attributes > 7 || count == 0)
+                return null;
+            if ((attributes & LeafAttribute) != 0)
+                return DecodeLeaf(page, count, offset).Keys[last ? count - 1 : 0];
+            var itemLength = KeyLength + 8;
+            if (InteriorHeaderLength + (long)count * itemLength > PageLength)
+                return null;
+            offset = BinaryPrimitives.ReadUInt32BigEndian(page.AsSpan(InteriorHeaderLength + (last ? count - 1 : 0) * itemLength + KeyLength + 4));
+            if (offset is 0 or NoPage)
+                return null;
+        }
+        return null;
+    }
     internal long HeaderOffset { get; }
 
     /// <summary>A collation name or code page some writer stored in the tag header, or null when there's none.</summary>
@@ -308,7 +370,7 @@ public sealed partial class CdxTag
 
         return new CdxTag(index, headerOffset, root, name)
         {
-            IsCurrencyKey = bare is { Type: 'Y' } && keyLength == 8,
+            IsBareCurrencyField = bare is { Type: 'Y' } && keyLength == 8,
             HasNullMarker = bare is { Type: 'C', IsNullable: true } && keyLength == bare.Length + 1,
             KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,

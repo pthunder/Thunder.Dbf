@@ -161,7 +161,13 @@ public sealed class AuditRegressionTests : IDisposable
         // index, and a writable open of its table, from opening.
         Assert.Equal('N', IndexKeys.InferKeyType("TOTAL/QTY", table, fallback: 'C'));
         Assert.Equal('C', IndexKeys.InferKeyType("STR(TOTAL/QTY,10,2)", table, fallback: 'L'));
-        Assert.Equal('C', IndexKeys.InferKeyType("100/(QTY-QTY)", table, fallback: 'C')); // zero whatever the numbers: the fallback
+        Assert.Equal('N', IndexKeys.InferKeyType("TOTAL/(QTY-TOTAL)", table, fallback: 'C')); // zero on any made-up record
+        Assert.Equal('N', IndexKeys.InferKeyType("100/(QTY-QTY)", table, fallback: 'C'));
+        Assert.Equal('L', IndexKeys.InferKeyType("TOTAL/QTY>1", table, fallback: 'C'));
+
+        // Asking for the type doesn't change what a real record's key does.
+        table.Append(5m, 0);
+        Assert.Throws<DivideByZeroException>(() => DbfExpression.Parse("TOTAL/QTY").Evaluate(table.Read(0)));
     }
 
     [Theory]
@@ -500,5 +506,193 @@ public sealed class AuditRegressionTests : IDisposable
         var answer = process.StandardOutput.ReadLine();
         process.WaitForExit();
         return answer ?? "no answer";
+    }
+
+    // ---- what a second review of the fixes above found -------------------------------------
+
+    [Fact]
+    public void A_currency_tag_keyed_as_a_number_the_way_Harbour_does_is_still_read_that_way()
+    {
+        // Harbour keys a currency field as an ordered double, Visual FoxPro as its ten-thousandths.
+        // A tag over the numeric twin of the currency field, renamed onto the currency field, is
+        // byte for byte what Harbour writes.
+        var path = PathOf("hb.dbf");
+        decimal[] prices = [1m, -2.5m, 0m, 1234.5678m, 99999.9999m, -0.0001m];
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+                   [DbfFieldDefinition.Currency("PRICE"), DbfFieldDefinition.Numeric("AMOUNT", 14, 4)]))
+        {
+            foreach (var price in prices)
+                table.Append(price, price);
+        }
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("HB", "AMOUNT");
+        var cdxPath = Path.ChangeExtension(path, ".cdx");
+        var cdx = File.ReadAllBytes(cdxPath);
+        var at = cdx.AsSpan().IndexOf("AMOUNT"u8);
+        Assert.True(at > 0 && cdx.AsSpan(at + 1).IndexOf("AMOUNT"u8) < 0);
+        "PRICE\0"u8.CopyTo(cdx.AsSpan(at));
+        File.WriteAllBytes(cdxPath, cdx);
+
+        using (var opened = DbfTable.Open(path))
+        using (var index = opened.OpenStructuralIndex()!)
+        {
+            var tag = index["HB"];
+            Assert.Equal("PRICE", tag.Expression);
+            Assert.Equal(prices.Order(), tag.Entries().Select(e => Convert.ToDecimal(e.Key, CultureInfo.InvariantCulture)));
+            foreach (var record in opened.ReadAll())
+                Assert.Contains(tag.SeekExact(record["PRICE"]), e => e.RecordNumber == record.RecordNumber);
+        }
+
+        // And one Visual FoxPro's way, on the same field, is read its way.
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("VFP", "PRICE");
+        using var again = DbfTable.Open(path);
+        using var both = again.OpenStructuralIndex()!;
+        Assert.Equal(prices.Order(), both["VFP"].Entries().Select(e => (decimal)e.Key!));
+        Assert.Equal(prices.Order(), both["HB"].Entries().Select(e => Convert.ToDecimal(e.Key, CultureInfo.InvariantCulture)));
+    }
+
+    public sealed class Nullable
+    {
+        public string? Name { get; set; }
+        public char Code { get; set; }
+        public DateTime Seen { get; set; }
+    }
+
+    [Fact]
+    public void A_blank_in_a_nullable_field_is_written_back_blank_and_not_as_NULL()
+    {
+        var path = PathOf("nul.dbf");
+        using var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+        [
+            DbfFieldDefinition.Character("NAME", 5),
+            DbfFieldDefinition.Character("CODE", 1) with { Nullable = true },
+            DbfFieldDefinition.Date("SEEN") with { Nullable = true },
+        ]);
+        table.Append("a", "", "");      // blank, not .NULL.: empty text is a blank date too
+        table.Append("b", null, null);  // .NULL.
+        Assert.False(table.Read(0).IsNull(1));
+        Assert.False(table.Read(0).IsNull(2));
+        Assert.Null(table.Read(0)["SEEN"]);
+        Assert.True(table.Read(1).IsNull(1));
+
+        var row = table.Read<Nullable>(0);
+        row.Name = "c";
+        table.UpdateRecord(0, row);
+        Assert.Equal("c", table.Read(0)["NAME"]);
+        Assert.False(table.Read(0).IsNull(1)); // still a blank
+        Assert.False(table.Read(0).IsNull(2));
+        Assert.Null(table.Read(0)["SEEN"]);
+        Assert.Equal("", table.Read(0)["CODE"]);
+
+        table.AppendRecord(new Nullable { Name = "d" });
+        Assert.False(table.Read(2).IsNull(1));
+        Assert.False(table.Read(2).IsNull(2));
+    }
+
+    private static (string Path, string Mdx) TwoTagTable(string path)
+    {
+        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV,
+                   [DbfFieldDefinition.Character("NAME", 10), DbfFieldDefinition.Character("CITY", 10)]))
+        {
+            table.FlushWritesToDisk = false;
+            table.AppendRange(Enumerable.Range(0, 300).Select(i => new object?[] { "N" + (i * 7 % 300), "C" + (i * 11 % 300) }));
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            table.CreateIndexTag("NAME", "NAME");
+            table.CreateIndexTag("CITY", "CITY");
+        }
+        return (path, Path.ChangeExtension(path, ".mdx"));
+    }
+
+    private static void AssertBothTagsWhole(string path)
+    {
+        using var table = DbfTable.Open(path, writable: true);
+        using var index = table.OpenProductionIndex()!;
+        foreach (var name in new[] { "NAME", "CITY" })
+        {
+            Assert.Equal(table.ReadAll().Select(r => (string)r[name]!).Order(StringComparer.Ordinal), index[name].Entries().Select(e => (string)e.Key!));
+            foreach (var record in table.ReadAll().Take(40))
+                Assert.Equal(record[name], table.Read(index[name].SeekExact(record[name]).First().RecordNumber - 1)[name]);
+        }
+    }
+
+    [Fact]
+    public void Rebuilding_an_mdx_whose_tags_share_a_page_doesnt_build_one_tag_in_anothers_new_tree()
+    {
+        var (path, mdx) = TwoTagTable(PathOf("shared.dbf"));
+        // Damage: the second tag's header is pointed at the first tag's root, so both trees reach it.
+        var bytes = File.ReadAllBytes(mdx);
+        int[] headers;
+        using (var table = DbfTable.Open(path))
+        using (var index = table.OpenProductionIndex()!)
+            headers = [index["NAME"].HeaderPage, index["CITY"].HeaderPage];
+        bytes.AsSpan(headers[0] * 512, 4).CopyTo(bytes.AsSpan(headers[1] * 512, 4));
+        File.WriteAllBytes(mdx, bytes);
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
+            table.RebuildIndex();
+        AssertBothTagsWhole(path);
+    }
+
+    [Fact]
+    public void Rebuilding_an_mdx_never_reuses_a_page_that_is_on_its_free_list()
+    {
+        var (path, mdx) = TwoTagTable(PathOf("freed.dbf"));
+        // Damage, as a rebuild cut off between freeing a tree and naming its new root leaves it: a
+        // tag's root is also the head of the free list.
+        var bytes = File.ReadAllBytes(mdx);
+        int header;
+        using (var table = DbfTable.Open(path))
+        using (var index = table.OpenProductionIndex()!)
+            header = index["NAME"].HeaderPage;
+        var root = BitConverter.ToInt32(bytes, header * 512);
+        BitConverter.GetBytes(root).CopyTo(bytes, 36);
+        File.WriteAllBytes(mdx, bytes);
+        var length = bytes.Length;
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true, allowUnmaintainedIndexes: true))
+            table.RebuildIndex();
+        AssertBothTagsWhole(path);
+
+        // Built in new pages: no tag's root is the page a program that reuses the list would hand out.
+        var after = File.ReadAllBytes(mdx);
+        Assert.True(after.Length > length);
+        using var check = DbfTable.Open(path);
+        using var rebuilt = check.OpenProductionIndex()!;
+        Assert.All(new[] { "NAME", "CITY" }, name => Assert.NotEqual(root, BitConverter.ToInt32(after, rebuilt[name].HeaderPage * 512)));
+    }
+
+    [Fact]
+    public void A_commit_that_fails_after_the_header_went_out_keeps_the_note_that_keys_are_owed()
+    {
+        var path = PathOf("owed.dbf");
+        using (var created = DbfTable.Create(path, DbfTableFormat.DbaseIV, [DbfFieldDefinition.Character("NAME", 10)]))
+            created.Append("ONE");
+        using (var exclusive = DbfTable.Open(path, writable: true, exclusive: true))
+            exclusive.CreateIndexTag("NAME", "NAME", unique: true);
+
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UseJournal = true;
+            var failed = false;
+            table.CrashPoint = point =>
+            {
+                if (point == "header committed" && !failed)
+                {
+                    failed = true;
+                    throw new IOException("The flush after the header failed.");
+                }
+            };
+            // AppendRange commits again on its way out of a failure. That second commit succeeds, with
+            // the row counted and its key dropped, and used to clear the journal's note as if all were done.
+            Assert.Throws<IOException>(() => table.AppendRange([["TWO"]], commitEvery: 1));
+            table.CrashPoint = null;
+
+            Assert.Equal(2, table.RecordCount); // counted
+            Assert.True(DbfJournal.IsPending(path));
+            Assert.Equal(DbfErrorCode.IndexDamaged, Assert.Throws<DbfException>(() => table.Append("THREE")).Code);
+        }
     }
 }
