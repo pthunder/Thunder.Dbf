@@ -10,7 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-Found by reading the whole library through for bugs, and checked again by a release audit of the fixes; each has a test that fails without the fix.
+## [0.4.3] - 2026-11-11
+
+Eighteen bug fixes, found by reading the whole library through for bugs and checked again by a release audit of the fixes. The ones most worth upgrading for: an `.mdx` that grew with every rebuild or `Pack()`, FoxPro currency and nullable index tags that couldn't be sought, a `Pack()` whose failed safety copy could be mistaken for the table, and, on Linux, locks one table could drop for another in the same process. Each has a test that fails without the fix, bar the PostgreSQL one (the tests run against SQLite). Checked on Windows, Linux and macOS.
+
+**Upgrading from 0.4.2:** nothing in the public API changed. Three things behave differently:
+- A table with a `.cdx` currency tag keyed the way Harbour keys one now refuses writes (`IndexWouldGoStale`). Visual FoxPro's keys used to be written into it.
+- `Append` and `Update` take `""` for a date or datetime field as blank, where they threw.
+- `ModifyStructure` carries a 16- or 17-digit `double` into a numeric field wide enough for it, where it called that a loss.
 
 ### Fixed
 
