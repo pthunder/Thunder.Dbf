@@ -83,7 +83,7 @@ public sealed partial class CdxIndex : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             throw;
         }
     }
@@ -120,6 +120,9 @@ public sealed partial class CdxIndex : IDisposable
             _table = table,
         };
         index.Tags = index.LoadTags();
+        // Settled now, while the table it was opened with is there to ask (see ResolveCurrencyLayout).
+        foreach (var tag in index.Tags)
+            tag.ResolveCurrencyLayout();
         if (index.OpenedForWriting)
             index.PrepareForWriting();
         return index;
@@ -159,8 +162,10 @@ public sealed partial class CdxIndex : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
+        // On Linux closing any handle drops this process's locks on the file: the FoxPro index lock
+        // another table's CdxIndex holds, too. So the close waits while any are held.
         if (!_leaveOpen)
-            _stream.Dispose();
+            DbfLocks.Close(_stream);
     }
 
     /// <summary>Reads <paramref name="length"/> bytes at <paramref name="offset"/>, which must be page-aligned and inside the file.</summary>
@@ -260,6 +265,104 @@ public sealed partial class CdxTag
 
     /// <summary>True when keys were upper-cased as they were stored (a CLIP / Harbour extension).</summary>
     internal bool IgnoreCase { get; private init; }
+
+    // Two Visual FoxPro key layouts that aren't the plain ones, as VFP 9 writes them for a bare field.
+    // A currency field's key is its stored ten-thousandths, big-endian with the sign bit flipped, not a
+    // double. A nullable character field's key has a marker byte in front: 0x80 then the value, and
+    // all zeros for .NULL.
+    private DbfField? CurrencyField { get; init; }
+    private DbfTable? Table { get; init; }
+    private bool HasNullMarker { get; init; }
+
+    // Harbour keys a currency field as a number, an ordered double like any other. Nothing in the
+    // file says which a tag holds, and the bytes alone can't: ten-thousandths can spell a believable
+    // double (460,718,241,880,001.7408 in currency is, bit for bit, the double 1.0). So a key is
+    // checked against the record it points at: the tag's lowest and highest keys, each compared with
+    // its record's stored value keyed both ways. Zero is the same eight bytes either way and says
+    // nothing; so does a key that matches neither (an index out of step), and the one value whose
+    // two keys are the same bytes. The key is read again after its record, so the pair is one moment's.
+    internal enum CurrencyLayout
+    {
+        /// <summary>Not a currency tag, or nothing to go by: no keys, or only zeros.</summary>
+        Unknown,
+        VisualFoxPro,
+        Harbour,
+        /// <summary>A key that is both layouts' key for its record, and none that's only one's.</summary>
+        Either,
+    }
+
+    private CurrencyLayout? _currencyLayout; // kept once it's Visual FoxPro's or Harbour's
+    private CurrencyLayout? _undecided;      // "nothing to go by", kept for one walk: asked once, not per key
+
+    /// <summary>True when keys are read as Visual FoxPro's ten-thousandths: whenever nothing shows them to be Harbour's.</summary>
+    internal bool IsCurrencyKey => CurrencyField is not null && ResolveCurrencyLayout() != CurrencyLayout.Harbour;
+
+    internal void ForgetCurrencyLayout() => _currencyLayout = _undecided = null;
+
+    internal CurrencyLayout ResolveCurrencyLayout()
+    {
+        if (CurrencyField is not { } currency || Table is not { } table)
+            return CurrencyLayout.Unknown;
+        if ((_currencyLayout ?? _undecided) is { } known)
+            return known;
+        var answer = CurrencyLayout.Unknown;
+        try
+        {
+            Span<byte> stored = stackalloc byte[8];
+            Span<byte> asCurrency = stackalloc byte[8];
+            foreach (var last in new[] { false, true })
+            {
+                if (EdgeEntry(last) is not { } edge || !table.TryReadStored(edge.Record, currency, stored))
+                    continue;
+                var scaled = BinaryPrimitives.ReadInt64LittleEndian(stored);
+                if (scaled == 0)
+                    continue;
+                // The same entry before and after its record was read, or another program is mid-change.
+                if (EdgeEntry(last) is not { } again || again.Record != edge.Record || !again.Key.AsSpan().SequenceEqual(edge.Key))
+                    continue;
+                BinaryPrimitives.WriteUInt64BigEndian(asCurrency, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
+                var isVisualFoxPros = edge.Key.AsSpan().SequenceEqual(asCurrency);
+                // Harbour's double for the value, give or take how it rounds one.
+                var value = scaled / 10_000d;
+                var isHarbours = Math.Abs(IndexKeys.ReadOrderedDouble(edge.Key) - value) <= Math.Max(0.00005, Math.Abs(value) * 1e-12);
+                if (isVisualFoxPros && isHarbours)
+                    answer = CurrencyLayout.Either;
+                else if (isVisualFoxPros || isHarbours)
+                    return (_currencyLayout = isHarbours ? CurrencyLayout.Harbour : CurrencyLayout.VisualFoxPro).Value;
+            }
+        }
+        catch (InvalidDataException)
+        {
+            // A damaged tree: whatever reads it next reports that.
+        }
+        return (_undecided = answer).Value;
+    }
+
+    // The tag's lowest or highest stored key and its record, or null when there's none (or the tree can't be followed).
+    private (byte[] Key, int Record)? EdgeEntry(bool last)
+    {
+        var offset = RootOffset();
+        for (var depth = 0; depth <= MaxDepth; depth++)
+        {
+            var page = _index.Read(offset, PageLength);
+            var attributes = BinaryPrimitives.ReadUInt16LittleEndian(page);
+            var count = BinaryPrimitives.ReadUInt16LittleEndian(page.AsSpan(2));
+            if (attributes > 7 || count == 0)
+                return null;
+            if ((attributes & LeafAttribute) != 0)
+            {
+                var (keys, records) = DecodeLeaf(page, count, offset);
+                return (keys[last ? count - 1 : 0], records[last ? count - 1 : 0]);
+            }
+            var itemLength = KeyLength + 8;
+            if (InteriorHeaderLength + (long)count * itemLength > PageLength)
+                return null;
+            offset = BinaryPrimitives.ReadUInt32BigEndian(page.AsSpan(InteriorHeaderLength + (last ? count - 1 : 0) * itemLength + KeyLength + 4));
+            if (offset is 0 or NoPage)
+                return null;
+        }
+        return null;
+    }
     internal long HeaderOffset { get; }
 
     /// <summary>A collation name or code page some writer stored in the tag header, or null when there's none.</summary>
@@ -294,8 +397,14 @@ public sealed partial class CdxTag
         if (!directory && expression.Length == 0)
             throw new InvalidDataException($"{label} has no key expression.");
 
+        var bare = directory || table is null ? null
+            : table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase));
+
         return new CdxTag(index, headerOffset, root, name)
         {
+            CurrencyField = bare is { Type: 'Y' } && keyLength == 8 ? bare : null,
+            Table = table,
+            HasNullMarker = bare is { Type: 'C', IsNullable: true } && keyLength == bare.Length + 1,
             KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,
             IsDescending = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(DescendingOffset)) != 0,
@@ -335,17 +444,29 @@ public sealed partial class CdxTag
     }
 
     /// <summary>Every key in index order (highest first for descending tags).</summary>
-    public IEnumerable<IndexEntry> Entries() => Walk(probe: null).Select(h => h.Entry);
+    public IEnumerable<IndexEntry> Entries()
+    {
+        // Each walk asks afresh, when it starts and not when it's set up: keys may have arrived since.
+        _undecided = null;
+        foreach (var hit in Walk(probe: null))
+            yield return hit.Entry;
+    }
 
     /// <summary>
     /// Keys in index order, starting at the first one at or after <paramref name="key"/> (at or
     /// before, for descending tags). Character keys match by prefix, like FoxPro's SEEK with SET EXACT OFF.
     /// </summary>
-    public IEnumerable<IndexEntry> Seek(object? key) => Walk(Probe(key)).Select(h => h.Entry);
+    public IEnumerable<IndexEntry> Seek(object? key)
+    {
+        _undecided = null;
+        foreach (var hit in Walk(Probe(key)))
+            yield return hit.Entry;
+    }
 
     /// <summary>Only the keys equal to <paramref name="key"/> (prefix-equal for character keys).</summary>
     public IEnumerable<IndexEntry> SeekExact(object? key)
     {
+        _undecided = null;
         foreach (var hit in Walk(Probe(key)))
         {
             if (!hit.Matches)
@@ -519,6 +640,8 @@ public sealed partial class CdxTag
     /// </summary>
     private byte[] Probe(object? key) => KeyType switch
     {
+        _ when IsCurrencyKey => EncodeCurrency(key),
+        _ when HasNullMarker => EncodeNullable(key),
         'N' when KeyLength == 4 => EncodeInteger(key),
         'N' => IndexKeys.WriteOrderedDouble(IndexKeys.ToDouble(key, Name)),
         'D' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDay(key, Name)),
@@ -537,8 +660,31 @@ public sealed partial class CdxTag
         return bytes;
     }
 
+    private byte[] EncodeCurrency(object? key)
+    {
+        var value = Convert.ToDecimal(key ?? throw new ArgumentNullException(nameof(key), $"Tag {Name} has currency keys; seek with a number."),
+            CultureInfo.InvariantCulture);
+        var bytes = new byte[8];
+        BinaryPrimitives.WriteUInt64BigEndian(bytes, unchecked((ulong)decimal.ToInt64(decimal.Round(value * 10_000m)) ^ 0x8000_0000_0000_0000));
+        return bytes;
+    }
+
+    // A null seeks the .NULL. keys (all zeros); text seeks by prefix behind the marker byte.
+    private byte[] EncodeNullable(object? key)
+    {
+        if (key is null)
+            return new byte[KeyLength];
+        var text = _index.Encoding.GetBytes(IndexKeys.ToText(key, Name));
+        var bytes = new byte[text.Length + 1];
+        bytes[0] = 0x80;
+        text.CopyTo(bytes, 1);
+        return bytes;
+    }
+
     private object? DecodeKey(byte[] key) => KeyType switch
     {
+        _ when IsCurrencyKey => unchecked((long)(BinaryPrimitives.ReadUInt64BigEndian(key) ^ 0x8000_0000_0000_0000)) / 10_000m,
+        _ when HasNullMarker => key[0] == 0 ? null : _index.Encoding.GetString(key.AsSpan(1)).TrimEnd(' ', '\0'),
         'N' when KeyLength == 4 => (decimal)unchecked((int)(BinaryPrimitives.ReadUInt32BigEndian(key) - 0x80000000)),
         'N' => IndexKeys.FromDouble(IndexKeys.ReadOrderedDouble(key)),
         'D' => IndexKeys.FromJulianDay(IndexKeys.ReadOrderedDouble(key)),

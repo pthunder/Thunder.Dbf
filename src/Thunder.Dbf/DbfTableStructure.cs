@@ -1047,6 +1047,11 @@ public sealed partial class DbfTable
     // so one another program holds open (an index opened to read, say) stops the change before
     // anything moves. One opened after this is caught by the moves themselves on Windows, and by an
     // open's identity check elsewhere (see OpenTableFile).
+    // An unshared open of a table's file, as a test that nothing else has it or to hold it. Refused
+    // without being tried when this process holds locks on it: see DbfLocks.OpenUnshared.
+    private static FileStream OpenUnshared(string file) =>
+        DbfLocks.OpenUnshared(file, () => new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+
     private static void ThrowIfAnyInUse(string path, RestructureManifest manifest)
     {
         var folder = Path.GetDirectoryName(Path.GetFullPath(path))!;
@@ -1054,7 +1059,7 @@ public sealed partial class DbfTable
         {
             var file = Path.Combine(folder, name);
             if (FileThere(file))
-                new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
+                OpenUnshared(file).Dispose();
         }
     }
 
@@ -1264,7 +1269,7 @@ public sealed partial class DbfTable
         try
         {
             if (FileThere(path))
-                new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None).Dispose();
+                OpenUnshared(path).Dispose();
             if (!FolderThere(backup))
                 return !FolderThere(ready) || ReadRecord(Path.Combine(ready, RestructureIdName)) != id
                     ? false
@@ -1320,7 +1325,7 @@ public sealed partial class DbfTable
         FileStream held;
         try
         {
-            held = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            held = OpenUnshared(path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

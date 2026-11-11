@@ -180,15 +180,16 @@ internal static class DbfValues
         int t = 0, p = 0, starP = -1, starT = 0;
         while (t < text.Length)
         {
-            if (p < pattern.Length && (pattern[p] == '_' || CharEquals(pattern[p], text[t])))
-            {
-                t++;
-                p++;
-            }
-            else if (p < pattern.Length && pattern[p] == '%')
+            // The wildcard first: a '%' in the text must not use up a '%' in the pattern as a literal.
+            if (p < pattern.Length && pattern[p] == '%')
             {
                 starP = p++;
                 starT = t;
+            }
+            else if (p < pattern.Length && (pattern[p] == '_' || CharEquals(pattern[p], text[t])))
+            {
+                t++;
+                p++;
             }
             else if (starP >= 0)
             {

@@ -227,6 +227,7 @@ public sealed partial class MdxTag : IMaintainedTag
     bool IMaintainedTag.Contains(byte[] key, int recordNumber) => Contains(key, recordNumber);
     int? IMaintainedTag.FirstRecordFor(byte[] key) => FirstRecordFor(key);
     void IMaintainedTag.Clear() => Clear();
+    void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => Refill(keys);
 
     // 0.4.0 wrote 6152 with 4 digits and this version writes it with Jet's 10; both are the same key,
     // and Remove finds either. Comparing by value keeps a note 0.4.0 left from taking out the

@@ -94,9 +94,9 @@ public static class DbfEncoding
         {
             return int.TryParse(name, out var codePage) ? GetEncoding(codePage) : Encoding.GetEncoding(name);
         }
-        catch (ArgumentException)
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
         {
-            return null;
+            return null; // a name it doesn't know, or a number in range with no such code page (895, say)
         }
     }
 }

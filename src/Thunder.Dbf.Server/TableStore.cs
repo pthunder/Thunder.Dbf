@@ -43,9 +43,20 @@ public sealed class TableStore : IDisposable
             MaintainFoxProIndexes = data.MaintainFoxProIndexes,
             Encoding = data.CodePage is { } codePage ? DbfEncoding.GetEncoding(codePage) : null,
         };
-        _reader = DbfDatabase.Open(data.Folder, databaseOptions);
-        _writer = new(() => DbfDatabase.Open(_reader.Folder, databaseOptions with { ReadOnly = false }));
-        _unmaintainedWriter = new(() => DbfDatabase.Open(_reader.Folder, databaseOptions with { ReadOnly = false, AllowUnmaintainedIndexes = true }));
+        // Data:Folder may be a connection string, and what it sets (Lock Scheme, Code Page, Journal, ...)
+        // is only in the opened database's options. Writes use those too: a server that read with
+        // Clipper's lock positions and wrote with dBASE's wouldn't be coordinated with the Clipper app.
+        var reader = DbfDatabase.Open(data.Folder, databaseOptions);
+        var settings = reader.Options;
+        if (!reader.ReadOnly)
+        {
+            // "Read Only=false" in the string: reads still open read-only; writing is the writers' job.
+            reader.Dispose();
+            reader = DbfDatabase.Open(reader.Folder, settings with { ReadOnly = true });
+        }
+        _reader = reader;
+        _writer = new(() => DbfDatabase.Open(_reader.Folder, settings with { ReadOnly = false }));
+        _unmaintainedWriter = new(() => DbfDatabase.Open(_reader.Folder, settings with { ReadOnly = false, AllowUnmaintainedIndexes = true }));
 
         BackupFolder = Path.GetFullPath(_options.Backups.Folder, environment.ContentRootPath);
     }
@@ -61,11 +72,20 @@ public sealed class TableStore : IDisposable
     /// </summary>
     public string? Find(string requested)
     {
+        // A name as it's listed wins: with X.dbf and X.dbf.dbf side by side, "X.dbf" is the second
+        // one's listed name. Only then is a trailing ".dbf" taken as the optional extension.
+        var names = _reader.TableNames;
+        if (names.FirstOrDefault(t => string.Equals(t, requested, StringComparison.OrdinalIgnoreCase)) is { } listed)
+            return listed;
         var bare = requested.EndsWith(".dbf", StringComparison.OrdinalIgnoreCase) ? requested[..^4] : requested;
-        return _reader.TableNames.FirstOrDefault(t => string.Equals(t, bare, StringComparison.OrdinalIgnoreCase));
+        return names.FirstOrDefault(t => string.Equals(t, bare, StringComparison.OrdinalIgnoreCase));
     }
 
     public IReadOnlyList<string> TableNames => _reader.TableNames;
+
+    // A listed name is opened with its extension put back, so it opens the very file it was listed
+    // for: X.dbf.dbf is listed as "X.dbf", which on its own would open X.dbf.
+    private const string ListedExtension = ".dbf";
 
     /// <summary>Opens the table read-only, runs <paramref name="work"/>, and closes it, holding the table's lock throughout.</summary>
     public async Task<T> ReadAsync<T>(string table, Func<DbfTable, T> work, CancellationToken cancellationToken)
@@ -73,7 +93,7 @@ public sealed class TableStore : IDisposable
         var gate = await EnterAsync(table, cancellationToken);
         try
         {
-            using var opened = _reader.OpenTable(table);
+            using var opened = _reader.OpenTable(table + ListedExtension);
             return work(opened);
         }
         finally
@@ -98,7 +118,7 @@ public sealed class TableStore : IDisposable
             var database = allowStaleIndexes ? _unmaintainedWriter.Value : _writer.Value;
             // Opening first means the library has already checked that the table and its companions
             // live in the folder (no links pointing elsewhere) before anything is copied.
-            using var opened = database.OpenTable(table);
+            using var opened = database.OpenTable(table + ListedExtension);
 
             // DbfTable would refuse this write anyway; refusing here skips a pointless backup. An index
             // the table keeps up to date is fine; a missing .mdx, or a FoxPro .cdx without the
@@ -143,6 +163,10 @@ public sealed class TableStore : IDisposable
             .ToList();
 
         var staged = new List<(string Partial, string Final)>();
+        // The copies' own handles stay open until the table lock is released. On Linux, closing any
+        // handle to a file drops every lock this process holds on it, so closing the copy of the
+        // .dbf would let go of the very lock the rest of the copies rely on.
+        var inputs = new List<FileStream>();
         try
         {
             using (opened.LockTable())
@@ -152,7 +176,8 @@ public sealed class TableStore : IDisposable
                     var final = Path.Combine(target, Path.GetFileName(source));
                     var partial = final + ".partial";
                     staged.Add((partial, final));
-                    using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    inputs.Add(input);
                     using var output = new FileStream(partial, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                     input.CopyTo(output);
                     output.Flush(flushToDisk: true);
@@ -166,6 +191,11 @@ public sealed class TableStore : IDisposable
             foreach (var (partial, _) in staged)
                 File.Delete(partial);
             throw;
+        }
+        finally
+        {
+            foreach (var input in inputs)
+                input.Dispose();
         }
         _logger.LogInformation("Backed up {Table} ({Count} files) to {Folder} before its first write.", table, files.Count, target);
     }

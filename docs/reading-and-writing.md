@@ -89,7 +89,7 @@ Record numbers change and index pages are replaced, so, as dBASE and FoxPro requ
 
 It's built not to lose data:
 - Every surviving record's index keys are worked out before anything changes.
-- A copy of the table (`NAME.dbf.packing`) is kept beside it until the pack has finished.
+- A copy of the table (`NAME.dbf.packing`) is kept beside it until the pack has finished. It gets that name only once it's complete and on disk, and no record moves before then: a pack that fails while copying (a full disk) leaves the table as it was and writable.
 - The smaller record count is on disk before the file is shortened.
 
 If the process dies halfway, every write to that table is refused until it's restored. Replace the `.dbf` with the `.packing` copy, delete the copy, then call `RebuildIndex()`.
@@ -178,6 +178,8 @@ A seek is only used when it must agree with a scan:
 - **Some queries always scan:** a query that uses the same table twice, and a `Where` that comes after `Skip`, `Select` and the like.
 
 Deleted records are left out. Typed records must be classes.
+
+A blank field reads as `null` into a nullable property and as the type's default into one that isn't. Written back, a default date (`DateTime.MinValue`, `DateOnly.MinValue`) or a `'\0'` character is a blank again (in a `Nullable` field too: a blank, not a `.NULL.`), so reading a record and updating it leaves its blank fields as they were. A non-nullable `bool` or number can't say "blank": it writes `F` or `0`. Nor can a non-nullable property say `.NULL.`: one read from a `.NULL.` is written back as a blank. Declare the property nullable (`bool?`, `decimal?`, `DateTime?`) where the difference matters.
 
 Typed records are safe in trimmed and Native AOT apps (iOS, for one): the class's public properties are kept for you. `AsQueryable<T>()` isn't, and is marked so your build warns; there, use `ReadAll<T>()` with ordinary LINQ, or `Seek` through the tag. See [Mobile and AOT](getting-started.md#mobile-and-aot).
 

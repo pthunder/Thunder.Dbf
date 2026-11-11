@@ -269,6 +269,14 @@ public sealed partial class MdxIndex
     /// </summary>
     internal int AllocatePage()
     {
+        // A rebuild hands over the pages of the tree it is replacing (see MdxTag.Refill).
+        if (_reusable is { Count: > 0 } reusable)
+        {
+            var reused = reusable.Dequeue();
+            WriteBlock(reused, new byte[BlockSize]);
+            return reused;
+        }
+
         // The stored page count is only advice; the file's real length decides.
         var page = (int)((Length + PageSize - 1) / PageSize);
         page = (page + PagesPerBlock - 1) / PagesPerBlock * PagesPerBlock;
@@ -277,6 +285,97 @@ public sealed partial class MdxIndex
         WriteBlock(page, new byte[BlockSize]);
         WriteHeaderInt(PageCountOffset, page + PagesPerBlock);
         return page;
+    }
+
+    // Pages a rebuild may take before the file grows: the nodes of the tree being replaced. That isn't
+    // the free list, whose pointers come from the file and aren't followed.
+    private Queue<int>? _reusable;
+
+    internal void OfferPages(IEnumerable<int> pages) => _reusable = new Queue<int>(pages);
+
+    // Which pages each tag may reuse, by tag header page: worked out for the whole index before a
+    // rebuild changes any tag, and only when the file proves each page is one tag's alone.
+    private Dictionary<int, List<int>>? _rebuildPages;
+    private bool _rebuildPlanned;
+
+    /// <summary>
+    /// The nodes of <paramref name="tag"/>'s tree, for its rebuild to build the new tree in; null when
+    /// the rebuild must use new pages. A page is reused only if nothing else could own it: every
+    /// tag's tree was walked whole, no page is reached twice (in one tree or in two), none is a tag
+    /// header or lies outside the file, and none is on the free list. An index that fails any of
+    /// that (a cut-off write can leave one so) is rebuilt as before, in new pages.
+    /// </summary>
+    internal List<int>? PagesToReuse(MdxTag tag)
+    {
+        if (!_rebuildPlanned)
+        {
+            _rebuildPages = PlanReuse();
+            _rebuildPlanned = true;
+        }
+        return _rebuildPages is { } plan && plan.Remove(tag.HeaderPage, out var pages) ? pages : null;
+    }
+
+    /// <summary>The plan covers one rebuild: it's dropped when that ends, in a commit or a failure.</summary>
+    internal void ForgetRebuildPlan()
+    {
+        _rebuildPages = null;
+        _rebuildPlanned = false;
+    }
+
+    private Dictionary<int, List<int>>? PlanReuse()
+    {
+        if (_batch is not null)
+            return null; // a batch orders its writes by which pages are new
+        // Every page of every block is claimed once: a tag header, a node or a free block may not
+        // even partly cover another, and each must lie whole inside the file, past the header area.
+        // A tag header counts as a block, which is how dBASE, Jet and this library lay them out and
+        // how they're read and written here. A file that packs them closer isn't damaged; it only
+        // fails this and is rebuilt in new pages, as every index was before pages were reused.
+        var firstNode = HeaderAreaSize / PageSize;
+        var claimed = new HashSet<int>();
+        bool Claim(int block)
+        {
+            if (block < firstNode || (long)(block + PagesPerBlock) * PageSize > Length)
+                return false;
+            for (var page = block; page < block + PagesPerBlock; page++)
+            {
+                if (!claimed.Add(page))
+                    return false;
+            }
+            return true;
+        }
+
+        var plan = new Dictionary<int, List<int>>();
+        try
+        {
+            if (!Tags.All(t => Claim(t.HeaderPage)))
+                return null;
+            foreach (var tag in Tags)
+            {
+                var pages = tag.OwnPages();
+                if (!pages.All(Claim))
+                    return null;
+                plan[tag.HeaderPage] = pages;
+            }
+            for (var block = ReadHeaderInt(FreePageOffset); block != 0; block = BinaryPrimitives.ReadInt32LittleEndian(ReadBlock(block).AsSpan(4)))
+            {
+                if (!Claim(block))
+                    return null;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or ArgumentException)
+        {
+            return null;
+        }
+        return plan;
+    }
+
+    /// <summary>Ends <see cref="OfferPages"/> and returns the pages nothing took.</summary>
+    internal IReadOnlyList<int> TakeBackPages()
+    {
+        var unused = _reusable?.ToList() ?? [];
+        _reusable = null;
+        return unused;
     }
 
     /// <summary>Puts a node back on the free list (its bytes 4-7 link to the next free node).</summary>
@@ -294,6 +393,7 @@ public sealed partial class MdxIndex
     {
         var today = DateTime.Today;
         WriteRaw(UpdatedOffset, [(byte)(today.Year - 1900), (byte)today.Month, (byte)today.Day]);
+        ForgetRebuildPlan();
         if (_batch is null)
             DbfTable.FlushToDisk(_stream, toDisk); // a batch writes and flushes when it ends
     }
@@ -728,28 +828,61 @@ public sealed partial class MdxTag
 
     // ---- rebuild --------------------------------------------------------------------------
 
+    /// <summary>Empties the tag: a rebuild to no keys (see <see cref="Refill"/>).</summary>
+    internal void Clear() => Refill([]);
+
     /// <summary>
-    /// Empties the tag: frees every node and starts again with one empty leaf as root. A damaged tree
-    /// (a batch cut off mid-write can leave one reaching a page twice) frees nothing: its pages can't be
-    /// trusted to be its own, and dBASE reuses freed pages. They're left unused; the new tree doesn't need them.
+    /// Replaces every key, building the new tree in the old one's nodes. Freeing those instead puts
+    /// them on a list that's never read back, so each rebuild or PACK added the tag's whole size to
+    /// the file, up to the 2 GB limit. Nodes left over (fewer keys than before) are freed for
+    /// programs that reuse them. When the index can't prove whose each page is, the new tree starts
+    /// in new pages and the old ones are left alone.
     /// </summary>
-    internal void Clear()
+    internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
-        var pages = new List<int>();
+        IReadOnlyList<int> unused = [];
         try
         {
-            Collect(RootPage(), pages, [], depth: 0);
+            if (_index.PagesToReuse(this) is { } pages)
+            {
+                _index.OfferPages(pages); // the old root first, so the root stays where it is
+                var root = _index.AllocatePage();
+                WriteNode(root, [], 0);
+                SetRoot(root);
+            }
+            else
+            {
+                // Pages that can't be proven this tag's own are neither reused nor freed: freeing one
+                // that's already on the free list, or that another tag reaches, would loop the list
+                // or hand a live node to a program that reuses it. They're left as unused space.
+                var root = _index.AllocatePage();
+                WriteNode(root, [], 0);
+                SetRoot(root);
+            }
+            foreach (var (key, record) in keys)
+            {
+                // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
+                if (!IsUnique || FirstRecordFor(key) is null)
+                    Insert(key, record);
+            }
         }
-        catch (InvalidDataException)
+        catch
         {
-            pages.Clear();
+            _index.TakeBackPages(); // nothing else may take these pages
+            _index.ForgetRebuildPlan();
+            throw;
         }
-        foreach (var page in pages)
+        unused = _index.TakeBackPages();
+        foreach (var page in unused)
             _index.FreePage(page);
+    }
 
-        var root = _index.AllocatePage();
-        WriteNode(root, [], 0);
-        SetRoot(root);
+    /// <summary>Every node of the tag's tree, the root first. Throws <see cref="InvalidDataException"/> for a tree that reaches a page twice.</summary>
+    internal List<int> OwnPages()
+    {
+        var pages = new List<int>();
+        Collect(RootPage(), pages, [], depth: 0);
+        return pages;
     }
 
     private void Collect(int page, List<int> pages, HashSet<int> visited, int depth)

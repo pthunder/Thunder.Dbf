@@ -11,7 +11,8 @@ namespace Thunder.Dbf;
 /// <summary>
 /// One key in an .ndx, .ntx or .cdx index, and the 1-based record number it points at.
 /// <see cref="Key"/> is a <see cref="string"/>, a number (<see cref="decimal"/>, or <see cref="double"/>
-/// beyond decimal's range), a <see cref="DateOnly"/>? (null for a blank date) or a <see cref="bool"/>.
+/// beyond decimal's range), a <see cref="DateOnly"/>? (null for a blank date) or a <see cref="bool"/>;
+/// null too for a Visual FoxPro <c>.NULL.</c> in a tag on a nullable field.
 /// </summary>
 public readonly record struct IndexEntry(object? Key, int RecordNumber);
 
@@ -32,10 +33,12 @@ internal static class IndexKeys
         object? value;
         try
         {
-            value = DbfExpression.Parse(expression).Evaluate(BlankRecord(table));
+            // A blank record has every number at 0, so TOTAL/QTY divides by zero on it. Only the
+            // type is wanted, and that's the same whatever the numbers are.
+            value = DbfExpression.Parse(expression).EvaluateForType(BlankRecord(table));
         }
         catch (Exception ex) when (ex is NotSupportedException or InvalidOperationException or KeyNotFoundException
-                                       or FormatException or ArgumentException or OverflowException)
+                                       or FormatException or ArgumentException or ArithmeticException)
         {
             return fallback;
         }

@@ -69,12 +69,16 @@ public static class DbfMigrator
 
     private static DbfTableMigration MigrateTable(DbfDatabase database, string name, DbConnection connection, SqlDialect dialect, DbfMigrationOptions options)
     {
-        using var table = database.OpenTable(name);
+        using var table = database.OpenTable(name + ".dbf"); // a listed name: SALES.2019 is SALES.2019.dbf
         var sql = new SqlTable(connection, dialect, options.TablePrefix + name, table.Fields);
 
+        // Asked before the transaction starts. Looking for a table that isn't there is a failed
+        // statement, and on PostgreSQL a failed statement aborts the transaction it ran in: the
+        // CREATE TABLE after it would then be refused, so nothing could be migrated into an empty database.
+        var exists = sql.Exists();
         using (var transaction = connection.BeginTransaction())
         {
-            if (sql.Exists(transaction))
+            if (exists)
             {
                 if (!options.ReplaceExisting)
                     throw new DbfException(DbfErrorCode.TableAlreadyExists, $"The SQL table '{sql.Name}' already exists.",

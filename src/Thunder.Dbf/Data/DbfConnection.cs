@@ -172,7 +172,7 @@ public sealed class DbfConnection : DbConnection
 
                 foreach (var tableName in TablesMatching(database, Restriction(2)))
                 {
-                    using var dbf = database.OpenTable(tableName);
+                    using var dbf = database.OpenTable(tableName + ".dbf"); // a listed name: SALES.2019 is SALES.2019.dbf
                     var position = 0;
                     foreach (var field in dbf.Fields.Where(f => !DbfValues.IsHidden(f)))
                     {

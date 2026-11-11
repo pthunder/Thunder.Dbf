@@ -245,7 +245,7 @@ public sealed partial class DbfTable : IDisposable
         catch
         {
             memoStream?.Dispose();
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream); // another table in this process may hold locks on the .dbf
             throw;
         }
     }
@@ -279,7 +279,7 @@ public sealed partial class DbfTable : IDisposable
             }
             catch (Exception ex)
             {
-                stream.Dispose();
+                DbfLocks.CloseWhenSafe(stream);
                 if (ex is DbfException)
                     throw;
                 throw DbfException.Translate(ex, path, access) ?? new DbfException(DbfErrorCode.WriteFailed,
@@ -287,7 +287,7 @@ public sealed partial class DbfTable : IDisposable
             }
             if (same is not false)
                 return stream;
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             // Three tries: a swap finishes between two of them. One that never settles is refused,
             // never taken on trust: the handle could be writing into a backup.
             if (attempt == 3)
@@ -505,7 +505,7 @@ public sealed partial class DbfTable : IDisposable
             finally
             {
                 index?.Dispose();
-                stream?.Dispose();
+                DbfLocks.Close(stream); // an index another table here may hold locked
             }
             return false;
         }
@@ -687,7 +687,7 @@ public sealed partial class DbfTable : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             throw;
         }
     }
@@ -1339,6 +1339,30 @@ public sealed partial class DbfTable : IDisposable
     }
 
     // Reads through FileStream's buffer: fast for scans, but only fresh as of the last discard.
+    /// <summary>
+    /// Reads one field's stored bytes of record <paramref name="recordNumber"/> (1-based) without the
+    /// record buffer, which may be holding a record on its way to disk, and puts the stream back
+    /// where it was. For an index checking a key against its record. False when it can't be read.
+    /// </summary>
+    internal bool TryReadStored(int recordNumber, DbfField field, Span<byte> target)
+    {
+        if (recordNumber < 1 || recordNumber > RecordCount || target.Length != field.Length)
+            return false;
+        try
+        {
+            var position = _stream.Position;
+            DiscardReadBuffer(_stream); // what another program wrote since, not what was read before
+            _stream.Position = Header.HeaderLength + (long)(recordNumber - 1) * Header.RecordLength + field.Offset;
+            var read = _stream.ReadAtLeast(target, target.Length, throwOnEndOfStream: false);
+            _stream.Position = position;
+            return read == target.Length;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
     private DbfRecord ReadBuffered(int index)
     {
         Seek(index);
@@ -1476,16 +1500,49 @@ public sealed partial class DbfTable : IDisposable
         return index;
     }
 
+    // A commit failed before its rows' keys were applied. The keys are dropped: left queued, the next
+    // append on this table would write them for whatever record takes those rows' place. If the header
+    // on disk doesn't count the rows, they were never added and the indexes are as they should be. If
+    // it does (the header went out and the flush after it failed), or that can't be read, the rows
+    // are there without their keys and the indexes wait for a rebuild.
+    private void DropUncommittedKeys()
+    {
+        if (_pendingIndexChanges.Count == 0)
+            return;
+        var attempted = Header.RecordCount;
+        _pendingIndexChanges.Clear();
+        try
+        {
+            ReloadHeader();
+            if (Header.RecordCount >= attempted)
+                _indexesNeedRebuild = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or DbfException)
+        {
+            _indexesNeedRebuild = true;
+        }
+    }
+
     // Makes everything appended so far durable: end-of-file marker, counters and the header (which
     // makes the rows visible), then the index entries for those rows.
     private void Commit()
     {
-        Seek(RecordCount, forAppend: true);
-        _stream.WriteByte(EndOfFile);
-        foreach (var field in _dirtyCounters)
-            Header.WriteAutoIncrement(_stream, field);
-        _dirtyCounters.Clear();
-        CommitHeader();
+        try
+        {
+            CrashPoint?.Invoke("committing");
+            Seek(RecordCount, forAppend: true);
+            _stream.WriteByte(EndOfFile);
+            foreach (var field in _dirtyCounters)
+                Header.WriteAutoIncrement(_stream, field);
+            _dirtyCounters.Clear();
+            CommitHeader();
+            CrashPoint?.Invoke("header committed");
+        }
+        catch
+        {
+            DropUncommittedKeys();
+            throw;
+        }
         CrashPoint?.Invoke("counted");
 
         var pending = _pendingIndexChanges.ToList();
@@ -1493,7 +1550,11 @@ public sealed partial class DbfTable : IDisposable
         foreach (var (changes, recordNumber) in pending)
             ApplyIndexChanges(changes, recordNumber);
         CommitIndexes();
-        if (_appendNoted)
+        // An earlier commit of this batch that failed after its rows were counted dropped their keys
+        // (DropUncommittedKeys): the note is what tells the next writer, here or in another process,
+        // that those rows' keys are still owed. AppendRange commits again on its way out of a failure,
+        // and that commit must not take the note with it.
+        if (_appendNoted && !_indexesNeedRebuild)
         {
             DbfJournal.Clear(_path!);
             _appendNoted = false;

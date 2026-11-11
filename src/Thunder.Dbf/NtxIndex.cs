@@ -69,7 +69,7 @@ public sealed partial class NtxIndex : IDisposable
         }
         catch
         {
-            stream.Dispose();
+            DbfLocks.CloseWhenSafe(stream);
             throw;
         }
     }
