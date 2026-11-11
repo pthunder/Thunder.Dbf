@@ -1351,6 +1351,7 @@ public sealed partial class DbfTable : IDisposable
         try
         {
             var position = _stream.Position;
+            DiscardReadBuffer(_stream); // what another program wrote since, not what was read before
             _stream.Position = Header.HeaderLength + (long)(recordNumber - 1) * Header.RecordLength + field.Offset;
             var read = _stream.ReadAtLeast(target, target.Length, throwOnEndOfStream: false);
             _stream.Position = position;

@@ -431,6 +431,8 @@ public sealed partial class CdxIndex : IMaintainedIndex
             if (!settled)
             {
                 _verifiedTags.Clear();
+                foreach (var tag in Tags)
+                    tag.ForgetCurrencyLayout(); // judged against a file that was changing
                 if (attempt < OutOfStepAttempts)
                     continue;
                 // Never quiet, and the locks never free for long enough: other users keep them busy.
@@ -913,8 +915,8 @@ public sealed partial class CdxTag : IMaintainedTag
         // A currency tag keyed the way Harbour keys one (see IsCurrencyKey) is read, not written: its
         // key is the value as a double, worked out by Harbour's own arithmetic, and a key one bit off
         // wouldn't be found again.
-        if (bareType == 'Y' && KeyLength == 8 && !IsCurrencyKey)
-            return "its currency keys are stored as numbers, the way Harbour keys a currency field, and Harbour's conversion of the value isn't reproduced exactly here";
+        if (bareType == 'Y' && KeyLength == 8 && ResolveCurrencyLayout() is CurrencyLayout.Harbour or CurrencyLayout.Either)
+            return "its currency keys are stored as numbers, the way Harbour keys a currency field (or can't be told from that), and Harbour's conversion of the value isn't reproduced exactly here";
         KeyKind? kind = blank switch
         {
             _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,

@@ -120,6 +120,9 @@ public sealed partial class CdxIndex : IDisposable
             _table = table,
         };
         index.Tags = index.LoadTags();
+        // Settled now, while the table it was opened with is there to ask (see ResolveCurrencyLayout).
+        foreach (var tag in index.Tags)
+            tag.ResolveCurrencyLayout();
         if (index.OpenedForWriting)
             index.PrepareForWriting();
         return index;
@@ -276,44 +279,62 @@ public sealed partial class CdxTag
     // double (460,718,241,880,001.7408 in currency is, bit for bit, the double 1.0). So a key is
     // checked against the record it points at: the tag's lowest and highest keys, each compared with
     // its record's stored value keyed both ways. Zero is the same eight bytes either way and says
-    // nothing, and neither does a key that matches neither (an index out of step). The answer is kept
-    // once there is one; until then (an empty tag, or all zeros) the tag counts as Visual FoxPro's.
-    private bool? _currencyLayout;
-
-    internal bool IsCurrencyKey
+    // nothing; so does a key that matches neither (an index out of step), and the one value whose
+    // two keys are the same bytes. The key is read again after its record, so the pair is one moment's.
+    internal enum CurrencyLayout
     {
-        get
+        /// <summary>Not a currency tag, or nothing to go by: no keys, or only zeros.</summary>
+        Unknown,
+        VisualFoxPro,
+        Harbour,
+        /// <summary>A key that is both layouts' key for its record, and none that's only one's.</summary>
+        Either,
+    }
+
+    private CurrencyLayout? _currencyLayout; // kept once it's Visual FoxPro's or Harbour's
+
+    /// <summary>True when keys are read as Visual FoxPro's ten-thousandths: whenever nothing shows them to be Harbour's.</summary>
+    internal bool IsCurrencyKey => CurrencyField is not null && ResolveCurrencyLayout() != CurrencyLayout.Harbour;
+
+    internal void ForgetCurrencyLayout() => _currencyLayout = null;
+
+    internal CurrencyLayout ResolveCurrencyLayout()
+    {
+        if (CurrencyField is not { } currency || Table is not { } table)
+            return CurrencyLayout.Unknown;
+        if (_currencyLayout is { } known)
+            return known;
+        var answer = CurrencyLayout.Unknown;
+        try
         {
-            if (CurrencyField is not { } currency || Table is not { } table)
-                return false;
-            if (_currencyLayout is { } known)
-                return known;
-            try
+            Span<byte> stored = stackalloc byte[8];
+            Span<byte> asCurrency = stackalloc byte[8];
+            foreach (var last in new[] { false, true })
             {
-                Span<byte> stored = stackalloc byte[8];
-                Span<byte> asCurrency = stackalloc byte[8];
-                foreach (var last in new[] { false, true })
-                {
-                    if (EdgeEntry(last) is not { } edge || !table.TryReadStored(edge.Record, currency, stored))
-                        continue;
-                    var scaled = BinaryPrimitives.ReadInt64LittleEndian(stored);
-                    if (scaled == 0)
-                        continue;
-                    BinaryPrimitives.WriteUInt64BigEndian(asCurrency, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
-                    if (edge.Key.AsSpan().SequenceEqual(asCurrency))
-                        return (_currencyLayout = true).Value;
-                    // Harbour's double for the value, give or take how it rounds one.
-                    var value = scaled / 10_000d;
-                    if (Math.Abs(IndexKeys.ReadOrderedDouble(edge.Key) - value) <= Math.Max(0.00005, Math.Abs(value) * 1e-12))
-                        return (_currencyLayout = false).Value;
-                }
+                if (EdgeEntry(last) is not { } edge || !table.TryReadStored(edge.Record, currency, stored))
+                    continue;
+                // The same entry before and after its record was read, or another program is mid-change.
+                if (EdgeEntry(last) is not { } again || again.Record != edge.Record || !again.Key.AsSpan().SequenceEqual(edge.Key))
+                    continue;
+                var scaled = BinaryPrimitives.ReadInt64LittleEndian(stored);
+                if (scaled == 0)
+                    continue;
+                BinaryPrimitives.WriteUInt64BigEndian(asCurrency, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
+                var isVisualFoxPros = edge.Key.AsSpan().SequenceEqual(asCurrency);
+                // Harbour's double for the value, give or take how it rounds one.
+                var value = scaled / 10_000d;
+                var isHarbours = Math.Abs(IndexKeys.ReadOrderedDouble(edge.Key) - value) <= Math.Max(0.00005, Math.Abs(value) * 1e-12);
+                if (isVisualFoxPros && isHarbours)
+                    answer = CurrencyLayout.Either;
+                else if (isVisualFoxPros || isHarbours)
+                    return (_currencyLayout = isHarbours ? CurrencyLayout.Harbour : CurrencyLayout.VisualFoxPro).Value;
             }
-            catch (InvalidDataException)
-            {
-                // A damaged tree: whatever reads it next reports that.
-            }
-            return true;
         }
+        catch (InvalidDataException)
+        {
+            // A damaged tree: whatever reads it next reports that.
+        }
+        return answer;
     }
 
     // The tag's lowest or highest stored key and its record, or null when there's none (or the tree can't be followed).

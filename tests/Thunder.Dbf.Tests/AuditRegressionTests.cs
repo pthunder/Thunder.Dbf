@@ -553,6 +553,51 @@ public sealed class AuditRegressionTests : IDisposable
         }
     }
 
+    [Fact]
+    public void The_one_currency_value_keyed_the_same_both_ways_settles_nothing()
+    {
+        // 482,657,411,987,823.5898: its ten-thousandths, and the double of it, are the same eight bytes.
+        const decimal both = 482657411987823.5898m;
+        var path = PathOf("both.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Currency("PRICE")]))
+            table.Append(both);
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("P", "PRICE");
+
+        using (var table = DbfTable.Open(path))
+        using (var index = table.OpenStructuralIndex()!)
+        {
+            var key = Assert.Single(index["P"].Entries()).Key;
+            Assert.Equal(both, key);
+            Assert.Equal(CdxTag.CurrencyLayout.Either, index["P"].ResolveCurrencyLayout());
+        }
+
+        // Nothing says whose tag it is, so it isn't written to. A second value settles it.
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true))
+            Assert.Equal(DbfErrorCode.IndexWouldGoStale, Assert.Throws<DbfException>(() => table.Append(1.5m)).Code);
+    }
+
+    [Fact]
+    public void A_currency_tags_layout_is_settled_when_the_index_is_opened_not_when_its_table_has_gone()
+    {
+        var path = PathOf("gone.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+                   [DbfFieldDefinition.Currency("PRICE"), DbfFieldDefinition.Numeric("AMOUNT", 14, 4)]))
+            table.Append(1m, 1m);
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("HB", "AMOUNT");
+        var cdxPath = Path.ChangeExtension(path, ".cdx");
+        var cdx = File.ReadAllBytes(cdxPath);
+        "PRICE\0"u8.CopyTo(cdx.AsSpan(cdx.AsSpan().IndexOf("AMOUNT"u8))); // Harbour's key for 1: the double
+        File.WriteAllBytes(cdxPath, cdx);
+
+        CdxIndex index;
+        using (var table = DbfTable.Open(path))
+            index = table.OpenStructuralIndex()!;
+        using (index)
+            Assert.Equal(1m, Convert.ToDecimal(Assert.Single(index["HB"].Entries()).Key, CultureInfo.InvariantCulture)); // not 460,718,241,880,001.7408
+    }
+
     public sealed class Nullable
     {
         public string? Name { get; set; }
