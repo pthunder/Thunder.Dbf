@@ -446,8 +446,10 @@ public sealed partial class CdxTag
     /// <summary>Every key in index order (highest first for descending tags).</summary>
     public IEnumerable<IndexEntry> Entries()
     {
-        _undecided = null; // each walk asks afresh: keys may have arrived since the last one
-        return Walk(probe: null).Select(h => h.Entry);
+        // Each walk asks afresh, when it starts and not when it's set up: keys may have arrived since.
+        _undecided = null;
+        foreach (var hit in Walk(probe: null))
+            yield return hit.Entry;
     }
 
     /// <summary>
@@ -457,7 +459,8 @@ public sealed partial class CdxTag
     public IEnumerable<IndexEntry> Seek(object? key)
     {
         _undecided = null;
-        return Walk(Probe(key)).Select(h => h.Entry);
+        foreach (var hit in Walk(Probe(key)))
+            yield return hit.Entry;
     }
 
     /// <summary>Only the keys equal to <paramref name="key"/> (prefix-equal for character keys).</summary>
