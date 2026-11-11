@@ -292,17 +292,18 @@ public sealed partial class CdxTag
     }
 
     private CurrencyLayout? _currencyLayout; // kept once it's Visual FoxPro's or Harbour's
+    private CurrencyLayout? _undecided;      // "nothing to go by", kept for one walk: asked once, not per key
 
     /// <summary>True when keys are read as Visual FoxPro's ten-thousandths: whenever nothing shows them to be Harbour's.</summary>
     internal bool IsCurrencyKey => CurrencyField is not null && ResolveCurrencyLayout() != CurrencyLayout.Harbour;
 
-    internal void ForgetCurrencyLayout() => _currencyLayout = null;
+    internal void ForgetCurrencyLayout() => _currencyLayout = _undecided = null;
 
     internal CurrencyLayout ResolveCurrencyLayout()
     {
         if (CurrencyField is not { } currency || Table is not { } table)
             return CurrencyLayout.Unknown;
-        if (_currencyLayout is { } known)
+        if ((_currencyLayout ?? _undecided) is { } known)
             return known;
         var answer = CurrencyLayout.Unknown;
         try
@@ -313,11 +314,11 @@ public sealed partial class CdxTag
             {
                 if (EdgeEntry(last) is not { } edge || !table.TryReadStored(edge.Record, currency, stored))
                     continue;
-                // The same entry before and after its record was read, or another program is mid-change.
-                if (EdgeEntry(last) is not { } again || again.Record != edge.Record || !again.Key.AsSpan().SequenceEqual(edge.Key))
-                    continue;
                 var scaled = BinaryPrimitives.ReadInt64LittleEndian(stored);
                 if (scaled == 0)
+                    continue;
+                // The same entry before and after its record was read, or another program is mid-change.
+                if (EdgeEntry(last) is not { } again || again.Record != edge.Record || !again.Key.AsSpan().SequenceEqual(edge.Key))
                     continue;
                 BinaryPrimitives.WriteUInt64BigEndian(asCurrency, unchecked((ulong)scaled ^ 0x8000_0000_0000_0000));
                 var isVisualFoxPros = edge.Key.AsSpan().SequenceEqual(asCurrency);
@@ -334,7 +335,7 @@ public sealed partial class CdxTag
         {
             // A damaged tree: whatever reads it next reports that.
         }
-        return answer;
+        return (_undecided = answer).Value;
     }
 
     // The tag's lowest or highest stored key and its record, or null when there's none (or the tree can't be followed).
@@ -443,17 +444,26 @@ public sealed partial class CdxTag
     }
 
     /// <summary>Every key in index order (highest first for descending tags).</summary>
-    public IEnumerable<IndexEntry> Entries() => Walk(probe: null).Select(h => h.Entry);
+    public IEnumerable<IndexEntry> Entries()
+    {
+        _undecided = null; // each walk asks afresh: keys may have arrived since the last one
+        return Walk(probe: null).Select(h => h.Entry);
+    }
 
     /// <summary>
     /// Keys in index order, starting at the first one at or after <paramref name="key"/> (at or
     /// before, for descending tags). Character keys match by prefix, like FoxPro's SEEK with SET EXACT OFF.
     /// </summary>
-    public IEnumerable<IndexEntry> Seek(object? key) => Walk(Probe(key)).Select(h => h.Entry);
+    public IEnumerable<IndexEntry> Seek(object? key)
+    {
+        _undecided = null;
+        return Walk(Probe(key)).Select(h => h.Entry);
+    }
 
     /// <summary>Only the keys equal to <paramref name="key"/> (prefix-equal for character keys).</summary>
     public IEnumerable<IndexEntry> SeekExact(object? key)
     {
+        _undecided = null;
         foreach (var hit in Walk(Probe(key)))
         {
             if (!hit.Matches)

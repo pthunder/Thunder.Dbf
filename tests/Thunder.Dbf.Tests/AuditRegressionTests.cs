@@ -598,6 +598,44 @@ public sealed class AuditRegressionTests : IDisposable
             Assert.Equal(1m, Convert.ToDecimal(Assert.Single(index["HB"].Entries()).Key, CultureInfo.InvariantCulture)); // not 460,718,241,880,001.7408
     }
 
+    [Fact]
+    public void A_currency_tag_of_zeros_is_read_without_asking_its_layout_for_every_key()
+    {
+        var path = PathOf("zeros.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Currency("PRICE")]))
+        {
+            table.FlushWritesToDisk = false;
+            table.AppendRange(Enumerable.Range(0, 2000).Select(_ => new object?[] { 0m }));
+        }
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("P", "PRICE");
+
+        // Zeros say nothing about the layout, so nothing is kept between walks; within one, it's asked once.
+        var counting = new CountingStream(File.OpenRead(Path.ChangeExtension(path, ".cdx")));
+        using var opened = DbfTable.Open(path);
+        using var index = CdxIndex.Open(counting, table: opened);
+        counting.Reads = 0;
+        Assert.Equal(2000, index["P"].Entries().Count(e => (decimal)e.Key! == 0m));
+        Assert.True(counting.Reads < 200, $"{counting.Reads} reads for 2,000 keys");
+    }
+
+    private sealed class CountingStream(FileStream inner) : Stream
+    {
+        public int Reads;
+        public override bool CanRead => true;
+        public override bool CanSeek => true;
+        public override bool CanWrite => false;
+        public override long Length => inner.Length;
+        public override long Position { get => inner.Position; set => inner.Position = value; }
+        public override void Flush() => inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) { Reads++; return inner.Read(buffer, offset, count); }
+        public override int Read(Span<byte> buffer) { Reads++; return inner.Read(buffer); }
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) inner.Dispose(); base.Dispose(disposing); }
+    }
+
     public sealed class Nullable
     {
         public string? Name { get; set; }
