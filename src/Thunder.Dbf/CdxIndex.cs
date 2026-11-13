@@ -272,7 +272,29 @@ public sealed partial class CdxTag
     // all zeros for .NULL.
     private DbfField? CurrencyField { get; init; }
     private DbfTable? Table { get; init; }
+
+    /// <summary>
+    /// A tag on a bare nullable field: Visual FoxPro puts a marker byte in front of every key, 0x80 then
+    /// the field's usual key, and stores .NULL. as all zeros. It does that for every type, so the key is
+    /// one byte longer than the field's usual one.
+    /// </summary>
     private bool HasNullMarker { get; init; }
+
+    /// <summary>A null-marked key over a currency field: always Visual FoxPro's ten-thousandths.</summary>
+    private bool IsMarkedCurrency { get; init; }
+
+    // The length of the value part of a key: the key without its null marker byte.
+    private int ValueLength => HasNullMarker ? KeyLength - 1 : KeyLength;
+
+    /// <summary>The key length Visual FoxPro gives a tag on a bare field of this type, without a null marker.</summary>
+    internal static int? UsualKeyLength(DbfField field) => field.Type switch
+    {
+        'C' => field.Length,
+        'I' => 4,
+        'N' or 'F' or 'B' or 'Y' or 'D' or 'T' => 8,
+        'L' => 1,
+        _ => null,
+    };
 
     // Harbour keys a currency field as a number, an ordered double like any other. Nothing in the
     // file says which a tag holds, and the bytes alone can't: ten-thousandths can spell a believable
@@ -404,7 +426,8 @@ public sealed partial class CdxTag
         {
             CurrencyField = bare is { Type: 'Y' } && keyLength == 8 ? bare : null,
             Table = table,
-            HasNullMarker = bare is { Type: 'C', IsNullable: true } && keyLength == bare.Length + 1,
+            HasNullMarker = bare is { IsNullable: true } && keyLength == UsualKeyLength(bare) + 1,
+            IsMarkedCurrency = bare is { Type: 'Y', IsNullable: true } && keyLength == 9,
             KeyType = directory || table is null ? 'C' : IsDateTimeField(expression, table, keyLength) ? 'T' : IndexKeys.InferKeyType(expression, table, fallback: 'C'),
             KeyLength = keyLength,
             IsDescending = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(DescendingOffset)) != 0,
@@ -632,17 +655,31 @@ public sealed partial class CdxTag
     // A tag on a bare Visual FoxPro datetime field keys whole seconds as Julian days, not dates: its
     // blank value is null, which would otherwise make it look like a date tag.
     private static bool IsDateTimeField(string expression, DbfTable table, int keyLength) =>
-        keyLength == 8 && table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase)) is { Type: 'T' };
+        table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase)) is { Type: 'T' } field
+        && keyLength == (field.IsNullable && keyLength == 9 ? 9 : 8);
 
     /// <summary>
     /// Turns a search value into the bytes FoxPro would have stored, so every comparison is a byte
     /// comparison. Numbers and dates are doubles arranged to sort as bytes; character probes compare as prefixes.
     /// </summary>
-    private byte[] Probe(object? key) => KeyType switch
+    private byte[] Probe(object? key)
     {
-        _ when IsCurrencyKey => EncodeCurrency(key),
-        _ when HasNullMarker => EncodeNullable(key),
-        'N' when KeyLength == 4 => EncodeInteger(key),
+        if (!HasNullMarker)
+            return ProbeValue(key);
+        // A null seeks the .NULL. keys (all zeros); a value seeks behind the marker byte.
+        if (key is null)
+            return new byte[KeyLength];
+        var value = ProbeValue(key);
+        var bytes = new byte[value.Length + 1];
+        bytes[0] = 0x80;
+        value.CopyTo(bytes, 1);
+        return bytes;
+    }
+
+    private byte[] ProbeValue(object? key) => KeyType switch
+    {
+        _ when IsCurrencyKey || IsMarkedCurrency => EncodeCurrency(key),
+        'N' when ValueLength == 4 => EncodeInteger(key),
         'N' => IndexKeys.WriteOrderedDouble(IndexKeys.ToDouble(key, Name)),
         'D' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDay(key, Name)),
         'T' => IndexKeys.WriteOrderedDouble(IndexKeys.ToJulianDateTime(key, Name)),
@@ -669,23 +706,15 @@ public sealed partial class CdxTag
         return bytes;
     }
 
-    // A null seeks the .NULL. keys (all zeros); text seeks by prefix behind the marker byte.
-    private byte[] EncodeNullable(object? key)
-    {
-        if (key is null)
-            return new byte[KeyLength];
-        var text = _index.Encoding.GetBytes(IndexKeys.ToText(key, Name));
-        var bytes = new byte[text.Length + 1];
-        bytes[0] = 0x80;
-        text.CopyTo(bytes, 1);
-        return bytes;
-    }
+    private object? DecodeKey(byte[] key) =>
+        !HasNullMarker ? DecodeValue(key)
+        : key[0] == 0 ? null // .NULL.
+        : DecodeValue(key[1..]);
 
-    private object? DecodeKey(byte[] key) => KeyType switch
+    private object? DecodeValue(byte[] key) => KeyType switch
     {
-        _ when IsCurrencyKey => unchecked((long)(BinaryPrimitives.ReadUInt64BigEndian(key) ^ 0x8000_0000_0000_0000)) / 10_000m,
-        _ when HasNullMarker => key[0] == 0 ? null : _index.Encoding.GetString(key.AsSpan(1)).TrimEnd(' ', '\0'),
-        'N' when KeyLength == 4 => (decimal)unchecked((int)(BinaryPrimitives.ReadUInt32BigEndian(key) - 0x80000000)),
+        _ when IsCurrencyKey || IsMarkedCurrency => unchecked((long)(BinaryPrimitives.ReadUInt64BigEndian(key) ^ 0x8000_0000_0000_0000)) / 10_000m,
+        'N' when ValueLength == 4 => (decimal)unchecked((int)(BinaryPrimitives.ReadUInt32BigEndian(key) - 0x80000000)),
         'N' => IndexKeys.FromDouble(IndexKeys.ReadOrderedDouble(key)),
         'D' => IndexKeys.FromJulianDay(IndexKeys.ReadOrderedDouble(key)),
         'T' => IndexKeys.FromJulianDateTime(IndexKeys.ReadOrderedDouble(key)),
