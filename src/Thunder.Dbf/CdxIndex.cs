@@ -656,7 +656,7 @@ public sealed partial class CdxTag
     // blank value is null, which would otherwise make it look like a date tag.
     private static bool IsDateTimeField(string expression, DbfTable table, int keyLength) =>
         table.Fields.FirstOrDefault(f => string.Equals(f.Name, expression.Trim(), StringComparison.OrdinalIgnoreCase)) is { Type: 'T' } field
-        && keyLength == (field.IsNullable && keyLength == 9 ? 9 : 8);
+        && (keyLength == 8 || (field.IsNullable && keyLength == 9));
 
     /// <summary>
     /// Turns a search value into the bytes FoxPro would have stored, so every comparison is a byte

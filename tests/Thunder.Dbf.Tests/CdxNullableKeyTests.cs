@@ -177,8 +177,9 @@ public sealed class CdxNullableKeyTests : IDisposable
             Assert.Equal("QTY", probe["NAME"].Expression);
         var error = Assert.Throws<DbfException>(() => opened.Append(1, "x"));
         Assert.Equal(DbfErrorCode.IndexWouldGoStale, error.Code);
-        Assert.Contains("nullable field QTY", error.Message);
-        Assert.DoesNotContain("as it stands", error.Message);
+        Assert.Contains("nullable field QTY", error.Diagnostic);
+        Assert.Contains("doesn't build", error.Message); // the message names the kind of problem, not text from the index
+        Assert.DoesNotContain("QTY", error.Message);
     }
 
     private static List<IMaintainedTag> MaintainedTags(DbfTable table)

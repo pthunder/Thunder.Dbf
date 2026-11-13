@@ -2714,7 +2714,9 @@ public sealed partial class DbfTable : IDisposable
                 "Put the .mdx next to the table and open it by path, pass indexStream, or open with allowUnmaintainedIndexes: true and rebuild it afterwards (exclusive: true, RebuildIndex).", path);
         if (header.HasStructuralCdx && !structuralCdxMaintained && structuralCdxRefusal is not null)
             return new DbfException(DbfErrorCode.IndexWouldGoStale,
-                $"The table's FoxPro .cdx index can't be kept up to date, so writing would leave it out of date. {structuralCdxRefusal}",
+                // The reason stays in the diagnostic: it can quote text read from the index (a tag's name or
+                // key expression), which a message shown to users mustn't carry.
+                "The table's FoxPro .cdx index can't be kept up to date, so writing would leave it out of date: one of its tags has a key Thunder.Dbf doesn't build, or the index is out of step with the table. The exception's diagnostic says which.",
                 "If that's a tag whose key Thunder.Dbf doesn't build, write through the legacy app, or drop the tag. If the index is out of step with the table (a write that reached the table but not the index), close the legacy app, open the table with exclusive: true and call MaintainIndex(path, rebuild: true), or REINDEX in FoxPro.",
                 path, diagnostic: structuralCdxRefusal);
         if (header.HasStructuralCdx && !structuralCdxMaintained)

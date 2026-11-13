@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - **FoxPro `.cdx` tags on nullable currency, numeric, integer, date, datetime and double fields are read, sought and kept up to date.** Visual FoxPro puts its null marker byte in front of the key of every nullable field, not only character ones: 0x80 then the field's usual key, and all zeros for `.NULL.`. 0.4.3 read the marker only on character fields, so on the others `Seek` and `SeekExact` found nothing (an integer tag threw `ArgumentOutOfRangeException`), and a table with such a tag refused every write. `SeekExact(null)` finds the `.NULL.` records. `CreateIndexTag` on a nullable field of any type now makes the key one byte longer, as Visual FoxPro does. Found on Visual FoxPro 9 by the Windows test PC.
-- **A FoxPro `.cdx` that can't be kept up to date now says why.** The refusal (`IndexWouldGoStale`) named only the index being out of step with the table; it now gives the reason, such as a tag whose key Thunder.Dbf doesn't build.
+- **A FoxPro `.cdx` that can't be kept up to date now says why.** The refusal (`IndexWouldGoStale`) named only the index being out of step with the table; it now says a tag's key may be one Thunder.Dbf doesn't build, and the exception's `Diagnostic` gives the exact reason.
 
 ## [0.4.3] - 2026-11-11
 
