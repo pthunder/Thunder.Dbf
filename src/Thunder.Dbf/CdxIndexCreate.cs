@@ -191,22 +191,17 @@ public sealed partial class CdxIndex
 
     /// <summary>
     /// The key length Visual FoxPro gives an expression: 4 for a bare integer field, 8 for numbers,
-    /// dates, datetimes and currency, 1 for logicals, and the text's width for character keys (one more
-    /// over a nullable field, for VFP's null marker byte).
+    /// dates, datetimes and currency, 1 for logicals, and the text's width for character keys; one more
+    /// over a bare nullable field of any type, for VFP's null marker byte.
     /// </summary>
     internal static int KeyLengthFor(DbfTable table, string expression)
     {
         var bare = table.Fields.FirstOrDefault(f => f.Name.Equals(expression.Trim(), StringComparison.OrdinalIgnoreCase));
         if (bare is not null)
         {
-            return bare.Type switch
-            {
-                'I' => 4,
-                'N' or 'F' or 'B' or 'Y' or 'D' or 'T' => 8,
-                'L' => 1,
-                'C' => bare.Length + (bare.IsNullable ? 1 : 0),
-                _ => throw new DbfException(DbfErrorCode.InvalidValue, $"A {bare.Type} field can't be indexed.", "Index a character, number, date or logical field.", table.FilePath),
-            };
+            return CdxTag.UsualKeyLength(bare) is { } usual
+                ? usual + (bare.IsNullable ? 1 : 0)
+                : throw new DbfException(DbfErrorCode.InvalidValue, $"A {bare.Type} field can't be indexed.", "Index a character, number, date or logical field.", table.FilePath);
         }
         return DbfExpression.Parse(expression).Evaluate(IndexKeys.BlankRecord(table)) switch
         {
