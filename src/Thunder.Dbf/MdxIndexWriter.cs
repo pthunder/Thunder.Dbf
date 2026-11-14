@@ -438,15 +438,16 @@ public sealed partial class MdxTag
     internal byte[] KeyFor(DbfRecord record)
     {
         ParseExpressions();
-        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression, NumericStyle);
+        return EncodeKey(KeyType, KeyLength, _index.Encoding, _keyExpression!.Evaluate(record), Name, Expression, NumericStyle, BlankDateKey);
     }
 
     /// <summary>
     /// The stored bytes for one key value. Shared with INDEX ON, which encodes every key before a new
     /// tag exists, so a value that can't be stored stops the command before the file changes. A new
-    /// tag counts digits as Jet does (see <see cref="MdxTag.NumericStyle"/>).
+    /// tag counts digits as Jet does (see <see cref="MdxTag.NumericStyle"/>) and keys a blank date as 0
+    /// (see <see cref="MdxTag.BlankDateKey"/>).
     /// </summary>
-    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, NumericKeyStyle style = NumericKeyStyle.Jet)
+    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, NumericKeyStyle style = NumericKeyStyle.Jet, double blankDate = 0d)
     {
         switch (keyType)
         {
@@ -474,7 +475,7 @@ public sealed partial class MdxTag
                     throw new InvalidDataException($"Tag {tag}'s key expression '{expression}' didn't produce a date.");
                 var key = new byte[8];
                 DateOnly? date = value switch { DateOnly d => d, DateTime t => DateOnly.FromDateTime(t), _ => null };
-                BinaryPrimitives.WriteDoubleLittleEndian(key, date is { } day ? MdxKeys.JulianDay(day) : 0d);
+                BinaryPrimitives.WriteDoubleLittleEndian(key, date is { } day ? MdxKeys.JulianDay(day) : blankDate);
                 return key;
             }
         }
@@ -666,7 +667,22 @@ public sealed partial class MdxTag
 
     /// <summary>True when the tag holds exactly this key for this record.</summary>
     internal bool Contains(byte[] key, int recordNumber) =>
-        Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found;
+        Find(RootPage(), key, recordNumber, [], depth: 0, visited: []) == Search.Found
+        || (OtherBlankDate(key) is { } other && Find(RootPage(), other, recordNumber, [], depth: 0, visited: []) == Search.Found);
+
+    // A blank date may be keyed either way in one tag: 0 by dBASE and Thunder.Dbf, 1E100 by Jet.
+    // Finding or removing a blank record's key looks for the other form when its own isn't there.
+    private byte[]? OtherBlankDate(byte[] key)
+    {
+        if (KeyType != 'D')
+            return null;
+        var zero = MdxKeys.IsZeroBlank(key);
+        if (!zero && !MdxKeys.IsJetBlank(key))
+            return null;
+        var other = new byte[8];
+        BinaryPrimitives.WriteDoubleLittleEndian(other, zero ? MdxKeys.JetBlankDate : 0d);
+        return other;
+    }
 
     /// <summary>
     /// How many keys the tag holds: the leaves' counts added up, without reading a key (a million
@@ -699,7 +715,10 @@ public sealed partial class MdxTag
     }
 
     /// <summary>Removes the entry (key, record number). Returns false when there isn't one.</summary>
-    internal bool Remove(byte[] key, int recordNumber)
+    internal bool Remove(byte[] key, int recordNumber) =>
+        RemoveExact(key, recordNumber) || (OtherBlankDate(key) is { } other && RemoveExact(other, recordNumber));
+
+    private bool RemoveExact(byte[] key, int recordNumber)
     {
         var path = new List<(int Page, int Slot)>();
         if (Find(RootPage(), key, recordNumber, path, depth: 0, visited: []) != Search.Found)

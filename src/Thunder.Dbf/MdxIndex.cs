@@ -111,6 +111,12 @@ public sealed partial class MdxIndex : IDisposable
     /// </summary>
     internal Func<bool>? IsExclusive { get; set; }
 
+    /// <summary>
+    /// Header pages of the date tags seen keying a blank as Jet does (1E100). Kept here, not on the
+    /// tag, so a reload between writes doesn't forget it once the last such blank has left the tag.
+    /// </summary>
+    internal HashSet<int> JetBlankDateTags { get; } = [];
+
     /// <summary>Reads the tag table again, for changes other programs made. <paramref name="force"/> for this process's own.</summary>
     internal void ReloadTags(bool force = false)
     {
@@ -398,6 +404,34 @@ public sealed partial class MdxTag
         }
     }
 
+    // Jet keys a blank date as 1E100, so blanks sort after every real date; dBASE files and Thunder.Dbf
+    // key it as 0. Jet steps between matches by comparing bytes, so a tag keeps the form its keys
+    // show (a blank in either form sits in an edge leaf), for as long as the index is open; one that
+    // shows neither takes 0.
+    private double? _blankDateKey;
+
+    /// <summary>The key this date tag gives a blank date: 0, or Jet's 1E100. Learned once from its keys.</summary>
+    internal double BlankDateKey => _blankDateKey ??= LearnBlankDateKey();
+
+    private double LearnBlankDateKey()
+    {
+        if (KeyType != 'D')
+            return 0d;
+        if (_index.JetBlankDateTags.Contains(_headerPage))
+            return MdxKeys.JetBlankDate;
+        try
+        {
+            if (!EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).Any(k => MdxKeys.IsJetBlank(k)))
+                return 0d;
+            _index.JetBlankDateTags.Add(_headerPage);
+            return MdxKeys.JetBlankDate;
+        }
+        catch (InvalidDataException)
+        {
+            return 0d;
+        }
+    }
+
     // The keys of the first or last leaf, reached down the edge of the tree.
     private List<byte[]> EdgeLeafKeys(bool rightmost)
     {
@@ -436,7 +470,7 @@ public sealed partial class MdxTag
         }),
         _ => new DateProbe(key switch
         {
-            null => 0d, // a blank date
+            null => BlankDateKey, // a blank date, in the form this tag keys it
             DateOnly d => MdxKeys.JulianDay(d),
             DateTime dt => MdxKeys.JulianDay(DateOnly.FromDateTime(dt)),
             _ => throw new ArgumentException($"Tag {Name} has date keys; seek with a DateOnly (or null for a blank date), not {key.GetType().Name}."),
@@ -494,6 +528,19 @@ internal static class MdxKeys
     public const int JetWholeDigits = 10;
 
     public const int NumericKeyLength = 12;
+
+    /// <summary>The key Jet's dBASE driver gives a blank date (dBASE and Thunder.Dbf give 0).</summary>
+    public const double JetBlankDate = 1e100;
+
+    // The two blank keys are exact bit patterns, not values that arithmetic arrives at: compare bits.
+    private static readonly long JetBlankBits = BitConverter.DoubleToInt64Bits(JetBlankDate);
+
+    /// <summary>A date key that is Jet's blank, 1E100.</summary>
+    public static bool IsJetBlank(ReadOnlySpan<byte> key) => BinaryPrimitives.ReadInt64LittleEndian(key) == JetBlankBits;
+
+    /// <summary>A date key that is dBASE's blank, 0 (either sign).</summary>
+    public static bool IsZeroBlank(ReadOnlySpan<byte> key) => (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
+
     private const int ExponentBias = 52;
     private const int MaxDigits = 20;
     private const int JulianDayOfDayNumberZero = 1721426;
@@ -504,7 +551,7 @@ internal static class MdxKeys
     {
         var julian = BinaryPrimitives.ReadDoubleLittleEndian(key);
         var dayNumber = (long)julian - JulianDayOfDayNumberZero;
-        return julian == 0 || dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber ? null : DateOnly.FromDayNumber((int)dayNumber);
+        return IsZeroBlank(key) || IsJetBlank(key) || dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber ? null : DateOnly.FromDayNumber((int)dayNumber);
     }
 
     // value = ±0.d1d2d3... × 10^(byte0 - 52); byte1 bit 7 is the sign; digits are packed BCD, high nibble first.
