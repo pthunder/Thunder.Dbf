@@ -272,4 +272,13 @@ public sealed class MdxBlankDateTests : IDisposable
         Assert.Equal([(1, 2461358d), (2, 1e100), (3, 1e100)], Keys(path));
         AssertInStep(path);
     }
+
+    [Fact]
+    public void A_key_of_the_wrong_length_is_not_a_blank_date()
+    {
+        Assert.False(MdxKeys.IsBlankDate(new byte[4]));
+        Assert.False(MdxKeys.IsBlankDate([]));
+        Assert.True(MdxKeys.IsBlankDate(new byte[8]));
+        Assert.True(MdxKeys.IsBlankDate(MdxKeys.JetBlankKey()));
+    }
 }
