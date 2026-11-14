@@ -10,9 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-14
+
+Six fixes, five of them for tables that Visual FoxPro or Access write. The ones most worth upgrading for: a Visual FoxPro table with an index on a nullable number, date or currency field refused every write and couldn't be sought, and a dBASE table from Access or VB with a blank date in a date index failed writes or was left with a stale index entry.
+
+**Upgrading from 0.4.3:** nothing in the public API changed. Four things behave differently:
+- A number whose decimals don't fit its field is stored with the decimals that do, where it threw `OverflowException`. A whole part that doesn't fit still throws.
+- Currency rounds half away from zero (1.00005 is 1.0001), where it rounded half to even.
+- `SeekExact(null)` on a `.cdx` tag over a nullable date or datetime field returns blank dates as well as `.NULL.` ones.
+- A blank date in a dBASE `.mdx` date tag is keyed 1E100, as Jet keys it, in new tags, in tags with no blank yet and by `RebuildIndex()` and `Pack()`, where it was keyed 0. A tag whose blanks are all 0 keeps 0 until it's rebuilt. If 0.4.3 wrote blank dates into a table Access or VB also uses, run `RebuildIndex()` once so Jet finds them.
+
 ### Fixed
 
-- **FoxPro `.cdx` tags on nullable currency, numeric, integer, date, datetime and double fields are read, sought and kept up to date.** Visual FoxPro puts its null marker byte in front of the key of every nullable field, not only character ones: 0x80 then the field's usual key, and all zeros for `.NULL.`. 0.4.3 read the marker only on character fields, so on the others `Seek` and `SeekExact` found nothing (an integer tag threw `ArgumentOutOfRangeException`), and a table with such a tag refused every write. `SeekExact(null)` finds the `.NULL.` records. `CreateIndexTag` on a nullable field of any type now makes the key one byte longer, as Visual FoxPro does. Found on Visual FoxPro 9 by the Windows test PC.
+- **FoxPro `.cdx` tags on nullable currency, numeric, integer, date, datetime and double fields are read, sought and kept up to date.** Visual FoxPro puts its null marker byte in front of the key of every nullable field, not only character ones: 0x80 then the field's usual key, and all zeros for `.NULL.`. 0.4.3 read the marker only on character fields, so on the others `Seek` and `SeekExact` found nothing (an integer tag threw `ArgumentOutOfRangeException`), and a table with such a tag refused every write. `SeekExact(null)` finds the `.NULL.` records. `CreateIndexTag` on a nullable field of any type now makes the key one byte longer, as Visual FoxPro does. Checked against tables Visual FoxPro 9 wrote: every key Thunder.Dbf writes is byte for byte the one Visual FoxPro builds.
 - **A FoxPro `.cdx` that can't be kept up to date now says why.** The refusal (`IndexWouldGoStale`) named only the index being out of step with the table; it now says a tag's key may be one Thunder.Dbf doesn't build, and the exception's `Diagnostic` gives the exact reason.
 - **`SeekExact(null)` on a `.cdx` tag over a nullable date or datetime field finds blank dates too.** A blank date that isn't `.NULL.` reads back as null, but its key is the marker byte then the blank key, so seeking null found only the `.NULL.` records and the blank ones couldn't be sought at all. Visual FoxPro 9's `SEEK {}` finds them.
 - **A number whose decimals don't fit its field keeps the decimals that do, as FoxPro does, instead of throwing.** Visual FoxPro stores 12345678.9 in an N(10,2) field as `12345678.9`; Thunder.Dbf read it back but threw `OverflowException` writing the same value. The value is rounded to the decimals that fit; a whole part that doesn't fit still throws. Checked against tables Visual FoxPro 9 wrote.
