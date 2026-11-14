@@ -592,9 +592,9 @@ public sealed partial class DbfTable : IDisposable
                 IncludeSubdirectories = false,
                 InternalBufferSize = 64 * 1024,
             };
-            watcher.Created += (_, _) => Volatile.Write(ref _folderChanged, 1);
-            watcher.Deleted += (_, _) => Volatile.Write(ref _folderChanged, 1);
-            watcher.Renamed += (_, _) => Volatile.Write(ref _folderChanged, 1);
+            watcher.Created += (_, e) => Notice(e);
+            watcher.Deleted += (_, e) => Notice(e);
+            watcher.Renamed += (_, e) => Notice(e);
             watcher.Error += (_, _) =>
             {
                 Volatile.Write(ref _watcherFailed, true);
@@ -608,6 +608,17 @@ public sealed partial class DbfTable : IDisposable
             // Can't watch it: the folder's last-write time is used instead.
         }
     }
+
+    private void Notice(FileSystemEventArgs e)
+    {
+        _lastFolderNotice = $"{e.ChangeType} {e.Name}";
+        Volatile.Write(ref _folderChanged, 1);
+    }
+
+    private volatile string? _lastFolderNotice;
+
+    /// <summary>For the tests: the last change the watcher reported, as "Created name".</summary>
+    internal string? LastFolderNotice => _lastFolderNotice;
 
     /// <summary>For the tests: whether the folder is watched, and whether the next write will look in it.</summary>
     internal bool WatchesFolder => _folderWatcher is not null && !Volatile.Read(ref _watcherFailed);

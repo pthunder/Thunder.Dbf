@@ -164,7 +164,7 @@ public sealed partial class CdxWriteTests
         var template = table.Read(0).Values.ToArray();
         table.Append(Call(template, 5000, contact: 1, subject: "looks once"));
         table.Append(Call(template, 5001, contact: 1, subject: "nothing to look for"));
-        Assert.False(table.FolderLookPending);
+        Assert.False(table.FolderLookPending, $"the watcher reported: {table.LastFolderNotice}");
 
         File.Copy(cdx, Path.Combine(_dir.FullName, "calls.idx"));
         Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the new file");
