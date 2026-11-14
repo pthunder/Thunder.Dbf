@@ -309,8 +309,8 @@ public sealed partial class NtxTag : IMaintainedTag
         {
             string text => Padded(_index.Encoding.GetBytes(text)),
             decimal number => EncodeNumber(number),
-            double number => double.IsFinite(number) && Math.Abs(number) < 7.9e28 ? EncodeNumber((decimal)number) : Overflow(),
-            int or long or short or byte or float => EncodeNumber(Convert.ToDecimal(value, CultureInfo.InvariantCulture)),
+            double number => double.IsFinite(number) && Math.Abs(number) < 7.9e28 ? EncodeNumber(DbfValueCodec.ToDecimal(number)) : Overflow(),
+            int or long or short or byte or float => EncodeNumber(DbfValueCodec.ToDecimal(value)),
             DateOnly date => Padded(Encoding.ASCII.GetBytes(date.ToString("yyyyMMdd", CultureInfo.InvariantCulture))),
             bool flag => Padded([(byte)(flag ? 'T' : 'F')]),
             null when KeyType == 'N' => EncodeNumber(0m),

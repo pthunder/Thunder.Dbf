@@ -96,9 +96,14 @@ internal static class DbfValueCodec
 
             case 'N' or 'F':
             {
-                var text = Ascii(raw);
-                if (text.Length == 0 || text.All(c => c == '*'))
+                var bytes = Trimmed(raw);
+                if (bytes.Length == 0 || bytes.IndexOfAnyExcept((byte)'*') < 0)
                     return null;
+                // Most values are plain ("-123.45"): parsed straight from the bytes, no strings. A
+                // decimal holds any plain number of 28 digits or fewer exactly, so it needs no check.
+                if (IsPlainDecimal(bytes) && decimal.TryParse(bytes, NumberStyles.Float, CultureInfo.InvariantCulture, out var plain))
+                    return plain;
+                var text = Encoding.ASCII.GetString(bytes);
                 // decimal when it holds the value exactly; otherwise double. decimal.TryParse rounds
                 // quietly (1.5E-28 becomes 2E-28, 1E-100 becomes 0), so compare digits, not success.
                 if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
@@ -111,12 +116,18 @@ internal static class DbfValueCodec
 
             case 'D':
             {
-                var text = Ascii(raw);
-                if (text.Length == 0 || text == "00000000")
+                var bytes = Trimmed(raw);
+                if (bytes.Length == 0 || bytes.SequenceEqual("00000000"u8))
                     return null;
-                if (DateOnly.TryParseExact(text, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
-                    return date;
-                throw new FormatException($"Field {field.Name} holds '{text}', which isn't a YYYYMMDD date.");
+                if (bytes.Length == 8)
+                {
+                    Span<char> digits = stackalloc char[8];
+                    for (var i = 0; i < 8; i++)
+                        digits[i] = bytes[i] < 0x80 ? (char)bytes[i] : '?'; // as Encoding.ASCII reads it
+                    if (DateOnly.TryParseExact(digits, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                        return date;
+                }
+                throw new FormatException($"Field {field.Name} holds '{Encoding.ASCII.GetString(bytes)}', which isn't a YYYYMMDD date.");
             }
 
             case 'L':
@@ -129,12 +140,12 @@ internal static class DbfValueCodec
 
             case 'M' or 'G' or 'P' or 'B':
             {
-                var text = Ascii(raw);
-                if (text.Length == 0)
+                var bytes = Trimmed(raw);
+                if (bytes.Length == 0)
                     return null;
-                if (int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var block))
+                if (int.TryParse(bytes, NumberStyles.None, CultureInfo.InvariantCulture, out var block))
                     return block == 0 ? null : block;
-                throw new FormatException($"Field {field.Name} holds '{text}', which isn't a memo block number.");
+                throw new FormatException($"Field {field.Name} holds '{Encoding.ASCII.GetString(bytes)}', which isn't a memo block number.");
             }
 
             default:
@@ -240,7 +251,7 @@ internal static class DbfValueCodec
                 break;
             case 'Y':
                 // Ten-thousandths, rounded half away from zero as Visual FoxPro 9 does: 1.00005 is 1.0001.
-                var scaled = decimal.Round(Convert.ToDecimal(value, CultureInfo.InvariantCulture) * CurrencyScale, MidpointRounding.AwayFromZero);
+                var scaled = decimal.Round(ToDecimal(value) * CurrencyScale, MidpointRounding.AwayFromZero);
                 BinaryPrimitives.WriteInt64LittleEndian(target, decimal.ToInt64(scaled));
                 break;
             case 'B':
@@ -306,6 +317,24 @@ internal static class DbfValueCodec
         return (int)block;
     }
 
+    /// <summary>
+    /// A number as a decimal, a double or float taken as the number it prints as (its shortest
+    /// round-trip text: 1.23 is 1.23). .NET 11 converts a double to decimal exactly (1.23 becomes
+    /// 1.2299999999999999822...), where earlier versions rounded to 15 digits; going through the text
+    /// gives the number the caller wrote, on every runtime.
+    /// </summary>
+    internal static decimal ToDecimal(object value) => value switch
+    {
+        decimal d => d,
+        double d => double.IsFinite(d)
+            ? decimal.Parse(d.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture)
+            : throw new OverflowException($"{d} has no decimal value."),
+        float f => float.IsFinite(f)
+            ? decimal.Parse(f.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture)
+            : throw new OverflowException($"{f} has no decimal value."),
+        _ => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+    };
+
     private static string FormatNumber(DbfField field, object value)
     {
         if (value is double or float)
@@ -342,7 +371,27 @@ internal static class DbfValueCodec
         return text;
     }
 
-    private static string Ascii(ReadOnlySpan<byte> raw) => Encoding.ASCII.GetString(raw).Trim(' ', '\0');
+    // A field's bytes without the blanks and NULs around them, as the old text-based reads trimmed them.
+    private static ReadOnlySpan<byte> Trimmed(ReadOnlySpan<byte> raw) => raw.Trim(" \0"u8);
+
+    // An optional minus, then digits with at most one point: no exponent, no other characters, and
+    // 28 digits or fewer, so a decimal holds it exactly.
+    private static bool IsPlainDecimal(ReadOnlySpan<byte> text)
+    {
+        var digits = 0;
+        var point = false;
+        for (var i = text[0] == (byte)'-' ? 1 : 0; i < text.Length; i++)
+        {
+            var b = text[i];
+            if (b is >= (byte)'0' and <= (byte)'9')
+                digits++;
+            else if (b == (byte)'.' && !point)
+                point = true;
+            else
+                return false;
+        }
+        return digits is > 0 and <= 28;
+    }
 
     private static void WriteRightAligned(DbfField field, string text, Span<byte> target)
     {

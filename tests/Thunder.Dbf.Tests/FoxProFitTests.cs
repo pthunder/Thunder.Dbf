@@ -126,4 +126,26 @@ public sealed class FoxProFitTests : IDisposable
             Assert.Equal([3], cdx["CUR"].SeekExact(-1.00005m).Select(e => e.RecordNumber));
         }
     }
+
+    // .NET 11 converts a double to decimal exactly (1.23 becomes 1.2299999999999999822...), where
+    // .NET 10 rounded to 15 digits. A double is taken as the number it prints as, on both.
+    [Fact]
+    public void A_double_is_the_number_it_prints_as_on_every_runtime()
+    {
+        var path = Path.Combine(_dir.FullName, "doubles.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Currency("CUR"), DbfFieldDefinition.Numeric("AMT", 10, 2)]))
+        {
+            table.Append(0.00015, 1.005);
+            table.Append(1.00005, 2.675);
+            Assert.Equal(0.0002m, table.Read(0)[0]);
+            Assert.Equal(1.0001m, table.Read(1)[0]);
+            Assert.Equal(1.01m, table.Read(0)[1]);
+            Assert.Equal(2.68m, table.Read(1)[1]);
+        }
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("CUR", "CUR");
+        using (var table = DbfTable.Open(path))
+        using (var cdx = table.OpenStructuralIndex()!)
+            Assert.Equal([1], cdx["CUR"].SeekExact(0.00015).Select(e => e.RecordNumber));
+    }
 }

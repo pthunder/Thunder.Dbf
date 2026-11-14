@@ -603,8 +603,8 @@ public sealed partial class DbfTable
             // only 15 digits, and would call a 16-digit integer the double holds exactly a loss.
             return read is double got
                 ? double.IsFinite(got) && decimal.TryParse(got.ToString("R", invariant), NumberStyles.Float, invariant, out var exact)
-                    && exact == Convert.ToDecimal(reference, invariant)
-                : Convert.ToDecimal(read, invariant) == Convert.ToDecimal(reference, invariant);
+                    && exact == DbfValueCodec.ToDecimal(reference)
+                : DbfValueCodec.ToDecimal(read) == DbfValueCodec.ToDecimal(reference);
         }
         catch (OverflowException)
         {
@@ -655,7 +655,7 @@ public sealed partial class DbfTable
                 decimal whole;
                 try
                 {
-                    whole = Convert.ToDecimal(number, invariant);
+                    whole = DbfValueCodec.ToDecimal(number);
                 }
                 catch (OverflowException)
                 {

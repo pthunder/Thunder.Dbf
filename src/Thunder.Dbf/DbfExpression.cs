@@ -127,7 +127,7 @@ public sealed class DbfExpression
     private static decimal Dec(object? v, string where) => v switch
     {
         decimal d => d,
-        double d when Math.Abs(d) < 7.9e28 => (decimal)d,
+        double d when Math.Abs(d) < 7.9e28 => DbfValueCodec.ToDecimal(d),
         _ => throw Mismatch($"{where} needs a number"),
     };
 

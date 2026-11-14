@@ -49,7 +49,41 @@ public sealed partial class DbfTable : IDisposable
     private readonly List<IMaintainedIndex> _otherIndexes = []; // a structural .cdx, and .ndx/.ntx/.idx files that belong to the table
 
     // Every index this table keeps in step with its writes.
-    private IEnumerable<IMaintainedIndex> MaintainedIndexes => _index is null ? _otherIndexes : _otherIndexes.Prepend(_index);
+    // The .mdx (if any) first, then the others. A struct, so the foreach on every write allocates
+    // nothing; LINQ over it still works for the rare callers that want it.
+    private IndexSet MaintainedIndexes => new(_index, _otherIndexes);
+
+    private readonly struct IndexSet(IMaintainedIndex? first, List<IMaintainedIndex> rest) : IEnumerable<IMaintainedIndex>
+    {
+        public bool IsEmpty => first is null && rest.Count == 0;
+
+        public Enumerator GetEnumerator() => new(first, rest);
+
+        IEnumerator<IMaintainedIndex> IEnumerable<IMaintainedIndex>.GetEnumerator() => (first is null ? rest : rest.Prepend(first)).GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => ((IEnumerable<IMaintainedIndex>)this).GetEnumerator();
+
+        public struct Enumerator(IMaintainedIndex? first, List<IMaintainedIndex> rest)
+        {
+            private int _at = first is null ? 0 : -1;
+
+            public IMaintainedIndex Current { get; private set; } = null!;
+
+            public bool MoveNext()
+            {
+                if (_at == -1)
+                {
+                    _at = 0;
+                    Current = first!;
+                    return true;
+                }
+                if (_at >= rest.Count)
+                    return false;
+                Current = rest[_at++];
+                return true;
+            }
+        }
+    }
     private readonly HashSet<int> _dirtyCounters = [];
     private readonly List<(List<TagChange> Changes, int RecordNumber)> _pendingIndexChanges = [];
     private IReadOnlyList<string> _unmaintainedIndexes = [];
@@ -670,7 +704,18 @@ public sealed partial class DbfTable : IDisposable
     // custom .ntx, say) stops writes, like one that was that way at open. Its tags are left alone.
     private void ThrowIfIndexCantBeMaintained()
     {
-        if (_allowUnmaintainedIndexes || MaintainedIndexes.FirstOrDefault(i => !i.CanMaintain && !_awaitingReplay.Contains(i)) is not { } index)
+        if (_allowUnmaintainedIndexes)
+            return;
+        IMaintainedIndex? index = null;
+        foreach (var candidate in MaintainedIndexes)
+        {
+            if (!candidate.CanMaintain && !_awaitingReplay.Contains(candidate))
+            {
+                index = candidate;
+                break;
+            }
+        }
+        if (index is null)
             return;
         throw new DbfException(DbfErrorCode.IndexWouldGoStale,
             "One of this table's indexes was changed by another program into a kind Thunder.Dbf can't keep up to date.",
@@ -1163,7 +1208,7 @@ public sealed partial class DbfTable : IDisposable
                 // Still unreadable: it stays unmaintained, and writes say so, as they did.
             }
         }
-        if (MaintainedIndexes.Any())
+        if (!MaintainedIndexes.IsEmpty)
             RebuildIndex();
     }
 
@@ -1246,7 +1291,7 @@ public sealed partial class DbfTable : IDisposable
     internal string? FilePath => _path;
 
     /// <summary>True when writes keep at least one index up to date (a production .mdx, a structural .cdx, or an attached .ndx/.ntx/.idx).</summary>
-    public bool MaintainsIndex => MaintainedIndexes.Any();
+    public bool MaintainsIndex => !MaintainedIndexes.IsEmpty;
 
     private bool HasMaintainedStructuralCdx { get; set; }
 
@@ -1473,7 +1518,7 @@ public sealed partial class DbfTable : IDisposable
 
         _buffer[0] = LiveFlag;
         EncodeFields(values, changed: null);
-        var keys = PlanIndexChanges(before: null, after: !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
+        var keys = PlanIndexChanges(before: null, after: MaintainedIndexes.IsEmpty ? null : Decode(index, _buffer.ToArray()));
 
         // The first row of a batch notes where the batch starts, before any of it is written.
         if (_useJournal && _path is not null && !_appendNoted)
@@ -1642,7 +1687,7 @@ public sealed partial class DbfTable : IDisposable
         values = (object?[])values.Clone();
         var counters = AssignAutoIncrements(values, changed);
         EncodeFields(values, changed);
-        var keys = PlanIndexChanges(current, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
+        var keys = PlanIndexChanges(current, MaintainedIndexes.IsEmpty ? null : Decode(index, _buffer.ToArray()));
 
         _memo?.FlushToDisk(ForcesWrites);
         var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
@@ -1975,7 +2020,7 @@ public sealed partial class DbfTable : IDisposable
         PrepareWrite(appending: false);
         var before = Read(index); // leaves the record's bytes in _buffer
         _buffer[0] = flag;
-        var keys = PlanIndexChanges(before, !MaintainedIndexes.Any() ? null : Decode(index, _buffer.ToArray()));
+        var keys = PlanIndexChanges(before, MaintainedIndexes.IsEmpty ? null : Decode(index, _buffer.ToArray()));
 
         var journaled = ChangeRecordAndKeys(keys, index + 1, () =>
         {
@@ -1994,12 +2039,13 @@ public sealed partial class DbfTable : IDisposable
     // (a type mismatch, say) leaves the table and its index untouched.
     private List<TagChange>? PlanIndexChanges(DbfRecord? before, DbfRecord? after)
     {
-        if (after is null || !MaintainedIndexes.Any())
+        if (after is null || MaintainedIndexes.IsEmpty)
             return null;
 
         var changes = new List<TagChange>(_tagsLastPlanned); // sized for one change per tag, as last time
         var tags = 0;
-        foreach (var tag in MaintainedIndexes.SelectMany(i => i.MaintainedTags))
+        foreach (var index in MaintainedIndexes)
+        foreach (var tag in index.MaintainedTags)
         {
             tags++;
             bool wasIn, isIn;
@@ -2600,7 +2646,7 @@ public sealed partial class DbfTable : IDisposable
             MaintainIndexCore(structuralCdx, rebuild: true); // attaches it, then rebuilds every index the table keeps
             return;
         }
-        if (!MaintainedIndexes.Any())
+        if (MaintainedIndexes.IsEmpty)
             throw new DbfException(DbfErrorCode.IndexDamaged, "The table has no index open that Thunder.Dbf can rebuild.",
                 "Open the table by path, writable, with its index files next to it.", _path);
 

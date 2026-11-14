@@ -334,7 +334,7 @@ public sealed partial class NtxTag
         'N' => EncodeNumber(key switch
         {
             null => throw new ArgumentNullException(nameof(key), $"Tag {Name} has numeric keys; seek with a number."),
-            double or float => (decimal)Convert.ToDouble(key, CultureInfo.InvariantCulture),
+            double or float => DbfValueCodec.ToDecimal(key),
             _ => Convert.ToDecimal(key, CultureInfo.InvariantCulture),
         }),
         'D' => Encoding.ASCII.GetBytes(key switch

@@ -10,9 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **A double is taken as the number it prints as, on .NET 11 too.** .NET 11 converts a double to decimal exactly, so the double 1.23 became 1.2299999999999999822..., where .NET 10 gave 1.23. On .NET 11 that rounded a currency value given as the double 0.00015 to 0.0001 instead of 0.0002, and could miss seeks and change `ModifyStructure`'s loss checks. Thunder.Dbf now goes through the double's shortest text (as it already did for numeric fields) wherever a double meets a decimal: currency writes and seeks, `.ntx` keys, expressions, `ModifyStructure`, and SQL `REAL` values coming back through Thunder.Dbf.Sql. This affects apps running 0.4.4 or earlier on the .NET 11 runtime.
+
 ### Changed
 
 - **Thunder.Dbf, Thunder.Dbf.Sql and the `thunder-dbf` tool now target .NET 11 as well as .NET 10.** Apps on .NET 10 (the long-term support release) keep working as before; apps on .NET 11 get a build compiled for it. The web service, samples and benchmarks now run on .NET 11. Building the repository needs the .NET 11 SDK, and the tests run on both runtimes.
+- **Seeks, appends and reads allocate less.** An `.mdx` seek reads each index page into a pooled buffer and decodes numeric keys without building strings: 10,000 seeks allocate 20 MB, down from 63 MB. Every write claims its locks and walks its indexes without LINQ or closures (`.mdx` appends allocate 24% less), and `.cdx` pages are cached as written instead of copied (19% less). Numeric, date and memo-pointer fields are parsed straight from their bytes; a plain number is no longer checked digit by digit through strings, because a decimal holds any number of 28 digits or fewer exactly. Every field reads exactly as before, errors included.
 - **The benchmarks cover writes, seeks and garbage collection.** New benchmarks time appends that keep a dBASE IV `.mdx` and a FoxPro `.cdx` up to date and seeks through an `.mdx`, and `-- gc` reports GC pause time, collections and allocations for a mixed workload. Run them with `-f net10.0` or `-f net11.0` to compare runtimes.
 
 ## [0.4.4] - 2026-11-14

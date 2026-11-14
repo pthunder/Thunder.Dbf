@@ -1471,9 +1471,11 @@ public sealed partial class CdxTag : IMaintainedTag
         _index.Write(node.Offset, page ?? throw new InvalidOperationException($"Tag {Name}'s page at offset {node.Offset} doesn't fit."));
         // What was just written, as a reader would decode it. Byte order is only vouched for when it
         // was checked (or the change began from checked nodes): a rebuild's reads skip the check.
-        var written = _index.Deferring ? node : node.Copy();
-        written.InByteOrder = IsInByteOrder(written);
-        _index.CacheNode(node.Offset, this, written);
+        // The node itself is cached, not a copy: nothing changes a node after writing it (a deferred
+        // batch has always cached it this way), and ReadNode hands out copies, so a later change
+        // can't reach the cache. One copy fewer per page written.
+        node.InByteOrder = IsInByteOrder(node);
+        _index.CacheNode(node.Offset, this, node);
     }
 
     private byte[]? EncodeInterior(Node node)
