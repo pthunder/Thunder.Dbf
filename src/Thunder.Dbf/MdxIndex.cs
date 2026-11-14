@@ -546,13 +546,22 @@ internal static class MdxKeys
     public const double JetBlankDate = 1e100;
 
     // The two blank keys are exact bit patterns, not values that arithmetic arrives at: compare bits.
+    // Anything but 8 bytes (a damaged journal note, say) isn't a blank date.
     private static readonly long JetBlankBits = BitConverter.DoubleToInt64Bits(JetBlankDate);
 
     /// <summary>A date key that is Jet's blank, 1E100.</summary>
-    public static bool IsJetBlank(ReadOnlySpan<byte> key) => BinaryPrimitives.ReadInt64LittleEndian(key) == JetBlankBits;
+    public static bool IsJetBlank(ReadOnlySpan<byte> key) => key.Length == 8 && BinaryPrimitives.ReadInt64LittleEndian(key) == JetBlankBits;
 
     /// <summary>A date key that is dBASE's blank, 0 (either sign).</summary>
-    public static bool IsZeroBlank(ReadOnlySpan<byte> key) => (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
+    public static bool IsZeroBlank(ReadOnlySpan<byte> key) => key.Length == 8 && (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
+
+    /// <summary>A new date key holding Jet's blank, 1E100.</summary>
+    public static byte[] JetBlankKey()
+    {
+        var key = new byte[8];
+        BinaryPrimitives.WriteDoubleLittleEndian(key, JetBlankDate);
+        return key;
+    }
 
     /// <summary>A date key that is a blank in either form.</summary>
     public static bool IsBlankDate(ReadOnlySpan<byte> key) => IsZeroBlank(key) || IsJetBlank(key);
