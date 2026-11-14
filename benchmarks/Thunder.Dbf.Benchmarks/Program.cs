@@ -173,7 +173,7 @@ public class WriteBenchmarks
     public void SetupMdx()
     {
         _mdxPath = Path.Combine(Directory.CreateDirectory(Path.Combine(_dir, $"m{Guid.NewGuid():N}")).FullName, "BENCH.DBF");
-        using (var table = DbfTable.Create(_mdxPath, DbfTableFormat.DbaseIV, Fields()))
+        using (DbfTable.Create(_mdxPath, DbfTableFormat.DbaseIV, Fields()))
         {
         }
         using (var table = DbfTable.Open(_mdxPath, writable: true, exclusive: true))
@@ -189,7 +189,7 @@ public class WriteBenchmarks
     public void SetupCdx()
     {
         _cdxPath = Path.Combine(Directory.CreateDirectory(Path.Combine(_dir, $"c{Guid.NewGuid():N}")).FullName, "BENCH.DBF");
-        using (var table = DbfTable.Create(_cdxPath, DbfTableFormat.VisualFoxPro, Fields()))
+        using (DbfTable.Create(_cdxPath, DbfTableFormat.VisualFoxPro, Fields()))
         {
         }
         using (var table = DbfTable.Open(_cdxPath, writable: true, maintainFoxProIndexes: true, exclusive: true))
@@ -295,7 +295,7 @@ public static class GcReport
     private static void Workload(string dir, int run)
     {
         var path = Path.Combine(dir, $"GC{run}.DBF");
-        using (var table = DbfTable.Create(path, DbfTableFormat.DbaseIV, WriteBenchmarks.Fields()))
+        using (DbfTable.Create(path, DbfTableFormat.DbaseIV, WriteBenchmarks.Fields()))
         {
         }
         using (var table = DbfTable.Open(path, writable: true, exclusive: true))
