@@ -444,10 +444,10 @@ public sealed partial class MdxTag
     /// <summary>
     /// The stored bytes for one key value. Shared with INDEX ON, which encodes every key before a new
     /// tag exists, so a value that can't be stored stops the command before the file changes. A new
-    /// tag counts digits as Jet does (see <see cref="MdxTag.NumericStyle"/>) and keys a blank date as 0
-    /// (see <see cref="MdxTag.BlankDateKey"/>).
+    /// tag counts digits as Jet does (see <see cref="MdxTag.NumericStyle"/>) and keys a blank date as Jet
+    /// does, 1E100 (see <see cref="MdxTag.BlankDateKey"/>).
     /// </summary>
-    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, NumericKeyStyle style = NumericKeyStyle.Jet, double blankDate = 0d)
+    internal static byte[] EncodeKey(char keyType, int keyLength, Encoding encoding, object? value, string tag, string expression, NumericKeyStyle style = NumericKeyStyle.Jet, double blankDate = MdxKeys.JetBlankDate)
     {
         switch (keyType)
         {
@@ -503,8 +503,11 @@ public sealed partial class MdxTag
     /// <summary>True when some entry has exactly this key (the first entry at or after it matches).</summary>
     internal bool ContainsKey(byte[] key) => FirstRecordFor(key) is not null;
 
-    /// <summary>The record number of the first entry with exactly this key, or null.</summary>
-    internal int? FirstRecordFor(byte[] key)
+    /// <summary>The record number of the first entry with this key, or null. A blank date matches either blank form.</summary>
+    internal int? FirstRecordFor(byte[] key) =>
+        FirstRecordForExact(key) ?? (OtherBlankDate(key) is { } other ? FirstRecordForExact(other) : null);
+
+    private int? FirstRecordForExact(byte[] key)
     {
         // Usually the first key at or after this one is in the leaf the search lands on. When the
         // leaf runs out first, the answer is in a later leaf, and the full walk finds it, unless the

@@ -176,4 +176,62 @@ public sealed class MdxBlankDateTests : IDisposable
         Assert.Equal(3, Keys(path).Count);
         AssertInStep(path);
     }
+
+    [Fact]
+    public void The_first_blank_in_a_tag_and_every_blank_in_a_new_tag_take_Jets_form()
+    {
+        // A new tag keys its blanks as Jet does.
+        var path = JetTable(Late, null, Early);
+        Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 1e100)], Keys(path));
+
+        // A tag with no blank yet: Jet's form for the first, after every real date.
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UpdateFields(1, new Dictionary<string, object?> { ["D"] = Late });
+            table.Append(4m, null);
+        }
+        using (var table = DbfTable.Open(path, writable: true))
+            table.Append(5m, null);
+
+        Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 2461358d), (4, 1e100), (5, 1e100)], Keys(path));
+        AssertInStep(path);
+    }
+
+    [Fact]
+    public void A_UNIQUE_date_tag_keeps_one_blank_whatever_its_form()
+    {
+        var path = Path.Combine(_dir.FullName, "BLANKU.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 5), DbfFieldDefinition.Date("D")]))
+            table.Append(1m, null);
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("BYD", "D", unique: true);
+        Assert.Equal([(1, 1e100)], Keys(path));
+
+        // Writer A sees Jet's blank, then moves it to a date: A keeps Jet's form.
+        using var a = DbfTable.Open(path, writable: true);
+        a.UpdateFields(0, new Dictionary<string, object?> { ["D"] = Late });
+
+        // Another writer's blank lands as 0.4.3 would have keyed it: [#2 0, #1 2026].
+        using (var b = DbfTable.Open(path, writable: true))
+            b.Append(2m, null);
+        using (var mdx = new FileStream(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
+        {
+            var bytes = new byte[mdx.Length];
+            mdx.ReadExactly(bytes);
+            var (node, itemLength) = Leaf(bytes);
+            var items = Enumerable.Range(0, 2).Select(i => bytes.AsSpan(node + 8 + i * itemLength, itemLength).ToArray()).ToList();
+            BinaryPrimitives.WriteDoubleLittleEndian(items[1].AsSpan(4), 0d);
+            mdx.Position = node + 8;
+            mdx.Write(items[1]);
+            mdx.Write(items[0]);
+        }
+        Assert.Equal([(2, 0d), (1, 2461358d)], Keys(path));
+
+        // A's new blank is 1E100: record 2 already holds the blank, so no second one goes in.
+        a.Append(3m, null);
+        a.Dispose();
+
+        Assert.Equal([2], Keys(path).Where(k => MdxKeys.IsBlankDate(BitConverter.GetBytes(k.Julian))).Select(k => k.Record));
+        AssertInStep(path);
+    }
 }

@@ -412,10 +412,12 @@ public sealed partial class MdxTag
         }
     }
 
-    // Jet keys a blank date as 1E100, so blanks sort after every real date; dBASE files and Thunder.Dbf
-    // key it as 0. Jet steps between matches by comparing bytes, so a tag keeps the form its keys
-    // show (a blank in either form sits in an edge leaf), for as long as the index is open; one that
-    // shows neither takes 0.
+    // Jet keys a blank date as 1E100, so blanks sort after every real date; Thunder.Dbf 0.4.3 and
+    // earlier keyed it as 0, as a dBASE engine may. Jet steps between matches by comparing bytes and
+    // counts only 1E100 as blank, so a tag keeps the form its keys show (a blank in either form sits
+    // in an edge leaf; Jet's is remembered while the index is open), and one that shows neither takes
+    // Jet's, like the digit count: every Jet tag starts with no blanks, and nothing else in its file
+    // tells it from another writer's.
     private double? _blankDateKey;
 
     /// <summary>The key this date tag gives a blank date: 0, or Jet's 1E100. Learned once from its keys.</summary>
@@ -429,14 +431,17 @@ public sealed partial class MdxTag
             return MdxKeys.JetBlankDate;
         try
         {
-            if (!EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).Any(k => MdxKeys.IsJetBlank(k)))
-                return 0d;
-            _index.JetBlankDateTags.Add(_headerPage);
-            return MdxKeys.JetBlankDate;
+            var edges = EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).ToList();
+            if (edges.Any(k => MdxKeys.IsJetBlank(k)))
+            {
+                _index.JetBlankDateTags.Add(_headerPage);
+                return MdxKeys.JetBlankDate;
+            }
+            return edges.Any(k => MdxKeys.IsZeroBlank(k)) ? 0d : MdxKeys.JetBlankDate;
         }
         catch (InvalidDataException)
         {
-            return 0d;
+            return MdxKeys.JetBlankDate; // a damaged tree has nothing to follow, and a rebuild must still work
         }
     }
 
