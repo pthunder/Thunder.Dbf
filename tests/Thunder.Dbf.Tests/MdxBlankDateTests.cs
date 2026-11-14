@@ -248,4 +248,28 @@ public sealed class MdxBlankDateTests : IDisposable
         Assert.Equal([2], Keys(path).Where(k => MdxKeys.IsBlankDate(BitConverter.GetBytes(k.Julian))).Select(k => k.Record));
         AssertInStep(path);
     }
+
+    [Fact]
+    public void A_rebuild_keys_blanks_that_an_earlier_version_wrote_as_Jet_does()
+    {
+        // [#2 0, #1 2026]: a Jet tag whose one blank 0.4.3 keyed as 0, so the tag shows only 0.
+        var path = JetTable(Late, null);
+        var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var (node, itemLength) = Leaf(bytes);
+        var items = Enumerable.Range(0, 2).Select(i => bytes.AsSpan(node + 8 + i * itemLength, itemLength).ToArray()).ToList();
+        BinaryPrimitives.WriteDoubleLittleEndian(items[1].AsSpan(4), 0d);
+        items[1].CopyTo(bytes, node + 8);
+        items[0].CopyTo(bytes, node + 8 + itemLength);
+        File.WriteAllBytes(Path.ChangeExtension(path, ".MDX"), bytes);
+        Assert.Equal([(2, 0d), (1, 2461358d)], Keys(path));
+
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+        {
+            table.RebuildIndex();
+            table.Append(3m, null);
+        }
+
+        Assert.Equal([(1, 2461358d), (2, 1e100), (3, 1e100)], Keys(path));
+        AssertInStep(path);
+    }
 }

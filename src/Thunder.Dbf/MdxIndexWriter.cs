@@ -874,6 +874,14 @@ public sealed partial class MdxTag
     /// </summary>
     internal void Refill(IReadOnlyList<(byte[] Key, int Record)> keys)
     {
+        // A rebuilt date tag keys every blank as Jet does, whichever form it held: a 0 blank an earlier
+        // version wrote into a Jet table is one Jet's IS NULL doesn't count, and a rebuild is the repair.
+        var jetBlanks = KeyType == 'D';
+        if (jetBlanks)
+        {
+            _index.JetBlankDateTags.Add(_headerPage);
+            _blankDateKey = MdxKeys.JetBlankDate;
+        }
         try
         {
             if (_index.PagesToReuse(this) is { } pages)
@@ -892,8 +900,9 @@ public sealed partial class MdxTag
                 WriteNode(root, [], 0);
                 SetRoot(root);
             }
-            foreach (var (key, record) in keys)
+            foreach (var (stored, record) in keys)
             {
+                var key = jetBlanks && MdxKeys.IsBlankDate(stored) ? MdxKeys.JetBlankKey() : stored;
                 // Judged by the tag's own comparison, so 1E2 and 100 count as one key.
                 if (!IsUnique || FirstRecordFor(key) is null)
                     Insert(key, record);

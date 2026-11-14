@@ -554,6 +554,14 @@ internal static class MdxKeys
     /// <summary>A date key that is dBASE's blank, 0 (either sign).</summary>
     public static bool IsZeroBlank(ReadOnlySpan<byte> key) => (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
 
+    /// <summary>A new date key holding Jet's blank, 1E100.</summary>
+    public static byte[] JetBlankKey()
+    {
+        var key = new byte[8];
+        BinaryPrimitives.WriteDoubleLittleEndian(key, JetBlankDate);
+        return key;
+    }
+
     /// <summary>A date key that is a blank in either form.</summary>
     public static bool IsBlankDate(ReadOnlySpan<byte> key) => IsZeroBlank(key) || IsJetBlank(key);
 
