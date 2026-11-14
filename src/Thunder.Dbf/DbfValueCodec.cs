@@ -333,7 +333,12 @@ internal static class DbfValueCodec
             float f => decimal.Parse(f.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture),
             _ => Convert.ToDecimal(value, CultureInfo.InvariantCulture),
         };
-        return number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
+        // Like FoxPro, a value whose whole part fits but whose decimals don't keeps as many decimals as
+        // fit: N(10,2) stores 12345678.9 as "12345678.9". A whole part that doesn't fit still overflows.
+        var text = number.ToString("F" + field.DecimalCount, CultureInfo.InvariantCulture);
+        for (var decimals = field.DecimalCount - 1; text.Length > field.Length && decimals >= 0; decimals--)
+            text = number.ToString("F" + decimals, CultureInfo.InvariantCulture);
+        return text;
     }
 
     private static string Ascii(ReadOnlySpan<byte> raw) => Encoding.ASCII.GetString(raw).Trim(' ', '\0');

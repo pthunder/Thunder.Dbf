@@ -490,6 +490,20 @@ public sealed partial class CdxTag
     public IEnumerable<IndexEntry> SeekExact(object? key)
     {
         _undecided = null;
+        // On a nullable date or datetime field a blank value reads back as null like .NULL. does, so a
+        // null finds both: the .NULL. keys (all zeros) and the blank ones (the marker, then the blank key).
+        if (key is null && HasNullMarker && KeyType is 'D' or 'T')
+        {
+            byte[] nulls = new byte[KeyLength], blanks = [0x80, .. ProbeValue(null)];
+            foreach (var probe in IsDescending ? [blanks, nulls] : new[] { nulls, blanks })
+                foreach (var hit in Walk(probe))
+                {
+                    if (!hit.Matches)
+                        break;
+                    yield return hit.Entry;
+                }
+            yield break;
+        }
         foreach (var hit in Walk(Probe(key)))
         {
             if (!hit.Matches)

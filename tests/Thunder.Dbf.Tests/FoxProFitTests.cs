@@ -1,0 +1,93 @@
+//      SEEK null     .NULL. + blank      ProjectThunder :: Thunder.Dbf tests
+//      N(10,2)       12345678.9          What Visual FoxPro stores and finds that Thunder.Dbf didn't:
+//                                        blank dates on nullable tags, decimals dropped to fit.
+
+using Thunder.Dbf;
+
+namespace Thunder.Dbf.Tests;
+
+// Two things the VFP 9 test PC found on PR #66's tables: blank (not .NULL.) dates on nullable date and
+// datetime tags, and numbers VFP fitted into a field by dropping decimals.
+public sealed class FoxProFitTests : IDisposable
+{
+    private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-foxfit-");
+
+    public void Dispose() => _dir.Delete(recursive: true);
+
+    [Fact]
+    public void Seeking_null_on_a_nullable_date_tag_finds_blank_dates_too()
+    {
+        var path = Path.Combine(_dir.FullName, "dates.dbf");
+        var date = new DateOnly(2026, 11, 13);
+        var moment = new DateTime(2026, 11, 13, 8, 30, 0);
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro,
+            [DbfFieldDefinition.Date("NDAT") with { Nullable = true }, DbfFieldDefinition.DateTime("NDTM") with { Nullable = true }]))
+        {
+            for (var i = 0; i < 12; i++)
+                table.Append(i % 3 == 0 ? null : date, i % 3 == 0 ? null : moment);
+        }
+
+        // Rows 1, 4, 7 and 10 become blank, not .NULL.: VFP's empty date is spaces, its empty datetime zeros.
+        var blankRows = new[] { 1, 4, 7, 10 };
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite))
+        using (var table = DbfTable.Open(stream, leaveOpen: true))
+        {
+            var dat = table.Fields.Single(f => f.Name == "NDAT");
+            var dtm = table.Fields.Single(f => f.Name == "NDTM");
+            foreach (var row in blankRows)
+            {
+                var at = table.Header.HeaderLength + (long)row * table.Header.RecordLength;
+                stream.Position = at + dat.Offset;
+                stream.Write(new byte[dat.Length].Select(_ => (byte)' ').ToArray());
+                stream.Position = at + dtm.Offset;
+                stream.Write(new byte[dtm.Length]);
+            }
+        }
+
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.False(table.Read(1).IsNull(0));
+            Assert.Null(table.Read(1)[0]);
+            table.CreateIndexTag("NDAT", "NDAT");
+            table.CreateIndexTag("NDTM", "NDTM");
+            table.CreateIndexTag("NDATD", "NDAT", descending: true);
+        }
+
+        using (var table = DbfTable.Open(path))
+        using (var cdx = table.OpenStructuralIndex()!)
+        {
+            var expected = new[] { 1, 2, 4, 5, 7, 8, 10, 11 }; // record numbers count from 1
+            foreach (var tag in new[] { "NDAT", "NDTM", "NDATD" })
+            {
+                var found = cdx[tag].SeekExact(null).Select(e => e.RecordNumber).ToList();
+                Assert.Equal(expected, found.Order());
+                Assert.Equal(found.Count, found.Distinct().Count());
+                Assert.All(cdx[tag].SeekExact(null), e => Assert.Null(e.Key));
+            }
+            Assert.Equal(4, cdx["NDAT"].SeekExact(date).Count());
+            Assert.Equal(4, cdx["NDTM"].SeekExact(moment).Count());
+        }
+    }
+
+    [Fact]
+    public void A_number_whose_decimals_do_not_fit_keeps_the_decimals_that_do()
+    {
+        var path = Path.Combine(_dir.FullName, "nums.dbf");
+        using var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Numeric("NNUM", 10, 2)]);
+
+        table.Append(12345678.9m);
+        table.Append(12345678.95m);
+        table.Append(-1234567.891m);
+        table.Append(123456789.4);
+        table.Append(-12.5m);
+
+        Assert.Equal(12345678.9m, Convert.ToDecimal(table.Read(0)[0]));
+        Assert.Equal(12345679.0m, Convert.ToDecimal(table.Read(1)[0]));
+        Assert.Equal(-1234567.9m, Convert.ToDecimal(table.Read(2)[0]));
+        Assert.Equal(123456789m, Convert.ToDecimal(table.Read(3)[0]));
+        Assert.Equal(-12.5m, Convert.ToDecimal(table.Read(4)[0]));
+
+        // A whole part that doesn't fit still overflows.
+        Assert.Throws<OverflowException>(() => table.Append(12345678901m));
+    }
+}

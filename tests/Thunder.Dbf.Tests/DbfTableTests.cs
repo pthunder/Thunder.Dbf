@@ -98,7 +98,7 @@ public class DbfTableTests
         using var table = DbfTable.Create(stream, Employees);
 
         Assert.Throws<ArgumentException>(() => table.Append(new string('x', 21), null, null, null, null));
-        Assert.Throws<OverflowException>(() => table.Append("Big", 12345678.9m, null, null, null));
+        Assert.Throws<OverflowException>(() => table.Append("Big", 12345678901m, null, null, null));
         Assert.Throws<ArgumentException>(() => table.Append("Short"));
         Assert.Equal(0, table.RecordCount);
     }
