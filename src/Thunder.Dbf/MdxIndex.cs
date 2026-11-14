@@ -549,6 +549,9 @@ internal static class MdxKeys
     /// <summary>A date key that is dBASE's blank, 0 (either sign).</summary>
     public static bool IsZeroBlank(ReadOnlySpan<byte> key) => (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
 
+    /// <summary>A date key that is a blank in either form.</summary>
+    public static bool IsBlankDate(ReadOnlySpan<byte> key) => IsZeroBlank(key) || IsJetBlank(key);
+
     private const int ExponentBias = 52;
     private const int MaxDigits = 20;
     private const int JulianDayOfDayNumberZero = 1721426;

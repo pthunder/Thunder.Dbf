@@ -142,4 +142,38 @@ public sealed class MdxBlankDateTests : IDisposable
         Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 2461358d)], Keys(path));
         AssertInStep(path);
     }
+
+    private sealed class Killed : Exception;
+
+    [Fact]
+    public void A_journal_note_in_one_blank_form_keeps_the_records_key_in_the_other()
+    {
+        // [#1 0, #3 2000-01-01, #2 1E100]: record 1's blank as 0.4.3 keyed it, record 2's as Jet does.
+        var path = JetTable(null, null, new DateOnly(2000, 1, 1));
+        var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var (node, itemLength) = Leaf(bytes);
+        var items = Enumerable.Range(0, 3).Select(i => bytes.AsSpan(node + 8 + i * itemLength, itemLength).ToArray()).ToList();
+        BinaryPrimitives.WriteDoubleLittleEndian(items[1].AsSpan(4), 0d);
+        foreach (var (item, i) in new[] { items[1], items[0], items[2] }.Select((item, i) => (item, i)))
+            item.CopyTo(bytes, node + 8 + i * itemLength);
+        File.WriteAllBytes(Path.ChangeExtension(path, ".MDX"), bytes);
+        Assert.Equal([(1, 0d), (3, 2451545d), (2, 1e100)], Keys(path));
+
+        // The tag has learned Jet's form, so the note keys record 1's blank as 1E100; the write is cut
+        // off after its new keys go in, and the replay then finds no Jet blank left in the tag.
+        using (var table = DbfTable.Open(path, writable: true))
+        {
+            table.UseJournal = true;
+            table.UpdateFields(1, new Dictionary<string, object?> { ["D"] = new DateOnly(2001, 1, 1) });
+            table.CrashPoint = point => { if (point == "new keys") throw new Killed(); };
+            Assert.Throws<Killed>(() => table.UpdateFields(0, new Dictionary<string, object?> { ["D"] = new DateOnly(2002, 1, 1) }));
+        }
+
+        using (var table = DbfTable.Open(path, writable: true))
+            table.UpdateFields(2, new Dictionary<string, object?> { ["ID"] = 30m });
+
+        Assert.Equal([1], Keys(path).Where(k => MdxKeys.IsBlankDate(BitConverter.GetBytes(k.Julian))).Select(k => k.Record));
+        Assert.Equal(3, Keys(path).Count);
+        AssertInStep(path);
+    }
 }
