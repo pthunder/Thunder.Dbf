@@ -18,7 +18,7 @@ Six fixes, five of them for tables that Visual FoxPro or Access write. The ones 
 - A number whose decimals don't fit its field is stored with the decimals that do, where it threw `OverflowException`. A whole part that doesn't fit still throws.
 - Currency rounds half away from zero (1.00005 is 1.0001), where it rounded half to even.
 - `SeekExact(null)` on a `.cdx` tag over a nullable date or datetime field returns blank dates as well as `.NULL.` ones.
-- A blank date in a dBASE `.mdx` date tag is keyed 1E100, as Jet keys it, in new tags and in tags with no blank yet, where it was keyed 0. A tag whose blanks are all 0 keeps 0.
+- A blank date in a dBASE `.mdx` date tag is keyed 1E100, as Jet keys it, in new tags, in tags with no blank yet and by `RebuildIndex()` and `Pack()`, where it was keyed 0. A tag whose blanks are all 0 keeps 0 until it's rebuilt. If 0.4.3 wrote blank dates into a table Access or VB also uses, run `RebuildIndex()` once so Jet finds them.
 
 ### Fixed
 
