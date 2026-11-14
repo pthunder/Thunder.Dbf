@@ -174,7 +174,7 @@ public sealed partial class DbfTable : IDisposable
     /// <param name="encoding">Text encoding, overriding what the header or a .cpg file says.</param>
     /// <param name="exclusive">Open the .dbf so no other program can open it, like dBASE and FoxPro's
     /// <c>USE ... EXCLUSIVE</c>; fails with <see cref="DbfErrorCode.FileInUse"/> while another program has it
-    /// open. <see cref="Pack"/>, <see cref="ModifyStructure"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag"/>,
+    /// open. <see cref="Pack"/>, <see cref="ModifyStructure"/>, <see cref="RebuildIndex"/>, <see cref="CreateIndexTag(string, string, string?, bool, bool)"/>,
     /// <see cref="DropIndexTag"/> and <c>MaintainIndex(path, rebuild: true)</c> need it. A change of structure cut off
     /// partway is finished, or undone, by an open that's both writable and exclusive.</param>
     public static DbfTable Open(string path, bool writable = false, Encoding? encoding = null, bool ignoreMissingMemo = false,

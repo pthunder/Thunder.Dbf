@@ -8,7 +8,7 @@
 
 ## 1. Get it
 
-Thunder.Dbf targets .NET 10 and runs on Windows, Linux and macOS with no native drivers. It's one command from nuget.org:
+Thunder.Dbf targets .NET 10 and .NET 11 and runs on Windows, Linux and macOS with no native drivers. It's one command from nuget.org:
 
 ```bash
 dotnet add package Thunder.Dbf

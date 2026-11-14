@@ -66,8 +66,8 @@ public sealed class CrashSafeUpdateTests : IDisposable
         var name = (string)table.Read(1)["NAME"]!;
         using var index = table.OpenProductionIndex()!;
         // Whatever the record holds now, its tag finds it.
-        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == name);
-        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Zelda");
+        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key!).Trim() == name);
+        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key!).Trim() == "Zelda");
         Assert.Equal(step == "new keys" ? "Grace" : "Zelda", name);
     }
 
@@ -194,8 +194,8 @@ public sealed class CrashSafeUpdateTests : IDisposable
         using var table = DbfTable.Open(path, writable: true);
         table.UpdateFields(0, new Dictionary<string, object?> { ["AGE"] = 36m });   // finishes the note
         using var index = table.OpenProductionIndex()!;
-        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Zelda");
-        Assert.DoesNotContain(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key).Trim() == "Grace");
+        Assert.Contains(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key!).Trim() == "Zelda");
+        Assert.DoesNotContain(index["NAME"].Entries(), e => e.RecordNumber == 2 && ((string)e.Key!).Trim() == "Grace");
     }
 
     // A killed update leaves a .cdx tag with an extra key, which the open-time count check refuses.

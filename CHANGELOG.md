@@ -10,6 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- **Thunder.Dbf, Thunder.Dbf.Sql and the `thunder-dbf` tool now target .NET 11 as well as .NET 10.** Apps on .NET 10 (the long-term support release) keep working as before; apps on .NET 11 get a build compiled for it. The web service, samples and benchmarks now run on .NET 11. Building the repository needs the .NET 11 SDK, and the tests run on both runtimes.
+- **The benchmarks cover writes, seeks and garbage collection.** New benchmarks time appends that keep a dBASE IV `.mdx` and a FoxPro `.cdx` up to date and seeks through an `.mdx`, and `-- gc` reports GC pause time, collections and allocations for a mixed workload. Run them with `-f net10.0` or `-f net11.0` to compare runtimes.
+
 ## [0.4.4] - 2026-11-14
 
 Six fixes, five of them for tables that Visual FoxPro or Access write. The ones most worth upgrading for: a Visual FoxPro table with an index on a nullable number, date or currency field refused every write and couldn't be sought, and a dBASE table from Access or VB with a blank date in a date index failed writes or was left with a stale index entry.

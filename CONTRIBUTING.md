@@ -20,7 +20,7 @@
 
 ## Building and testing
 
-Needs the [.NET 10 SDK](https://dotnet.microsoft.com/download).
+Needs the [.NET 11 SDK](https://dotnet.microsoft.com/download), plus the .NET 10 runtime to run the tests on both targets.
 
 ```bash
 dotnet test Thunder.Dbf.slnx

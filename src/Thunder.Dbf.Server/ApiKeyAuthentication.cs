@@ -170,7 +170,7 @@ public sealed class AccessRegistry
 
     /// <summary>
     /// The id of the key whose hash matches, or null. Every configured hash is compared, with
-    /// <see cref="CryptographicOperations.FixedTimeEquals"/>, so timing says nothing about which one was close.
+    /// <see cref="CryptographicOperations.FixedTimeEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/>, so timing says nothing about which one was close.
     /// </summary>
     public string? Match(string presentedKey)
     {

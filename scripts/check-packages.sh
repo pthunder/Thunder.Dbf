@@ -42,14 +42,18 @@ for id in Thunder.Dbf Thunder.Dbf.Sql; do
     echo "• $id"
     nupkg=$(package_for "$id") || { fail "$id: no package in $folder"; continue; }
     check_common "$id" "$nupkg"
-    has_entry "$nupkg" "lib/net10.0/$id.dll" || fail "$id: no lib/net10.0/$id.dll"
-    has_entry "$nupkg" "lib/net10.0/$id.xml" || fail "$id: no XML docs (lib/net10.0/$id.xml)"
+    for tfm in net10.0 net11.0; do
+        has_entry "$nupkg" "lib/$tfm/$id.dll" || fail "$id: no lib/$tfm/$id.dll"
+        has_entry "$nupkg" "lib/$tfm/$id.xml" || fail "$id: no XML docs (lib/$tfm/$id.xml)"
+    done
 done
 
 echo "• thunder-dbf"
 if nupkg=$(package_for thunder-dbf); then
     check_common thunder-dbf "$nupkg"
-    has_entry "$nupkg" 'tools/net10.0/any/DotnetToolSettings.xml' || fail "thunder-dbf: not packed as a .NET tool"
+    for tfm in net10.0 net11.0; do
+        has_entry "$nupkg" "tools/$tfm/any/DotnetToolSettings.xml" || fail "thunder-dbf: not packed as a .NET tool for $tfm"
+    done
 
     # Install from this folder only (--source replaces nuget.org), so a published package
     # of the same version can't stand in for the one just built.

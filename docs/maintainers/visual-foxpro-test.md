@@ -11,20 +11,21 @@ FoxPro `.cdx` writing is an opt-in preview (`MaintainFoxProIndexes`) until this 
 
 - Windows 10 or 11, x64 or ARM64. VFP 9 is a 32-bit program and runs on both.
 - **Visual FoxPro 9.0 SP2**, from a Visual Studio (MSDN) subscription: my.visualstudio.com → Downloads → search "Visual FoxPro". VFP isn't redistributable, so it never goes in the repository.
-- **.NET 10 SDK**: https://dotnet.microsoft.com/download
+- **.NET 11 SDK and the .NET 10 runtime**: https://dotnet.microsoft.com/download (the tests run on both)
 - **Git**, and this repository.
 
 ## 1. Install
 
 1. Install Visual FoxPro 9, then SP2. The default folder is `C:\Program Files (x86)\Microsoft Visual FoxPro 9\`.
 2. Start VFP once by hand and close it. That gets past the first-run prompts, which would otherwise block a hidden run.
-3. Install the .NET 10 SDK, then check it in PowerShell:
+3. Install the .NET 11 SDK and the .NET 10 runtime, then check them in PowerShell:
 
    ```powershell
    dotnet --version
+   dotnet --list-runtimes
    ```
 
-   It should print `10.x`.
+   The first should print `11.x`, and the list should include a `Microsoft.NETCore.App 10.` runtime.
 
 ## 2. Get the code
 
