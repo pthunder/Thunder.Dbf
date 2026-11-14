@@ -118,25 +118,26 @@ public sealed class MdxBlankDateTests : IDisposable
     [Fact]
     public void A_tag_mixing_both_blank_forms_finds_and_removes_either()
     {
-        // Jet's blanks, then one Thunder.Dbf 0.4.3 wrote as 0 before it knew Jet's form.
-        var path = JetTable(Late, null);
+        // Two Jet blanks; then record 3's becomes a 0 at the front, as Thunder.Dbf 0.4.3 would have
+        // keyed it: the leaf is [#3 0, #1 2026, #2 1E100], both forms in one tag.
+        var path = JetTable(Late, null, null);
         var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
-        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
-            table.Append(3m, Early);
-        var (node, itemLength) = Leaf(File.ReadAllBytes(Path.ChangeExtension(path, ".MDX")));
-        // Turn record 2's 1E100 into 0 at the front: the leaf is [#3 1900, #1 2026, #2 1E100] now.
-        bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var (node, itemLength) = Leaf(bytes);
         var items = Enumerable.Range(0, 3).Select(i => bytes.AsSpan(node + 8 + i * itemLength, itemLength).ToArray()).ToList();
         BinaryPrimitives.WriteDoubleLittleEndian(items[2].AsSpan(4), 0d);
         foreach (var (item, i) in new[] { items[2], items[0], items[1] }.Select((item, i) => (item, i)))
             item.CopyTo(bytes, node + 8 + i * itemLength);
         File.WriteAllBytes(Path.ChangeExtension(path, ".MDX"), bytes);
-        Assert.Equal([(2, 0d), (3, 2415021d), (1, 2461358d)], Keys(path));
+        Assert.Equal([(3, 0d), (1, 2461358d), (2, 1e100)], Keys(path));
+        AssertInStep(path);
 
         using (var table = DbfTable.Open(path, writable: true))
-            table.UpdateFields(1, new Dictionary<string, object?> { ["D"] = Late });
+        {
+            table.UpdateFields(2, new Dictionary<string, object?> { ["D"] = Early }); // removes the 0
+            table.UpdateFields(1, new Dictionary<string, object?> { ["D"] = Late });  // removes the 1E100
+        }
 
-        Assert.Equal([3, 1, 2], Keys(path).Select(k => k.Record));
+        Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 2461358d)], Keys(path));
         AssertInStep(path);
     }
 }

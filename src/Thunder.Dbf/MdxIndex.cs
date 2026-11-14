@@ -111,13 +111,13 @@ public sealed partial class MdxIndex : IDisposable
     /// </summary>
     internal Func<bool>? IsExclusive { get; set; }
 
-    /// <summary>Reads the tag table again, for changes other programs made. <paramref name="force"/> for this process's own.</summary>
     /// <summary>
     /// Header pages of the date tags seen keying a blank as Jet does (1E100). Kept here, not on the
     /// tag, so a reload between writes doesn't forget it once the last such blank has left the tag.
     /// </summary>
     internal HashSet<int> JetBlankDateTags { get; } = [];
 
+    /// <summary>Reads the tag table again, for changes other programs made. <paramref name="force"/> for this process's own.</summary>
     internal void ReloadTags(bool force = false)
     {
         ThrowIfDropPending(); // before the header is read: it may be the half-dropped one
