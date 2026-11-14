@@ -892,8 +892,10 @@ public sealed partial class CdxTag : IMaintainedTag
                 // a key over a nullable field, are reproduced for a bare field (checked against tables VFP 9
                 // wrote); in anything more, guessing would mislead FoxPro.
                 var bare = BareField(table) is { } only && only.Name.Equals(field.Name, StringComparison.OrdinalIgnoreCase);
-                if (field.IsNullable && !(bare && field.Type == 'C'))
-                    return $"its expression uses the nullable field {field.Name} in a way whose key (with its null marker) isn't reproduced here; only a bare nullable character field is";
+                if (field.IsNullable && !bare)
+                    return $"its expression uses the nullable field {field.Name} in more than a bare field, and the key Visual FoxPro builds around its null marker there isn't reproduced here";
+                if (field.IsNullable && !HasNullMarker)
+                    return $"its key over the nullable field {field.Name} is {KeyLength} bytes, without the null marker byte Visual FoxPro puts in front of such keys";
                 if (field.Type is 'T' or 'Y' && !bare)
                     return $"its expression uses the {(field.Type == 'T' ? "datetime" : "currency")} field {field.Name} in more than a bare field, whose key isn't reproduced here";
             }
@@ -915,17 +917,17 @@ public sealed partial class CdxTag : IMaintainedTag
         // A currency tag keyed the way Harbour keys one (see IsCurrencyKey) is read, not written: its
         // key is the value as a double, worked out by Harbour's own arithmetic, and a key one bit off
         // wouldn't be found again.
-        if (bareType == 'Y' && KeyLength == 8 && ResolveCurrencyLayout() is CurrencyLayout.Harbour or CurrencyLayout.Either)
+        if (bareType == 'Y' && KeyLength == 8 && !HasNullMarker && ResolveCurrencyLayout() is CurrencyLayout.Harbour or CurrencyLayout.Either)
             return "its currency keys are stored as numbers, the way Harbour keys a currency field (or can't be told from that), and Harbour's conversion of the value isn't reproduced exactly here";
         KeyKind? kind = blank switch
         {
-            _ when bareType == 'Y' && KeyLength == 8 => KeyKind.Currency,
-            _ when bareType == 'T' && KeyLength == 8 => KeyKind.DateTime,
+            _ when bareType == 'Y' && ValueLength == 8 => KeyKind.Currency,
+            _ when bareType == 'T' && ValueLength == 8 => KeyKind.DateTime,
             string when KeyType == 'C' => KeyKind.Character,
-            decimal or double when KeyLength == 8 => KeyKind.Double,
-            decimal or double when KeyLength == 4 && BareField(table) is { Type: 'I' } => KeyKind.Integer,
-            DateOnly or null when KeyLength == 8 => KeyKind.Date,
-            bool when KeyLength == 1 => KeyKind.Logical,
+            decimal or double when ValueLength == 8 => KeyKind.Double,
+            decimal or double when ValueLength == 4 && BareField(table) is { Type: 'I' } => KeyKind.Integer,
+            DateOnly or null when ValueLength == 8 => KeyKind.Date,
+            bool when ValueLength == 1 => KeyKind.Logical,
             _ => null,
         };
         if (kind is null)
@@ -946,9 +948,14 @@ public sealed partial class CdxTag : IMaintainedTag
             _parts = parts;
         }
         _kind = kind.Value;
+        _nullMarkedField = HasNullMarker && kind != KeyKind.Character ? table.Fields.ToList().FindIndex(f => f.Name.Equals(Expression.Trim(), StringComparison.OrdinalIgnoreCase)) : -1;
         _prepared = true;
         return null;
     }
+
+    // The field index of a bare nullable non-character field whose keys carry Visual FoxPro's null
+    // marker, or -1. (A nullable character field's marker is put in by CharacterKey.)
+    private int _nullMarkedField = -1;
 
     private DbfField? BareField(DbfTable table) =>
         table.Fields.FirstOrDefault(f => string.Equals(f.Name, Expression.Trim(), StringComparison.OrdinalIgnoreCase));
@@ -1163,7 +1170,21 @@ public sealed partial class CdxTag : IMaintainedTag
         EnsurePrepared();
         if (_kind == KeyKind.Character)
             return CharacterKey(record);
+        if (_nullMarkedField >= 0)
+        {
+            // Visual FoxPro: all zeros for .NULL.; otherwise 0x80, then the field's usual key.
+            var marked = new byte[KeyLength];
+            if (record.IsNull(_nullMarkedField))
+                return marked;
+            marked[0] = 0x80;
+            ValueKeyBytes(record).CopyTo(marked, 1);
+            return marked;
+        }
+        return ValueKeyBytes(record);
+    }
 
+    private byte[] ValueKeyBytes(DbfRecord record)
+    {
         var value = _keyExpression!.Evaluate(record);
         switch (_kind)
         {
@@ -1207,7 +1228,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 // The stored ten-thousandths, big-endian, with the sign bit flipped so negatives sort first.
                 var scaled = value switch
                 {
-                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m)),
+                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m, MidpointRounding.AwayFromZero)),
                     null => 0L,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
                 };

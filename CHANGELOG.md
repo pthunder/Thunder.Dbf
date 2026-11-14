@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **FoxPro `.cdx` tags on nullable currency, numeric, integer, date, datetime and double fields are read, sought and kept up to date.** Visual FoxPro puts its null marker byte in front of the key of every nullable field, not only character ones: 0x80 then the field's usual key, and all zeros for `.NULL.`. 0.4.3 read the marker only on character fields, so on the others `Seek` and `SeekExact` found nothing (an integer tag threw `ArgumentOutOfRangeException`), and a table with such a tag refused every write. `SeekExact(null)` finds the `.NULL.` records. `CreateIndexTag` on a nullable field of any type now makes the key one byte longer, as Visual FoxPro does. Found on Visual FoxPro 9 by the Windows test PC.
+- **A FoxPro `.cdx` that can't be kept up to date now says why.** The refusal (`IndexWouldGoStale`) named only the index being out of step with the table; it now says a tag's key may be one Thunder.Dbf doesn't build, and the exception's `Diagnostic` gives the exact reason.
+- **`SeekExact(null)` on a `.cdx` tag over a nullable date or datetime field finds blank dates too.** A blank date that isn't `.NULL.` reads back as null, but its key is the marker byte then the blank key, so seeking null found only the `.NULL.` records and the blank ones couldn't be sought at all. Visual FoxPro 9's `SEEK {}` finds them.
+- **A number whose decimals don't fit its field keeps the decimals that do, as FoxPro does, instead of throwing.** Visual FoxPro stores 12345678.9 in an N(10,2) field as `12345678.9`; Thunder.Dbf read it back but threw `OverflowException` writing the same value. The value is rounded to the decimals that fit; a whole part that doesn't fit still throws. Checked against tables Visual FoxPro 9 wrote.
+- **Currency rounds half away from zero, as Visual FoxPro 9 does.** A currency value with more than four decimals was rounded half to even, so 1.00005 was stored as 1.0000 where Visual FoxPro stores 1.0001 (and 1.00025 as 1.0002, not 1.0003). Writing a currency field and seeking a currency `.cdx` tag now round the same way Visual FoxPro does.
+
 ## [0.4.3] - 2026-11-11
 
 Eighteen bug fixes, found by reading the whole library through for bugs and checked again by a release audit of the fixes. The ones most worth upgrading for: an `.mdx` that grew with every rebuild or `Pack()`, FoxPro currency and nullable index tags that couldn't be sought, a `Pack()` whose failed safety copy could be mistaken for the table, and, on Linux, locks one table could drop for another in the same process. Each has a test that fails without the fix, bar the PostgreSQL one (the tests run against SQLite). Checked on Windows, Linux and macOS.
