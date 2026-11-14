@@ -293,11 +293,19 @@ public sealed partial class MdxTag
     /// <summary>Only the keys equal to <paramref name="key"/> (prefix-equal for character keys).</summary>
     public IEnumerable<MdxEntry> SeekExact(object? key)
     {
-        foreach (var hit in Walk(Probe(key)))
+        // A blank date may be keyed either way in one tag (0 by dBASE and Thunder.Dbf, 1E100 by Jet),
+        // so a null finds both runs, in the tag's order: 0 sorts first, 1E100 last.
+        IEnumerable<KeyProbe> probes = key is null && KeyType == 'D'
+            ? IsDescending ? [new DateProbe(MdxKeys.JetBlankDate), new DateProbe(0d)] : [new DateProbe(0d), new DateProbe(MdxKeys.JetBlankDate)]
+            : [Probe(key)];
+        foreach (var probe in probes)
         {
-            if (!hit.Matches)
-                yield break;
-            yield return hit.Entry;
+            foreach (var hit in Walk(probe))
+            {
+                if (!hit.Matches)
+                    break;
+                yield return hit.Entry;
+            }
         }
     }
 

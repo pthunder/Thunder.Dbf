@@ -130,6 +130,8 @@ public sealed class MdxBlankDateTests : IDisposable
         File.WriteAllBytes(Path.ChangeExtension(path, ".MDX"), bytes);
         Assert.Equal([(3, 0d), (1, 2461358d), (2, 1e100)], Keys(path));
         AssertInStep(path);
+        using (var mdx = MdxIndex.Open(new FileStream(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite)))
+            Assert.Equal([3, 2], mdx["BYD"].SeekExact(null).Select(e => e.RecordNumber));
 
         using (var table = DbfTable.Open(path, writable: true))
         {
