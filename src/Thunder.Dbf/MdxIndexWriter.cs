@@ -676,11 +676,11 @@ public sealed partial class MdxTag
     {
         if (KeyType != 'D')
             return null;
-        var julian = BinaryPrimitives.ReadDoubleLittleEndian(key);
-        if (julian != 0d && julian != MdxKeys.JetBlankDate)
+        var zero = MdxKeys.IsZeroBlank(key);
+        if (!zero && !MdxKeys.IsJetBlank(key))
             return null;
         var other = new byte[8];
-        BinaryPrimitives.WriteDoubleLittleEndian(other, julian == 0d ? MdxKeys.JetBlankDate : 0d);
+        BinaryPrimitives.WriteDoubleLittleEndian(other, zero ? MdxKeys.JetBlankDate : 0d);
         return other;
     }
 

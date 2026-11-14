@@ -421,7 +421,7 @@ public sealed partial class MdxTag
             return MdxKeys.JetBlankDate;
         try
         {
-            if (!EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).Any(k => BinaryPrimitives.ReadDoubleLittleEndian(k) == MdxKeys.JetBlankDate))
+            if (!EdgeLeafKeys(rightmost: false).Concat(EdgeLeafKeys(rightmost: true)).Any(k => MdxKeys.IsJetBlank(k)))
                 return 0d;
             _index.JetBlankDateTags.Add(_headerPage);
             return MdxKeys.JetBlankDate;
@@ -531,6 +531,16 @@ internal static class MdxKeys
 
     /// <summary>The key Jet's dBASE driver gives a blank date (dBASE and Thunder.Dbf give 0).</summary>
     public const double JetBlankDate = 1e100;
+
+    // The two blank keys are exact bit patterns, not values that arithmetic arrives at: compare bits.
+    private static readonly long JetBlankBits = BitConverter.DoubleToInt64Bits(JetBlankDate);
+
+    /// <summary>A date key that is Jet's blank, 1E100.</summary>
+    public static bool IsJetBlank(ReadOnlySpan<byte> key) => BinaryPrimitives.ReadInt64LittleEndian(key) == JetBlankBits;
+
+    /// <summary>A date key that is dBASE's blank, 0 (either sign).</summary>
+    public static bool IsZeroBlank(ReadOnlySpan<byte> key) => (BinaryPrimitives.ReadInt64LittleEndian(key) & long.MaxValue) == 0;
+
     private const int ExponentBias = 52;
     private const int MaxDigits = 20;
     private const int JulianDayOfDayNumberZero = 1721426;
@@ -541,7 +551,7 @@ internal static class MdxKeys
     {
         var julian = BinaryPrimitives.ReadDoubleLittleEndian(key);
         var dayNumber = (long)julian - JulianDayOfDayNumberZero;
-        return julian is 0 or JetBlankDate || dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber ? null : DateOnly.FromDayNumber((int)dayNumber);
+        return IsZeroBlank(key) || IsJetBlank(key) || dayNumber < 0 || dayNumber > DateOnly.MaxValue.DayNumber ? null : DateOnly.FromDayNumber((int)dayNumber);
     }
 
     // value = ±0.d1d2d3... × 10^(byte0 - 52); byte1 bit 7 is the sign; digits are packed BCD, high nibble first.

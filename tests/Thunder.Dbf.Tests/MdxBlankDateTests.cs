@@ -36,17 +36,17 @@ public sealed class MdxBlankDateTests : IDisposable
         var (node, itemLength) = Leaf(bytes);
         var count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(node));
         var items = Enumerable.Range(0, count).Select(i => bytes.AsSpan(node + 8 + i * itemLength, itemLength).ToArray()).ToList();
-        var ordered = items.Where(item => Julian(item) != 0).Concat(items.Where(item => Julian(item) == 0)).ToList();
+        var ordered = items.Where(item => !Blank(item)).Concat(items.Where(Blank)).ToList();
         for (var i = 0; i < count; i++)
         {
-            if (Julian(ordered[i]) == 0)
+            if (Blank(ordered[i]))
                 BinaryPrimitives.WriteDoubleLittleEndian(ordered[i].AsSpan(4), 1e100);
             ordered[i].CopyTo(bytes, node + 8 + i * itemLength);
         }
         File.WriteAllBytes(Path.ChangeExtension(path, ".MDX"), bytes);
     }
 
-    private static double Julian(byte[] item) => BinaryPrimitives.ReadDoubleLittleEndian(item.AsSpan(4));
+    private static bool Blank(byte[] item) => MdxKeys.IsZeroBlank(item.AsSpan(4));
 
     // The tag's root, a leaf while the table is this small, and its item length.
     private static (int Node, int ItemLength) Leaf(byte[] file)
