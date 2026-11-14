@@ -239,7 +239,8 @@ internal static class DbfValueCodec
                 BinaryPrimitives.WriteInt32LittleEndian(target, Convert.ToInt32(value, CultureInfo.InvariantCulture));
                 break;
             case 'Y':
-                var scaled = decimal.Round(Convert.ToDecimal(value, CultureInfo.InvariantCulture) * CurrencyScale);
+                // Ten-thousandths, rounded half away from zero as Visual FoxPro 9 does: 1.00005 is 1.0001.
+                var scaled = decimal.Round(Convert.ToDecimal(value, CultureInfo.InvariantCulture) * CurrencyScale, MidpointRounding.AwayFromZero);
                 BinaryPrimitives.WriteInt64LittleEndian(target, decimal.ToInt64(scaled));
                 break;
             case 'B':

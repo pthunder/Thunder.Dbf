@@ -7,7 +7,8 @@ using Thunder.Dbf;
 namespace Thunder.Dbf.Tests;
 
 // Two things Visual FoxPro 9 does that Thunder.Dbf now matches: it finds blank (not .NULL.) dates on nullable
-// date and datetime tags, and it fits a number into its field by dropping decimals.
+// date and datetime tags, it fits a number into its field by dropping decimals, and it rounds
+// currency half away from zero.
 public sealed class FoxProFitTests : IDisposable
 {
     private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-foxfit-");
@@ -95,5 +96,34 @@ public sealed class FoxProFitTests : IDisposable
 
         // A whole part that doesn't fit still overflows.
         Assert.Throws<OverflowException>(() => table.Append(12345678901m));
+    }
+
+    [Fact]
+    public void Currency_rounds_half_away_from_zero_when_written_and_sought()
+    {
+        var path = Path.Combine(_dir.FullName, "money.dbf");
+        using (var table = DbfTable.Create(path, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Currency("CUR")]))
+        {
+            table.Append(1.00005m);
+            table.Append(1.00025m);
+            table.Append(-1.00005m);
+            table.Append(1.00015m);
+
+            Assert.Equal(1.0001m, table.Read(0)[0]);
+            Assert.Equal(1.0003m, table.Read(1)[0]);
+            Assert.Equal(-1.0001m, table.Read(2)[0]);
+            Assert.Equal(1.0002m, table.Read(3)[0]);
+        }
+
+        using (var table = DbfTable.Open(path, writable: true, maintainFoxProIndexes: true, exclusive: true))
+            table.CreateIndexTag("CUR", "CUR");
+
+        using (var table = DbfTable.Open(path))
+        using (var cdx = table.OpenStructuralIndex()!)
+        {
+            Assert.Equal([1], cdx["CUR"].SeekExact(1.00005m).Select(e => e.RecordNumber));
+            Assert.Equal([2], cdx["CUR"].SeekExact(1.00025m).Select(e => e.RecordNumber));
+            Assert.Equal([3], cdx["CUR"].SeekExact(-1.00005m).Select(e => e.RecordNumber));
+        }
     }
 }

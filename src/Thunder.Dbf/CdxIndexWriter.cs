@@ -1228,7 +1228,7 @@ public sealed partial class CdxTag : IMaintainedTag
                 // The stored ten-thousandths, big-endian, with the sign bit flipped so negatives sort first.
                 var scaled = value switch
                 {
-                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m)),
+                    decimal d => decimal.ToInt64(decimal.Round(d * 10_000m, MidpointRounding.AwayFromZero)),
                     null => 0L,
                     _ => throw new InvalidDataException($"Tag {Name}'s key expression '{Expression}' didn't produce a number."),
                 };
