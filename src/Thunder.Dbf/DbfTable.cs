@@ -2319,7 +2319,7 @@ public sealed partial class DbfTable : IDisposable
         }
         if (entry.IsBatch)
             throw new DbfException(DbfErrorCode.IndexWouldGoStale,
-                "A batch of deferred index writes (DeferIndexWrites) was cut off before it finished, so the table's indexes may not match its records.",
+                "A batch of deferred index writes (DeferIndexWrites) didn't finish: it failed partway (a damaged index, a full disk) or its program stopped, so the table's indexes may not match its records.",
                 "Close the legacy app, open the table with exclusive: true and run RebuildIndex(), which clears the note (or REINDEX in FoxPro, then delete TABLE.DBF.journal).", _path);
         if (entry.IsAppend)
         {
