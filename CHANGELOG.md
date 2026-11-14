@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
-- **A double is taken as the number it prints as, on .NET 11 too.** .NET 11 converts a double to decimal exactly, so the double 1.23 became 1.2299999999999999822..., where .NET 10 gave 1.23. On .NET 11 that rounded a currency value given as the double 0.00015 to 0.0001 instead of 0.0002, and could miss seeks and change `ModifyStructure`'s loss checks. Thunder.Dbf now goes through the double's shortest text (as it already did for numeric fields) wherever a double meets a decimal: currency writes and seeks, `.ntx` keys, expressions, `ModifyStructure`, and SQL `REAL` values coming back through Thunder.Dbf.Sql. This affects apps running 0.4.4 or earlier on the .NET 11 runtime.
+- **A double is taken as the number it prints as, on .NET 11 too.** .NET 11 converts a double to decimal exactly, so the double 1.23 became 1.2299999999999999822..., where .NET 10 gave 1.23. On .NET 11 that rounded a currency value given as the double 0.00015 to 0.0001 instead of 0.0002, and could miss seeks and change `ModifyStructure`'s loss checks. Thunder.Dbf now goes through the double's shortest text (as it already did for numeric fields) wherever a double meets a decimal: currency writes and seeks, `.ntx` keys, expressions, `ModifyStructure`, `DbfDataReader.GetDecimal` on a double field, and SQL `REAL` values coming back through Thunder.Dbf.Sql. This affects apps running 0.4.4 or earlier on the .NET 11 runtime.
 
 ### Changed
 

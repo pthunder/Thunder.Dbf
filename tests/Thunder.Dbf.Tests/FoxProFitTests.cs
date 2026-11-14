@@ -147,5 +147,17 @@ public sealed class FoxProFitTests : IDisposable
         using (var table = DbfTable.Open(path))
         using (var cdx = table.OpenStructuralIndex()!)
             Assert.Equal([1], cdx["CUR"].SeekExact(0.00015).Select(e => e.RecordNumber));
+
+        // A double field read as decimal through ADO.NET.
+        var dbl = Path.Combine(_dir.FullName, "rates.dbf");
+        using (var table = DbfTable.Create(dbl, DbfTableFormat.VisualFoxPro, [DbfFieldDefinition.Double("RATE", 2)]))
+            table.Append(1.23);
+        using var connection = new Thunder.Dbf.Data.DbfConnection($"Data Source={_dir.FullName}");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT RATE FROM rates";
+        using var reader = command.ExecuteReader();
+        Assert.True(reader.Read());
+        Assert.Equal(1.23m, reader.GetDecimal(0));
     }
 }
