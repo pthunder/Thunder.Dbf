@@ -10,6 +10,8 @@
 // WriteBenchmarks times appends that keep a dBASE IV .mdx and a FoxPro .cdx in step, and
 // seeks through an .mdx. `-- gc` runs a mixed workload and reports GC pause time, which
 // BenchmarkDotNet doesn't. Run either under net10.0 or net11.0 (-f) to compare runtimes.
+// BenchmarkDotNet 0.15 can't yet build a separate process for .NET 11, so there the
+// benchmarks run in this process.
 // The README's Visual FoxPro and OLE DB figures were measured separately on Windows and
 // aren't part of these benchmarks.
 
@@ -26,6 +28,8 @@ if (args is ["gc", ..])
     GcReport.Run(args.Length > 1 ? int.Parse(args[1]) : 5);
     return;
 }
+if (Environment.Version.Major >= 11 && !args.Contains("--inProcess", StringComparer.OrdinalIgnoreCase))
+    args = [.. args, "--inProcess"];
 BenchmarkSwitcher.FromAssembly(typeof(ScanBenchmarks).Assembly).Run(args);
 
 [MemoryDiagnoser]
