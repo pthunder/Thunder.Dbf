@@ -231,6 +231,8 @@ public sealed partial class MdxTag : IMaintainedTag
 
     // 0.4.0 wrote 6152 with 4 digits and this version writes it with Jet's 10; both are the same key,
     // and Remove finds either. Comparing by value keeps a note 0.4.0 left from taking out the
-    // record's own key (found by killing journaled writers on Windows).
-    bool IMaintainedTag.SameKey(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) => CompareAscending(a, b) == 0;
+    // record's own key (found by killing journaled writers on Windows). A blank date is one key too,
+    // whether keyed 0 or as Jet's 1E100: a note in one form must not take out the record's other one.
+    bool IMaintainedTag.SameKey(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b) =>
+        CompareAscending(a, b) == 0 || (KeyType == 'D' && MdxKeys.IsBlankDate(a) && MdxKeys.IsBlankDate(b));
 }
