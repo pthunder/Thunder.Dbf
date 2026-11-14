@@ -180,20 +180,25 @@ public sealed class MdxBlankDateTests : IDisposable
     [Fact]
     public void The_first_blank_in_a_tag_and_every_blank_in_a_new_tag_take_Jets_form()
     {
-        // A new tag keys its blanks as Jet does.
-        var path = JetTable(Late, null, Early);
+        // A new tag, as Thunder.Dbf makes it (no Jet rewrite), keys its blanks as Jet does.
+        var path = Path.Combine(_dir.FullName, "NEWTAG.DBF");
+        using (var table = DbfTable.Create(path, [DbfFieldDefinition.Numeric("ID", 5), DbfFieldDefinition.Date("D")]))
+        {
+            table.Append(1m, Late);
+            table.Append(2m, null);
+            table.Append(3m, Early);
+        }
+        using (var table = DbfTable.Open(path, writable: true, exclusive: true))
+            table.CreateIndexTag("BYD", "D");
         Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 1e100)], Keys(path));
 
-        // A tag with no blank yet: Jet's form for the first, after every real date.
+        // Its one blank goes; a fresh open then sees a tag with no blank, and the next blank is Jet's.
         using (var table = DbfTable.Open(path, writable: true))
-        {
             table.UpdateFields(1, new Dictionary<string, object?> { ["D"] = Late });
-            table.Append(4m, null);
-        }
         using (var table = DbfTable.Open(path, writable: true))
-            table.Append(5m, null);
+            table.Append(4m, null);
 
-        Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 2461358d), (4, 1e100), (5, 1e100)], Keys(path));
+        Assert.Equal([(3, 2415021d), (1, 2461358d), (2, 2461358d), (4, 1e100)], Keys(path));
         AssertInStep(path);
     }
 
