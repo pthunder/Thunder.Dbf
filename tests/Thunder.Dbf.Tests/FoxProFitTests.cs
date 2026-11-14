@@ -6,8 +6,8 @@ using Thunder.Dbf;
 
 namespace Thunder.Dbf.Tests;
 
-// Two things the VFP 9 test PC found on PR #66's tables: blank (not .NULL.) dates on nullable date and
-// datetime tags, and numbers VFP fitted into a field by dropping decimals.
+// Two things Visual FoxPro 9 does that Thunder.Dbf now matches: it finds blank (not .NULL.) dates on nullable
+// date and datetime tags, and it fits a number into its field by dropping decimals.
 public sealed class FoxProFitTests : IDisposable
 {
     private readonly DirectoryInfo _dir = Directory.CreateTempSubdirectory("thunder-foxfit-");
@@ -86,6 +86,12 @@ public sealed class FoxProFitTests : IDisposable
         Assert.Equal(-1234567.9m, Convert.ToDecimal(table.Read(2)[0]));
         Assert.Equal(123456789m, Convert.ToDecimal(table.Read(3)[0]));
         Assert.Equal(-12.5m, Convert.ToDecimal(table.Read(4)[0]));
+
+        // Rounding to fewer decimals can carry into the whole part; the rounded value is what's stored.
+        table.Append(99999999.96m);
+        table.Append(1234567890.5m);
+        Assert.Equal(100000000m, Convert.ToDecimal(table.Read(5)[0]));
+        Assert.Equal(1234567891m, Convert.ToDecimal(table.Read(6)[0]));
 
         // A whole part that doesn't fit still overflows.
         Assert.Throws<OverflowException>(() => table.Append(12345678901m));
