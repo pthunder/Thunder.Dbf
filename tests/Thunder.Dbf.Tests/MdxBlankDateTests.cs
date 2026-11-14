@@ -59,10 +59,19 @@ public sealed class MdxBlankDateTests : IDisposable
         return (node, itemLength);
     }
 
+    // The .mdx's bytes, read alongside a writer that still has it open (Windows refuses a plain read).
+    private static byte[] ReadShared(string path)
+    {
+        using var mdx = new FileStream(Path.ChangeExtension(path, ".MDX"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        var bytes = new byte[mdx.Length];
+        mdx.ReadExactly(bytes);
+        return bytes;
+    }
+
     // (record, key) in the leaf's order.
     private static List<(int Record, double Julian)> Keys(string path)
     {
-        var bytes = File.ReadAllBytes(Path.ChangeExtension(path, ".MDX"));
+        var bytes = ReadShared(path);
         var (node, itemLength) = Leaf(bytes);
         var count = BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(node));
         return [.. Enumerable.Range(0, count).Select(i => (
