@@ -157,6 +157,10 @@ public sealed partial class CdxWriteTests
         using var table = OpenShared(dbf);
         table.WatchFolder();
         Assert.True(table.WatchesFolder);
+        // macOS can deliver notices for the files Copy just made after the watcher starts. They come in
+        // order, so once a marker made now has been reported, none of those can arrive later.
+        File.WriteAllText(Path.Combine(_dir.FullName, "settle.txt"), "");
+        Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the marker");
         var template = table.Read(0).Values.ToArray();
         table.Append(Call(template, 5000, contact: 1, subject: "looks once"));
         table.Append(Call(template, 5001, contact: 1, subject: "nothing to look for"));
