@@ -357,6 +357,29 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A rebuild writes each new root over the old root page, so damage in a root pointer itself (two
+    // tags sharing a root here) isn't taken for a rebuild: it would overwrite the other tag's tree,
+    // or a header. Found by the release audit, which made a rebuild overwrite a tag's header.
+    [Fact]
+    public void A_damaged_root_pointer_is_not_taken_for_a_rebuild()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        long sharedRoot, header;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (sharedRoot, header) = (index["CALL_ID"].RootPage, index["CONTACT_ID"].HeaderOffset);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan((int)header), (uint)sharedRoot);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, allowUnmaintainedIndexes: true, exclusive: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true));
+        }
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // untouched
+    }
+
     // A structural .cdx refused when the table opened (short of the table's records here) is what
     // RebuildIndex() is for: it takes the index over and rebuilds it. Found by killing writers
     // beside Visual FoxPro, where it said "no index open" and only MaintainIndex(path, rebuild: true)

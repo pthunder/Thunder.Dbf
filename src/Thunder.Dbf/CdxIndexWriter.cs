@@ -477,11 +477,38 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// </summary>
     internal bool Damaged { get; private set; }
 
+    // A rebuild writes each tag's new root over its old root page, in place, so a damaged index is
+    // only taken for one when every root is its own page and still a root: not a file or tag header,
+    // not the tag directory's, not another tag's, and marked as a root. A batch cut off mid-write
+    // never moves a root, so what it leaves passes; a root pointer that's itself damaged doesn't.
     private bool TagsRebuildable()
     {
         try
         {
-            return Tags.Count > 0 && Tags.All(t => t.PrepareForWriting(_table!) is null);
+            if (Tags.Count == 0 || !Tags.All(t => t.PrepareForWriting(_table!) is null))
+                return false;
+            var reserved = new HashSet<long> { 0, DefaultPageLength };
+            if (IsCompound)
+            {
+                CdxTag.LoadDirectory(this).ClaimPages((page, _) => reserved.Add(page), "the tag directory");
+                foreach (var tag in Tags)
+                {
+                    reserved.Add(tag.HeaderOffset);
+                    reserved.Add(tag.HeaderOffset + DefaultPageLength);
+                }
+            }
+            var length = FileLength(fresh: true);
+            var roots = new HashSet<long>();
+            foreach (var tag in Tags)
+            {
+                var root = tag.RootPage;
+                if (root <= 0 || root % DefaultPageLength != 0 || root + PageLength > length || reserved.Contains(root) || !roots.Add(root))
+                    return false;
+                var attributes = BinaryPrimitives.ReadUInt16LittleEndian(Read(root, 2));
+                if ((attributes & 0x01) == 0 || attributes > 7)
+                    return false;
+            }
+            return true;
         }
         catch (Exception ex) when (ex is InvalidDataException or FormatException or DbfException)
         {
