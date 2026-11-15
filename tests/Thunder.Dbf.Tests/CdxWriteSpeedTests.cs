@@ -461,6 +461,37 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A torn note (cut off while it was written) is discarded, and that gave up on the rebuild a
+    // damaged index was waiting for: RebuildIndex() then failed until the table was reopened (found
+    // by the release audit).
+    [Fact]
+    public void RebuildIndex_still_works_after_a_torn_note_is_discarded_beside_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+        File.WriteAllText(dbf + ".journal", "TDJ3"); // a note cut off before its checksum
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Throws<DbfException>(() => exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            exclusive.RebuildIndex();
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
     // A structural .cdx refused when the table opened (short of the table's records here) is what
     // RebuildIndex() is for: it takes the index over and rebuilds it. Found by killing writers
     // beside Visual FoxPro, where it said "no index open" and only MaintainIndex(path, rebuild: true)

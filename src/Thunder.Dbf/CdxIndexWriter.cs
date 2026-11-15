@@ -764,11 +764,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
             _ourState = null;
             _nodes.Clear();
         }
-        // A commit follows the rebuild; from here on order is checked again. A damaged index keeps
-        // expecting one: a commit from anything else (a journal replay that stopped partway) mustn't
-        // take away the way back.
-        if (!Damaged)
-            _rebuildExpected = false;
+        // A commit follows the rebuild; from here on order is checked again. A commit from anything
+        // else (a journal replay that stopped partway) ends the exemption too: writes stay refused,
+        // and RebuildIndex() asks for it again (DbfTable.RebuildIndexCore).
+        _rebuildExpected = false;
         if (_changed)
         {
             // Changes made outside a locked change (creating a tag): the tags are reloaded and checked before the next write.
