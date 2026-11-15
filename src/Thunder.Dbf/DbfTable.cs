@@ -2665,23 +2665,44 @@ public sealed partial class DbfTable : IDisposable
 
         RequireExclusive("Rebuilding the indexes");
         using var tableLock = Locks.Table();
-        Refresh();
-        if (Header.HasIncompleteTransaction)
-            throw WriteBlocker(Header, allowUnmaintainedIndexes: true, indexMaintained: true, _path)!;
-
-        // Work out every tag's keys first. Any record or expression that fails stops the rebuild here,
-        // before the existing index is touched.
-        var keysByTag = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToDictionary(tag => tag, _ => new List<(byte[] Key, int Record)>());
-        foreach (var record in ReadAll())
+        // An index refused only for what a rebuild replaces (keys out of order or out of step, a torn
+        // tree) is told a rebuild is coming, as MaintainIndex(path, rebuild: true) tells it. A journal
+        // note discarded since it was attached gave up on that, and the rebuild would stop on it.
+        var expecting = new List<IMaintainedIndex>();
+        foreach (var index in MaintainedIndexes)
         {
-            foreach (var (tag, keys) in keysByTag)
+            if (!index.CanMaintain && index.CanMaintainAfterRebuild)
             {
-                if (tag.Includes(record))
-                    keys.Add((tag.KeyFor(record), record.RecordNumber));
+                index.ExpectRebuild();
+                expecting.Add(index);
             }
         }
+        try
+        {
+            Refresh();
+            if (Header.HasIncompleteTransaction)
+                throw WriteBlocker(Header, allowUnmaintainedIndexes: true, indexMaintained: true, _path)!;
 
-        ReplaceAllKeys(keysByTag);
+            // Work out every tag's keys first. Any record or expression that fails stops the rebuild here,
+            // before the existing index is touched.
+            var keysByTag = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToDictionary(tag => tag, _ => new List<(byte[] Key, int Record)>());
+            foreach (var record in ReadAll())
+            {
+                foreach (var (tag, keys) in keysByTag)
+                {
+                    if (tag.Includes(record))
+                        keys.Add((tag.KeyFor(record), record.RecordNumber));
+                }
+            }
+
+            ReplaceAllKeys(keysByTag);
+        }
+        catch
+        {
+            foreach (var index in expecting)
+                index.RebuildAbandoned(); // still refused, as before the call; another RebuildIndex() tries again
+            throw;
+        }
     }
 
     // Swaps every tag's keys for the given ones (in record order) and commits. A unique tag keeps the
