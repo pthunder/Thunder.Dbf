@@ -10,6 +10,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
+Thunder.Dbf now targets .NET 11 as well as .NET 10, and allocates less on seeks, appends and reads. Two fixes are worth upgrading for: on the .NET 11 runtime a double was converted to decimal exactly (1.23 became 1.2299999999999999822...), which could round currency wrongly and miss seeks; and a FoxPro `.cdx` left torn by a killed `DeferIndexWrites` batch could only be repaired in Visual FoxPro, where `RebuildIndex()` now repairs it.
+
+**Upgrading from 0.4.4:** nothing in the public API changed, and apps on .NET 10 keep the .NET 10 build. Three things behave differently:
+- A double meets a decimal (currency, `.ntx` keys, expressions, `ModifyStructure`, `GetDecimal`) as the number it prints as, on both runtimes: on .NET 11 that's what .NET 10 gave for most values, and a double with 16 or 17 significant digits, or a float with 8 or 9, now keeps them, where .NET 10 rounded them to 15 and 7.
+- A `.cdx` whose tag trees are torn, but whose tag headers and roots read, is refused as rebuildable instead of unreadable: `RebuildIndex()` on an exclusive open, or `MaintainIndex(path, rebuild: true)`, rebuilds it. Writes are still refused until then.
+- The `IndexWouldGoStale` message for an unfinished `DeferIndexWrites` batch says the batch didn't finish (it failed partway or its program stopped) instead of saying it was cut off. Code that matches on the message text needs the new wording; the error code is unchanged.
+
 ### Fixed
 
 - **A double is taken as the number it prints as, on .NET 11 too.** .NET 11 converts a double to decimal exactly, so the double 1.23 became 1.2299999999999999822..., where .NET 10 gave 1.23. On .NET 11 that rounded a currency value given as the double 0.00015 to 0.0001 instead of 0.0002, and could miss seeks and change `ModifyStructure`'s loss checks. Thunder.Dbf now goes through the double's shortest text (as it already did for numeric fields) wherever a double meets a decimal: currency writes and seeks, `.ntx` keys, expressions, `ModifyStructure`, `DbfDataReader.GetDecimal` on a double field, and SQL `REAL` values coming back through Thunder.Dbf.Sql. This affects apps running 0.4.4 or earlier on the .NET 11 runtime. On .NET 10 it changes two things, so that both runtimes now store the same value: a double with 16 or 17 significant digits keeps them, where .NET 10's conversion rounded it to 15 (the double 1234567890123456 was stored as 1234567890123460), and a float with 8 or 9 significant digits keeps them, where it was rounded to 7 (the float 12345678 was stored as 12345680).
