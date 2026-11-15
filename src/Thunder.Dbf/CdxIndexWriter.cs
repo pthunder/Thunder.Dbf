@@ -155,8 +155,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
         {
             // New pages first (nothing on disk points at them yet), then, once they're out, the pages
             // that existed (some now pointing at new ones), and the file header (the free list) last.
-            // Contiguous pages go in one write. A batch cut off in the middle is still reported by
-            // its note in the table's journal; this order keeps what's on disk a tree meanwhile.
+            // Contiguous pages go in one write. A batch cut off in the middle is reported by its note
+            // in the table's journal. This order doesn't keep every tree whole meanwhile: a kill between
+            // two rewritten pages that existed can leave a tree reaching a page twice, which the open
+            // refuses as damaged and RebuildIndex() replaces (see CdxIndex.Damaged).
             var freed = _deferredFreed;
             WriteRuns(pages, pages.Keys.Where(o => o >= _deferredFrom && !freed.Contains(o)));
             if (pages.Keys.Any(o => o >= _deferredFrom))

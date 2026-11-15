@@ -905,8 +905,10 @@ public sealed partial class DbfTable : IDisposable
     /// forced to disk when it ends, whatever <see cref="FlushWritesToDisk"/> says. With
     /// <see cref="FlushWritesToDisk"/> off, that final flush costs more than it saves on a few hundred
     /// records (use <see cref="AppendRange"/>); with it on, the batch is the quicker way to save a
-    /// group. A process killed during the batch leaves the index without the batch's keys: the next
-    /// open reports it and a rebuild puts it right. Off by default; ignored while <see cref="UseJournal"/> is on.
+    /// group. A process killed during the batch leaves the index without some or all of the batch's
+    /// keys, and one killed while the pages are written at the end can leave a tag's tree torn (a page
+    /// reached twice). Either way its journal note stops writes until <see cref="RebuildIndex"/> on an
+    /// exclusive open rebuilds the index. Off by default; ignored while <see cref="UseJournal"/> is on.
     /// </summary>
     public bool DeferIndexWrites { get; set; }
 
