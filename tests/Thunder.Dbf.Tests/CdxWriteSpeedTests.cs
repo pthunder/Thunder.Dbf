@@ -380,6 +380,51 @@ public sealed partial class CdxWriteTests
         Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // untouched
     }
 
+    // A damaged index takes nothing but a full rebuild. An append note for a record whose keys never
+    // went in, with a later tag torn, used to be replayed into the intact tags first, writing to the
+    // damaged file with its page checks off (found by the release audit).
+    [Fact]
+    public void A_journal_replay_doesnt_write_to_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        object?[] template;
+        using (var table = OpenShared(dbf))
+        {
+            template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        int last;
+        using (var unindexed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+        {
+            unindexed.Append(Call(template, id: 9000, contact: 5, subject: "keys never went in"));
+            last = unindexed.RecordCount;
+        }
+        DbfJournal.Write(dbf, new DbfJournalEntry(last, [new DbfJournalChange("calls.CDX", "", null, null)], IsAppend: true));
+
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var shared = OpenShared(dbf))
+        {
+            Assert.Throws<DbfException>(() => shared.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            Assert.True(shared.HasPendingJournal);
+        }
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // not a byte written
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
     // A structural .cdx refused when the table opened (short of the table's records here) is what
     // RebuildIndex() is for: it takes the index over and rebuilds it. Found by killing writers
     // beside Visual FoxPro, where it said "no index open" and only MaintainIndex(path, rebuild: true)
