@@ -7,6 +7,7 @@
 //
 // Layout notes, with offsets, live in docs/formats/mdx.md.
 
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
@@ -316,8 +317,9 @@ public sealed partial class MdxTag
     private IEnumerable<Hit> Walk(KeyProbe? probe)
     {
         _index.ThrowIfDropPending();
-        var root = BinaryPrimitives.ReadInt32LittleEndian(_index.ReadBlock(_headerPage));
-        return Walk(root, probe, position: probe is not null, depth: 0, visited: []);
+        Span<byte> root = stackalloc byte[4]; // only the root pointer, not the whole header block
+        _index.ReadAt(_headerPage, 0, root);
+        return Walk(BinaryPrimitives.ReadInt32LittleEndian(root), probe, position: probe is not null, depth: 0, visited: []);
     }
 
     // The probe reaches every leaf so matches always come from the stored bytes; only the
@@ -330,32 +332,42 @@ public sealed partial class MdxTag
         if (!visited.Add(page))
             throw new InvalidDataException($"Tag {Name} reaches index page {page} twice; the index is corrupt.");
 
-        var node = _index.ReadBlock(page);
-        var count = BinaryPrimitives.ReadInt32LittleEndian(node);
-        if (count < 0 || count > MaxKeys)
-            throw new InvalidDataException($"Index page {page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
-
-        var isLeaf = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength, 4)) == 0;
-        var start = position && probe is not null ? FirstAtOrAfter(node, count, probe) : 0;
-
-        if (isLeaf)
+        // A pooled buffer per level, given back when the walk leaves the node (or is abandoned):
+        // a seek no longer allocates a block for every page it passes through.
+        var node = ArrayPool<byte>.Shared.Rent(_index.BlockSize);
+        try
         {
-            for (var i = start; i < count; i++)
+            _index.ReadBlock(page, node);
+            var count = BinaryPrimitives.ReadInt32LittleEndian(node);
+            if (count < 0 || count > MaxKeys)
+                throw new InvalidDataException($"Index page {page} claims {count} keys; tag {Name} holds at most {MaxKeys} per node.");
+
+            var isLeaf = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + count * ItemLength, 4)) == 0;
+            var start = position && probe is not null ? FirstAtOrAfter(node, count, probe) : 0;
+
+            if (isLeaf)
             {
-                var item = node.AsSpan(8 + i * ItemLength, ItemLength);
-                var key = item.Slice(4, KeyLength);
-                var matches = probe is not null && Compare(key, probe) == 0;
-                yield return new Hit(new MdxEntry(DecodeKey(key), BinaryPrimitives.ReadInt32LittleEndian(item)), matches);
+                for (var i = start; i < count; i++)
+                {
+                    var item = node.AsSpan(8 + i * ItemLength, ItemLength);
+                    var key = item.Slice(4, KeyLength);
+                    var matches = probe is not null && Compare(key, probe) == 0;
+                    yield return new Hit(new MdxEntry(DecodeKey(key), BinaryPrimitives.ReadInt32LittleEndian(item)), matches);
+                }
+                yield break;
             }
-            yield break;
-        }
 
-        // Interior: n keys, n + 1 child pointers.
-        for (var i = start; i <= count; i++)
+            // Interior: n keys, n + 1 child pointers.
+            for (var i = start; i <= count; i++)
+            {
+                var child = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + i * ItemLength, 4));
+                foreach (var hit in Walk(child, probe, position && i == start, depth + 1, visited))
+                    yield return hit;
+            }
+        }
+        finally
         {
-            var child = BinaryPrimitives.ReadInt32LittleEndian(node.AsSpan(8 + i * ItemLength, 4));
-            foreach (var hit in Walk(child, probe, position && i == start, depth + 1, visited))
-                yield return hit;
+            ArrayPool<byte>.Shared.Return(node);
         }
     }
 
@@ -583,17 +595,34 @@ internal static class MdxKeys
     // Returns decimal when the value fits, otherwise double (dBASE allows exponents decimal can't hold).
     public static object DecodeNumeric(ReadOnlySpan<byte> key)
     {
-        var significant = Digits(key).TrimEnd('0');
-        if (significant.Length == 0)
+        // The text "-ddd...Eexp", built on the stack and parsed: the same parse as before, without the
+        // strings it took to get there (a seek decodes the key of every entry it walks past).
+        Span<char> text = stackalloc char[2 * (NumericKeyLength - 2) + 8];
+        var length = 0;
+        if (IsNegative(key))
+            text[length++] = '-';
+        var digitsStart = length;
+        for (var i = 2; i < NumericKeyLength && i < key.Length; i++)
+        {
+            text[length++] = (char)('0' + (key[i] >> 4));
+            text[length++] = (char)('0' + (key[i] & 0x0F));
+        }
+        while (length > digitsStart && text[length - 1] == '0')
+            length--;
+        var significant = length - digitsStart;
+        if (significant == 0)
             return 0m;
 
-        var exponent = key[0] - ExponentBias - significant.Length;
-        var text = (IsNegative(key) ? "-" : "") + significant + "E" + exponent.ToString(CultureInfo.InvariantCulture);
-        if (exponent is >= -28 and <= 28 && significant.Length <= 28
-            && decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value != 0)
+        var exponent = key[0] - ExponentBias - significant;
+        text[length++] = 'E';
+        exponent.TryFormat(text[length..], out var written, provider: CultureInfo.InvariantCulture);
+        length += written;
+        var number = text[..length];
+        if (exponent is >= -28 and <= 28 && significant <= 28
+            && decimal.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) && value != 0)
             return value;
-        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
-            ? number
+        return double.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out var real)
+            ? real
             : throw new InvalidDataException("A numeric key in the .mdx holds digits that aren't BCD; the index is damaged."); // found by fuzzing
     }
 

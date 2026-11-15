@@ -358,7 +358,14 @@ internal sealed class DbfLocks
         public bool HeldBy(DbfLocks owner)
         {
             lock (_gate)
-                return _held.Any(h => ReferenceEquals(h.Owner, owner));
+            {
+                foreach (var h in _held)
+                {
+                    if (ReferenceEquals(h.Owner, owner))
+                        return true;
+                }
+                return false;
+            }
         }
 
         // Claims a range for owner. False when another owner in this process holds an overlapping
@@ -367,11 +374,24 @@ internal sealed class DbfLocks
         {
             lock (_gate)
             {
+                // Plain loops, not LINQ: every write claims ranges here, and closures over owner and
+                // range would allocate on each one.
                 needsOsLock = true;
-                if (_held.Any(h => !ReferenceEquals(h.Owner, owner) && h.Overlaps(range)))
-                    return false;
-
-                var same = _held.FirstOrDefault(h => ReferenceEquals(h.Owner, owner) && h.Is(range));
+                Holding? same = null;
+                var covered = false;
+                foreach (var h in _held)
+                {
+                    if (!ReferenceEquals(h.Owner, owner))
+                    {
+                        if (h.Overlaps(range))
+                            return false;
+                        continue;
+                    }
+                    if (same is null && h.Is(range))
+                        same = h;
+                    if (h.OsLock && h.Contains(range))
+                        covered = true;
+                }
                 if (same is not null)
                 {
                     same.Count++;
@@ -379,7 +399,7 @@ internal sealed class DbfLocks
                     return true;
                 }
 
-                needsOsLock = !_held.Any(h => ReferenceEquals(h.Owner, owner) && h.OsLock && h.Contains(range));
+                needsOsLock = !covered;
                 _held.Add(new Holding(owner, range.Offset, range.Length));
                 return true;
             }
@@ -389,9 +409,14 @@ internal sealed class DbfLocks
         {
             lock (_gate)
             {
-                var holding = _held.LastOrDefault(h => ReferenceEquals(h.Owner, owner) && h.Is(range));
-                if (holding is not null)
-                    holding.OsLock = true;
+                for (var i = _held.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(_held[i].Owner, owner) && _held[i].Is(range))
+                    {
+                        _held[i].OsLock = true;
+                        break;
+                    }
+                }
             }
         }
 
@@ -400,13 +425,17 @@ internal sealed class DbfLocks
         {
             lock (_gate)
             {
-                var holding = _held.FirstOrDefault(h => ReferenceEquals(h.Owner, owner) && h.Is(range));
-                if (holding is null)
-                    return false;
-                if (--holding.Count > 0)
-                    return false;
-                _held.Remove(holding);
-                return holding.OsLock;
+                for (var i = 0; i < _held.Count; i++)
+                {
+                    var holding = _held[i];
+                    if (!ReferenceEquals(holding.Owner, owner) || !holding.Is(range))
+                        continue;
+                    if (--holding.Count > 0)
+                        return false;
+                    _held.RemoveAt(i);
+                    return holding.OsLock;
+                }
+                return false;
             }
         }
 

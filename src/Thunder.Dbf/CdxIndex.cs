@@ -713,8 +713,7 @@ public sealed partial class CdxTag
 
     private byte[] EncodeCurrency(object? key)
     {
-        var value = Convert.ToDecimal(key ?? throw new ArgumentNullException(nameof(key), $"Tag {Name} has currency keys; seek with a number."),
-            CultureInfo.InvariantCulture);
+        var value = DbfValueCodec.ToDecimal(key ?? throw new ArgumentNullException(nameof(key), $"Tag {Name} has currency keys; seek with a number."));
         var bytes = new byte[8];
         BinaryPrimitives.WriteUInt64BigEndian(bytes, unchecked((ulong)decimal.ToInt64(decimal.Round(value * 10_000m, MidpointRounding.AwayFromZero)) ^ 0x8000_0000_0000_0000));
         return bytes;

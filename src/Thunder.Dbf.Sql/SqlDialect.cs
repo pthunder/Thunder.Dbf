@@ -78,7 +78,15 @@ public abstract class SqlDialect
         {
             'C' => System.Convert.ToString(value, CultureInfo.InvariantCulture),
             'M' when !field.IsBinary => System.Convert.ToString(value, CultureInfo.InvariantCulture),
-            'N' or 'Y' => value is string s ? decimal.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture) : System.Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            'N' or 'Y' => value switch
+            {
+                string s => decimal.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture),
+                // A SQL REAL arrives as a double: take it as the number it prints as. .NET 11 converts a
+                // double to decimal exactly (1.23 becomes 1.2299999999999999822...).
+                double d when double.IsFinite(d) => decimal.Parse(d.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture),
+                float f when float.IsFinite(f) => decimal.Parse(f.ToString("R", CultureInfo.InvariantCulture), NumberStyles.Float, CultureInfo.InvariantCulture),
+                _ => System.Convert.ToDecimal(value, CultureInfo.InvariantCulture),
+            },
             'F' => System.Convert.ToDouble(value, CultureInfo.InvariantCulture),
             'B' when field.Length == 8 => System.Convert.ToDouble(value, CultureInfo.InvariantCulture),
             'I' => System.Convert.ToInt32(value, CultureInfo.InvariantCulture),

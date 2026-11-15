@@ -274,7 +274,7 @@ public sealed class DbfDataReader : DbDataReader
     public override DateTime GetDateTime(int ordinal) => Get<DateTime>(ordinal);
 
     /// <inheritdoc />
-    public override decimal GetDecimal(int ordinal) => Number(ordinal, Convert.ToDecimal);
+    public override decimal GetDecimal(int ordinal) => Number(ordinal, static (value, _) => DbfValueCodec.ToDecimal(value)); // a double as it prints, on .NET 11 too
 
     /// <inheritdoc />
     public override double GetDouble(int ordinal) => Number(ordinal, Convert.ToDouble);

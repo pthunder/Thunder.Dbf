@@ -295,7 +295,7 @@ public sealed class ModifyStructureTests : IDisposable
     public void Killed_before_the_decision_the_table_comes_back_byte_for_byte(string step)
     {
         var path = Table(DbfTableFormat.VisualFoxPro);
-        var before = Directory.GetFiles(_dir.FullName).ToDictionary(Path.GetFileName, File.ReadAllBytes);
+        var before = Directory.GetFiles(_dir.FullName).ToDictionary(f => Path.GetFileName(f), File.ReadAllBytes);
         KilledAt(path, step);
         Assert.Equal(before[Path.GetFileName(path)], File.ReadAllBytes(path)); // the .dbf never moves before the decision
         using (Open(path))

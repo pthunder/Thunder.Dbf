@@ -157,10 +157,29 @@ public sealed partial class CdxWriteTests
         using var table = OpenShared(dbf);
         table.WatchFolder();
         Assert.True(table.WatchesFolder);
+        // macOS can deliver notices for the files Copy just made after the watcher starts, and can
+        // report one file more than once (CI saw the marker below reported again after it was seen).
+        // So the folder is let settle: every notice is answered with a write, which looks and clears
+        // it, until a second goes by with none.
+        File.WriteAllText(Path.Combine(_dir.FullName, "settle.txt"), "");
+        Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the marker");
         var template = table.Read(0).Values.ToArray();
+        var settling = 4000;
+        var quiet = System.Diagnostics.Stopwatch.StartNew();
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (quiet.Elapsed < TimeSpan.FromSeconds(1))
+        {
+            Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(30), $"the folder never went quiet; last notice: {table.LastFolderNotice}");
+            if (table.FolderLookPending)
+            {
+                table.Append(Call(template, settling++, contact: 1, subject: "settling"));
+                quiet.Restart();
+            }
+            Thread.Sleep(50);
+        }
         table.Append(Call(template, 5000, contact: 1, subject: "looks once"));
         table.Append(Call(template, 5001, contact: 1, subject: "nothing to look for"));
-        Assert.False(table.FolderLookPending);
+        Assert.False(table.FolderLookPending, $"the watcher reported: {table.LastFolderNotice}");
 
         File.Copy(cdx, Path.Combine(_dir.FullName, "calls.idx"));
         Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the new file");
@@ -248,6 +267,229 @@ public sealed partial class CdxWriteTests
             Assert.False(exclusive.HasPendingJournal);
         }
         AssertIndexMatchesTable(cutOff, Path.Combine(killed, "calls.CDX"), rebuilt: true);
+    }
+
+    // A batch cut off while it rewrote pages that were already there can leave a tree that reaches a
+    // page twice: some rewritten parents out, a sibling still old. The note says so, and RebuildIndex()
+    // must still be the way back. It said "no index open" (the torn tree made the whole .cdx
+    // unreadable), and MaintainIndex(path, rebuild: true) said "unreadable"; only VFP's REINDEX
+    // repaired it (found by killing deferred batches on X#'s TEST10K).
+    [Fact]
+    public void A_batch_cut_off_mid_rewrite_leaves_a_torn_tree_RebuildIndex_still_repairs()
+    {
+        var (dbf, _) = Copy("infused-dbf/foxprodb", "calls");
+        var killed = Directory.CreateDirectory(Path.Combine(_dir.FullName, "torn")).FullName;
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+            table.DeferIndexWrites = true;
+            using (table.LockTable())
+            {
+                for (var id = 5000; id < 5050; id++)
+                    table.Append(Call(template, id, contact: 2, subject: "cut off"));
+                foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+                    File.WriteAllBytes(Path.Combine(killed, Path.GetFileName(file)), SharedFile.ReadAllBytes(file));
+            }
+        }
+        var tornDbf = Path.Combine(killed, "calls.dbf");
+        var tornCdx = Path.Combine(killed, "calls.CDX");
+
+        // Tear CALL_ID's tree: the root's second child becomes its first, which it now reaches twice.
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(tornDbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(tornCdx)), table: reader))
+        {
+            Assert.True(index["CALL_ID"].Height() >= 2);
+            (root, keyLength) = (index["CALL_ID"].RootPage, index["CALL_ID"].KeyLength);
+        }
+        var bytes = SharedFile.ReadAllBytes(tornCdx);
+        var first = bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray();
+        first.CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(tornCdx, bytes);
+
+        var refused = Assert.Throws<DbfException>(() =>
+        {
+            using var shared = OpenShared(tornDbf);
+            shared.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" });
+        });
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, refused.Code);
+
+        using (var exclusive = DbfTable.Open(tornDbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.True(exclusive.MaintainsIndex);
+            Assert.False(exclusive.HasPendingJournal);
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(tornDbf, tornCdx, rebuilt: true);
+        using (var reopened = DbfTable.Open(tornDbf, writable: true, maintainFoxProIndexes: true))
+            reopened.Append(Call(reopened.Read(0).Values.ToArray(), id: 9000, contact: 3, subject: "and after that"));
+        AssertIndexMatchesTable(tornDbf, tornCdx, rebuilt: true);
+    }
+
+    // The same torn tree with no batch note: MaintainIndex(path, rebuild: true) takes it over.
+    [Fact]
+    public void A_torn_tree_without_a_note_is_taken_over_by_a_rebuild()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, allowUnmaintainedIndexes: true, exclusive: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            table.MaintainIndex(cdx, rebuild: true);
+            Assert.True(table.MaintainsIndex);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // A rebuild writes each new root over the old root page, so damage in a root pointer itself (two
+    // tags sharing a root here) isn't taken for a rebuild: it would overwrite the other tag's tree,
+    // or a header. Found by the release audit, which made a rebuild overwrite a tag's header.
+    [Fact]
+    public void A_damaged_root_pointer_is_not_taken_for_a_rebuild()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        long sharedRoot, header;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (sharedRoot, header) = (index["CALL_ID"].RootPage, index["CONTACT_ID"].HeaderOffset);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan((int)header), (uint)sharedRoot);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, allowUnmaintainedIndexes: true, exclusive: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            Assert.Throws<DbfException>(() => table.MaintainIndex(cdx, rebuild: true));
+        }
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // untouched
+    }
+
+    // A damaged index takes nothing but a full rebuild. An append note for a record whose keys never
+    // went in, with a later tag torn, used to be replayed into the intact tags first, writing to the
+    // damaged file with its page checks off (found by the release audit).
+    [Fact]
+    public void A_journal_replay_doesnt_write_to_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        object?[] template;
+        using (var table = OpenShared(dbf))
+        {
+            template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        int last;
+        using (var unindexed = DbfTable.Open(dbf, writable: true, allowUnmaintainedIndexes: true))
+        {
+            unindexed.Append(Call(template, id: 9000, contact: 5, subject: "keys never went in"));
+            last = unindexed.RecordCount;
+        }
+        DbfJournal.Write(dbf, new DbfJournalEntry(last, [new DbfJournalChange("calls.CDX", "", null, null)], IsAppend: true));
+
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var shared = OpenShared(dbf))
+        {
+            Assert.Throws<DbfException>(() => shared.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            Assert.True(shared.HasPendingJournal);
+        }
+        Assert.Equal(bytes, SharedFile.ReadAllBytes(cdx)); // not a byte written
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // A write refused on a damaged index (here a note's replay) leaves RebuildIndex() on the same open
+    // table as the way back. The release audit found a replay that commits partway (a FOR tag whose
+    // adding phase does nothing) used to take the rebuild's exemption away; this guards the path.
+    [Fact]
+    public void RebuildIndex_still_works_after_a_replay_stopped_on_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        byte[] oldKey;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+        {
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+            oldKey = index["CALL_ID"].RawEntries()[0].Key;
+        }
+        DbfJournal.Write(dbf, new DbfJournalEntry(1, [new DbfJournalChange("calls.CDX", "CALL_ID", oldKey, null)]));
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Throws<DbfException>(() => exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
+    // A torn note (cut off while it was written) is discarded, and that gave up on the rebuild a
+    // damaged index was waiting for: RebuildIndex() then failed until the table was reopened (found
+    // by the release audit).
+    [Fact]
+    public void RebuildIndex_still_works_after_a_torn_note_is_discarded_beside_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+        File.WriteAllText(dbf + ".journal", "TDJ3"); // a note cut off before its checksum
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Throws<DbfException>(() => exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            exclusive.RebuildIndex();
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
     // A structural .cdx refused when the table opened (short of the table's records here) is what

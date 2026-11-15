@@ -6,7 +6,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="11.0.0" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -16,7 +16,7 @@
     <Description>thunder-dbf: check, inspect, import, export and migrate dBASE and FoxPro data from the command line.</Description>
     <PackageTags>$(PackageTags);cli;dotnet-tool;sqlite</PackageTags>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>

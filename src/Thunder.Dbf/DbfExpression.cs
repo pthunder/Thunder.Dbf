@@ -127,7 +127,7 @@ public sealed class DbfExpression
     private static decimal Dec(object? v, string where) => v switch
     {
         decimal d => d,
-        double d when Math.Abs(d) < 7.9e28 => (decimal)d,
+        double d when Math.Abs(d) < 7.9e28 => DbfValueCodec.ToDecimal(d),
         _ => throw Mismatch($"{where} needs a number"),
     };
 
@@ -215,7 +215,7 @@ public sealed class DbfExpression
                     case 'N' or 'F' or 'B' when value is double d:
                         return d;
                     case 'N' or 'F' or 'I' or 'Y' or 'B':
-                        return Convert.ToDecimal(value, CultureInfo.InvariantCulture);
+                        return DbfValueCodec.ToDecimal(value!); // a double as it prints (.NET 11 converts it exactly)
                     case 'L':
                         return value is true;
                     case 'D':
