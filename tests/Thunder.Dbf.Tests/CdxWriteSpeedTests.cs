@@ -425,6 +425,42 @@ public sealed partial class CdxWriteTests
         AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
+    // A write refused on a damaged index (here a note's replay) leaves RebuildIndex() on the same open
+    // table as the way back. The release audit found a replay that commits partway (a FOR tag whose
+    // adding phase does nothing) used to take the rebuild's exemption away; this guards the path.
+    [Fact]
+    public void RebuildIndex_still_works_after_a_replay_stopped_on_a_torn_index()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        byte[] oldKey;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+        {
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+            oldKey = index["CALL_ID"].RawEntries()[0].Key;
+        }
+        DbfJournal.Write(dbf, new DbfJournalEntry(1, [new DbfJournalChange("calls.CDX", "CALL_ID", oldKey, null)]));
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var exclusive = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            Assert.Throws<DbfException>(() => exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" }));
+            exclusive.RebuildIndex();
+            Assert.False(exclusive.HasPendingJournal);
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
+    }
+
     // A structural .cdx refused when the table opened (short of the table's records here) is what
     // RebuildIndex() is for: it takes the index over and rebuilds it. Found by killing writers
     // beside Visual FoxPro, where it said "no index open" and only MaintainIndex(path, rebuild: true)
