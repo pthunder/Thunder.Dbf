@@ -2058,34 +2058,36 @@ public sealed partial class DbfTable : IDisposable
         var changes = new List<TagChange>(_tagsLastPlanned); // sized for one change per tag, as last time
         var tags = 0;
         foreach (var index in MaintainedIndexes)
-        foreach (var tag in index.MaintainedTags)
         {
-            tags++;
-            bool wasIn, isIn;
-            byte[]? oldKey, newKey;
-            try
+            foreach (var tag in index.MaintainedTags)
             {
-                wasIn = before is not null && tag.Includes(before);
-                isIn = tag.Includes(after);
-                oldKey = wasIn ? tag.KeyFor(before!) : null;
-                newKey = isIn ? tag.KeyFor(after) : null;
+                tags++;
+                bool wasIn, isIn;
+                byte[]? oldKey, newKey;
+                try
+                {
+                    wasIn = before is not null && tag.Includes(before);
+                    isIn = tag.Includes(after);
+                    oldKey = wasIn ? tag.KeyFor(before!) : null;
+                    newKey = isIn ? tag.KeyFor(after) : null;
+                }
+                catch (Exception ex) when (ex is FormatException or KeyNotFoundException or InvalidOperationException)
+                {
+                    // The record was encoded and decoded again before planning, so every value already has its
+                    // field's own type: a key that can't be worked out is the expression's fault, and the
+                    // expression came from the index file, so the index is damaged or another table's (found by
+                    // fuzzing). The tag's name and the parser's message go in Diagnostic (guideline 1.2).
+                    throw new DbfException(DbfErrorCode.IndexDamaged, "An index tag's key expression can't be worked out for this table.",
+                        "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex,
+                        diagnostic: $"tag {tag.Name}: {ex.Message}");
+                }
+                if (oldKey is not null && newKey is not null && oldKey.AsSpan().SequenceEqual(newKey))
+                    continue;
+                if (newKey is not null && tag.RefusesDuplicates)
+                    ThrowIfKeyTaken(tag, newKey, after.RecordNumber);
+                if (oldKey is not null || newKey is not null)
+                    changes.Add(new TagChange(tag, oldKey, newKey));
             }
-            catch (Exception ex) when (ex is FormatException or KeyNotFoundException or InvalidOperationException)
-            {
-                // The record was encoded and decoded again before planning, so every value already has its
-                // field's own type: a key that can't be worked out is the expression's fault, and the
-                // expression came from the index file, so the index is damaged or another table's (found by
-                // fuzzing). The tag's name and the parser's message go in Diagnostic (guideline 1.2).
-                throw new DbfException(DbfErrorCode.IndexDamaged, "An index tag's key expression can't be worked out for this table.",
-                    "The index is damaged or belongs to another table. Rebuild it in the legacy app, or restore it from a backup.", _path, ex,
-                    diagnostic: $"tag {tag.Name}: {ex.Message}");
-            }
-            if (oldKey is not null && newKey is not null && oldKey.AsSpan().SequenceEqual(newKey))
-                continue;
-            if (newKey is not null && tag.RefusesDuplicates)
-                ThrowIfKeyTaken(tag, newKey, after.RecordNumber);
-            if (oldKey is not null || newKey is not null)
-                changes.Add(new TagChange(tag, oldKey, newKey));
         }
         _tagsLastPlanned = tags;
         return changes;
@@ -2688,10 +2690,10 @@ public sealed partial class DbfTable : IDisposable
             var keysByTag = MaintainedIndexes.SelectMany(i => i.MaintainedTags).ToDictionary(tag => tag, _ => new List<(byte[] Key, int Record)>());
             foreach (var record in ReadAll())
             {
-                foreach (var (tag, keys) in keysByTag)
+                foreach (var pair in keysByTag)
                 {
-                    if (tag.Includes(record))
-                        keys.Add((tag.KeyFor(record), record.RecordNumber));
+                    if (pair.Key.Includes(record))
+                        pair.Value.Add((pair.Key.KeyFor(record), record.RecordNumber));
                 }
             }
 
