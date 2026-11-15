@@ -452,6 +452,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
                 // header still says what it holds: a rebuild from the table replaces every tree, as
                 // FoxPro's REINDEX does, so it's refused like keys out of order, not as unreadable.
                 Damaged = true;
+                _rebuiltWhileDamaged.Clear();
                 _refusedOnlyForOrder = true;
                 MaintainRefusal = $"{damage.SourceException.Message} RebuildIndex() on an exclusive open rebuilds every tag from the table";
                 return;
@@ -487,26 +488,26 @@ public sealed partial class CdxIndex : IMaintainedIndex
         {
             if (Tags.Count == 0 || !Tags.All(t => t.PrepareForWriting(_table!) is null))
                 return false;
-            var reserved = new HashSet<long> { 0, DefaultPageLength };
+            // Byte ranges, not page starts: Harbour's .cdx pages are 1,024 bytes, so a root could
+            // start inside a directory page and the in-place root write would run over it.
+            var taken = new List<(long Start, long End)> { (0, 2L * DefaultPageLength) };
             if (IsCompound)
             {
-                CdxTag.LoadDirectory(this).ClaimPages((page, _) => reserved.Add(page), "the tag directory");
+                CdxTag.LoadDirectory(this).ClaimPages((page, _) => taken.Add((page, page + PageLength)), "the tag directory");
                 foreach (var tag in Tags)
-                {
-                    reserved.Add(tag.HeaderOffset);
-                    reserved.Add(tag.HeaderOffset + DefaultPageLength);
-                }
+                    taken.Add((tag.HeaderOffset, tag.HeaderOffset + 2L * DefaultPageLength));
             }
             var length = FileLength(fresh: true);
-            var roots = new HashSet<long>();
             foreach (var tag in Tags)
             {
                 var root = tag.RootPage;
-                if (root <= 0 || root % DefaultPageLength != 0 || root + PageLength > length || reserved.Contains(root) || !roots.Add(root))
+                if (root <= 0 || root % DefaultPageLength != 0 || root + PageLength > length
+                    || taken.Any(t => root < t.End && t.Start < root + PageLength))
                     return false;
                 var attributes = BinaryPrimitives.ReadUInt16LittleEndian(Read(root, 2));
                 if ((attributes & 0x01) == 0 || attributes > 7)
                     return false;
+                taken.Add((root, root + PageLength)); // and no other tag's root overlaps it
             }
             return true;
         }
@@ -514,6 +515,26 @@ public sealed partial class CdxIndex : IMaintainedIndex
         {
             return false;
         }
+    }
+
+    private bool _rebuilding;
+    private readonly HashSet<long> _rebuiltWhileDamaged = []; // tags' header offsets: a reload makes new tag objects
+
+    // A whole tag's rebuild: the one change a damaged index takes. Damaged clears only once every tag
+    // has been rebuilt (see Commit).
+    internal void Rebuild(CdxTag tag, Action rebuild)
+    {
+        _rebuilding = true;
+        try
+        {
+            Update(tag, () => { rebuild(); return true; });
+        }
+        finally
+        {
+            _rebuilding = false;
+        }
+        if (Damaged)
+            _rebuiltWhileDamaged.Add(tag.HeaderOffset);
     }
 
     // A damaged index's rebuild starts the free list over: the list may name pages a torn tree took.
@@ -691,6 +712,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
     /// </summary>
     internal T Update<T>(CdxTag tag, Func<T> change)
     {
+        // A damaged index takes nothing but a rebuild of every tag: a key change (a journal note's
+        // replay, say) would walk and write a torn tree with the page checks off.
+        if (Damaged && !_rebuilding)
+            throw new DbfException(DbfErrorCode.IndexWouldGoStale, $"The FoxPro index is damaged, so only a rebuild may write to it. {MaintainRefusal}",
+                "Open the table with exclusive: true and run RebuildIndex(), or REINDEX it in FoxPro.", _table?.FilePath);
         if (_held is not null)
         {
             // Inside a hold: the lock is taken and the file checked; Release publishes.
@@ -729,9 +755,10 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         if (_deferred is not null)
             return; // a batch publishes when it ends
-        if (Damaged && _rebuildExpected)
+        if (Damaged && _rebuildExpected && Tags.All(t => _rebuiltWhileDamaged.Contains(t.HeaderOffset)))
         {
             // The rebuild replaced every tree: the next write reloads the tags and checks them in full.
+            _rebuiltWhileDamaged.Clear();
             Damaged = false;
             _checkedState = null;
             _ourState = null;
@@ -925,7 +952,7 @@ public sealed partial class CdxTag : IMaintainedTag
     });
     int? IMaintainedTag.FirstRecordFor(byte[] key) => _index.Update(this, () => FirstRecordFor(key));
     void IMaintainedTag.Clear() => _index.Update(this, () => { Clear(); return true; });
-    void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => _index.Update(this, () => { ReplaceAll(keys); return true; });
+    void IMaintainedTag.ReplaceAll(IReadOnlyList<(byte[] Key, int Record)> keys) => _index.Rebuild(this, () => ReplaceAll(keys));
 
     /// <summary>The header bytes that decide how the tag's keys are built and sorted, to spot a REINDEX by another program.</summary>
     internal byte[] Layout { get; private init; } = [];
