@@ -1,4 +1,4 @@
-//   write 1: lock, check everything, change, remember (length, counter)
+﻿//   write 1: lock, check everything, change, remember (length, counter)
 //   write 2: lock, (length, counter) as we left them?  yes -> change   no -> check everything again
 //
 //   ProjectThunder :: Thunder.Dbf tests
@@ -252,6 +252,94 @@ public sealed partial class CdxWriteTests
             Assert.False(exclusive.HasPendingJournal);
         }
         AssertIndexMatchesTable(cutOff, Path.Combine(killed, "calls.CDX"), rebuilt: true);
+    }
+
+    // A batch cut off while it rewrote pages that were already there can leave a tree that reaches a
+    // page twice: some rewritten parents out, a sibling still old. The note says so, and RebuildIndex()
+    // must still be the way back. It said "no index open" (the torn tree made the whole .cdx
+    // unreadable), and MaintainIndex(path, rebuild: true) said "unreadable"; only VFP's REINDEX
+    // repaired it (found by killing deferred batches on X#'s TEST10K).
+    [Fact]
+    public void A_batch_cut_off_mid_rewrite_leaves_a_torn_tree_RebuildIndex_still_repairs()
+    {
+        var (dbf, _) = Copy("infused-dbf/foxprodb", "calls");
+        var killed = Directory.CreateDirectory(Path.Combine(_dir.FullName, "torn")).FullName;
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+            table.DeferIndexWrites = true;
+            using (table.LockTable())
+            {
+                for (var id = 5000; id < 5050; id++)
+                    table.Append(Call(template, id, contact: 2, subject: "cut off"));
+                foreach (var file in Directory.EnumerateFiles(_dir.FullName))
+                    File.WriteAllBytes(Path.Combine(killed, Path.GetFileName(file)), SharedFile.ReadAllBytes(file));
+            }
+        }
+        var tornDbf = Path.Combine(killed, "calls.dbf");
+        var tornCdx = Path.Combine(killed, "calls.CDX");
+
+        // Tear CALL_ID's tree: the root's second child becomes its first, which it now reaches twice.
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(tornDbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(tornCdx)), table: reader))
+        {
+            Assert.True(index["CALL_ID"].Height() >= 2);
+            (root, keyLength) = (index["CALL_ID"].RootPage, index["CALL_ID"].KeyLength);
+        }
+        var bytes = SharedFile.ReadAllBytes(tornCdx);
+        var first = bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray();
+        first.CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(tornCdx, bytes);
+
+        var refused = Assert.Throws<DbfException>(() =>
+        {
+            using var shared = OpenShared(tornDbf);
+            shared.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "refused" });
+        });
+        Assert.Equal(DbfErrorCode.IndexWouldGoStale, refused.Code);
+
+        using (var exclusive = DbfTable.Open(tornDbf, writable: true, maintainFoxProIndexes: true, exclusive: true))
+        {
+            exclusive.RebuildIndex();
+            Assert.True(exclusive.MaintainsIndex);
+            Assert.False(exclusive.HasPendingJournal);
+            exclusive.UpdateFields(0, new Dictionary<string, object?> { ["SUBJECT"] = "after the rebuild" });
+        }
+        AssertIndexMatchesTable(tornDbf, tornCdx, rebuilt: true);
+        using (var reopened = DbfTable.Open(tornDbf, writable: true, maintainFoxProIndexes: true))
+            reopened.Append(Call(reopened.Read(0).Values.ToArray(), id: 9000, contact: 3, subject: "and after that"));
+        AssertIndexMatchesTable(tornDbf, tornCdx, rebuilt: true);
+    }
+
+    // The same torn tree with no batch note: MaintainIndex(path, rebuild: true) takes it over.
+    [Fact]
+    public void A_torn_tree_without_a_note_is_taken_over_by_a_rebuild()
+    {
+        var (dbf, cdx) = Copy("infused-dbf/foxprodb", "calls");
+        using (var table = OpenShared(dbf))
+        {
+            var template = table.Read(0).Values.ToArray();
+            table.AppendRange(Enumerable.Range(0, 3000).Select(i => Call(template, id: 1000 + i, contact: i % 37, subject: $"s{i}")));
+        }
+        long root;
+        int keyLength;
+        using (var reader = DbfTable.Open(dbf))
+        using (var index = CdxIndex.Open(new MemoryStream(SharedFile.ReadAllBytes(cdx)), table: reader))
+            (root, keyLength) = (index["CONTACT_ID"].RootPage, index["CONTACT_ID"].KeyLength);
+        var bytes = SharedFile.ReadAllBytes(cdx);
+        bytes.AsSpan((int)root + 12 + keyLength + 4, 4).ToArray().CopyTo(bytes, (int)root + 12 + (keyLength + 8) + keyLength + 4);
+        SharedFile.WriteAllBytes(cdx, bytes);
+
+        using (var table = DbfTable.Open(dbf, writable: true, maintainFoxProIndexes: true, allowUnmaintainedIndexes: true, exclusive: true))
+        {
+            Assert.False(table.MaintainsIndex);
+            table.MaintainIndex(cdx, rebuild: true);
+            Assert.True(table.MaintainsIndex);
+        }
+        AssertIndexMatchesTable(dbf, cdx, rebuilt: true);
     }
 
     // A structural .cdx refused when the table opened (short of the table's records here) is what

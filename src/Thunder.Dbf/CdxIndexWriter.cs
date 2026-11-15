@@ -1,4 +1,4 @@
-//   ProjectThunder :: Thunder.Dbf
+﻿//   ProjectThunder :: Thunder.Dbf
 //   Keeping a FoxPro .cdx (and compact .idx) right while the table changes underneath it.
 //
 //   A leaf, 512 bytes:                                      key bytes grow down from the end
@@ -216,7 +216,7 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         var state = CurrentState();
         _lockedCounter = state.Counter;
-        if (_checkedState != state)
+        if (_checkedState != state && !Damaged)
             CheckPageOwnership();
         Unchanged = _ourState == state;
         if (!Unchanged)
@@ -444,6 +444,16 @@ public sealed partial class CdxIndex : IMaintainedIndex
                     : "the index kept changing while it was being checked (another program is busy writing to the table); check again when it's quieter.";
                 return;
             }
+            if (damage is not null && OpenedForWriting && TagsRebuildable())
+            {
+                // The trees are torn (a batch cut off while it rewrote pages, say), but every tag's
+                // header still says what it holds: a rebuild from the table replaces every tree, as
+                // FoxPro's REINDEX does, so it's refused like keys out of order, not as unreadable.
+                Damaged = true;
+                _refusedOnlyForOrder = true;
+                MaintainRefusal = $"{damage.SourceException.Message} RebuildIndex() on an exclusive open rebuilds every tag from the table";
+                return;
+            }
             damage?.Throw();
             // Without the lock, a change in progress at both readings goes unseen, so a refusal may
             // be that change rather than the index (Check's read-only probe, where a lock isn't allowed).
@@ -457,6 +467,35 @@ public sealed partial class CdxIndex : IMaintainedIndex
     }
 
     private const int OptimisticAttempts = 2;
+
+    /// <summary>
+    /// True while the trees are torn but the tag headers read: only a rebuild of every tag may write
+    /// then. Which pages the torn trees still use can't be told, so that rebuild frees none of them
+    /// and starts the free list over; the old pages stay in the file unused.
+    /// </summary>
+    internal bool Damaged { get; private set; }
+
+    private bool TagsRebuildable()
+    {
+        try
+        {
+            return Tags.Count > 0 && Tags.All(t => t.PrepareForWriting(_table!) is null);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or FormatException or DbfException)
+        {
+            return false;
+        }
+    }
+
+    // A damaged index's rebuild starts the free list over: the list may name pages a torn tree took.
+    internal void ResetFreeList()
+    {
+        var header = Read(0, DefaultPageLength);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(header.AsSpan(FreeListOffset)) == 0)
+            return;
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(FreeListOffset), 0);
+        Write(0, header);
+    }
 
     private int ReloadRecordCount()
     {
@@ -579,6 +618,11 @@ public sealed partial class CdxIndex : IMaintainedIndex
             return;
         _ourState = null;
         _nodes.Clear();
+        if (Damaged)
+        {
+            Tags = LoadTags(); // headers only: the trees are what the rebuild replaces
+            return;
+        }
         try
         {
             Tags = LoadTags();
@@ -656,6 +700,14 @@ public sealed partial class CdxIndex : IMaintainedIndex
     {
         if (_deferred is not null)
             return; // a batch publishes when it ends
+        if (Damaged && _rebuildExpected)
+        {
+            // The rebuild replaced every tree: the next write reloads the tags and checks them in full.
+            Damaged = false;
+            _checkedState = null;
+            _ourState = null;
+            _nodes.Clear();
+        }
         _rebuildExpected = false; // a commit follows the rebuild; from here on order is checked again
         if (_changed)
         {
@@ -1987,8 +2039,10 @@ public sealed partial class CdxTag : IMaintainedTag
             entries = entries.Where((e, i) => i == 0 || !entries[i - 1].Key.AsSpan().SequenceEqual(e.Key)).ToList();
 
         // Read the old tree first: a damaged one stops the rebuild before anything is written.
-        var oldPages = Pages();
-        var leafAttributes = (ushort)(LeafAttribute | (EdgeLeaf(last: false).Attributes & 0x04));
+        // A damaged index's trees can't be walked whole: nothing of them is freed (see Damaged).
+        var damaged = _index.Damaged;
+        var oldPages = damaged ? [] : Pages();
+        var leafAttributes = (ushort)(LeafAttribute | (EdgeAttributes(damaged) & 0x04));
 
         // Leaves packed as full as they go, then each level above, until one page holds them all.
         var level = new List<Node>();
@@ -2038,8 +2092,24 @@ public sealed partial class CdxTag : IMaintainedTag
         _index.Barrier();
         WriteNode(root);
         _index.Barrier();
+        if (damaged)
+            _index.ResetFreeList();
         foreach (var page in oldPages.Where(p => p != root.Offset))
             _index.FreePage(page);
+    }
+
+    // The first leaf's attributes, which new leaves copy (Visual FoxPro sets bit 2 on some); a torn
+    // tree that can't be followed to it gives plain leaves.
+    private ushort EdgeAttributes(bool damaged)
+    {
+        try
+        {
+            return EdgeLeaf(last: false).Attributes;
+        }
+        catch (InvalidDataException) when (damaged)
+        {
+            return LeafAttribute;
+        }
     }
 
     // New pages for one level, linked left to right.
