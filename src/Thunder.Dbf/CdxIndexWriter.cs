@@ -1,4 +1,4 @@
-﻿//   ProjectThunder :: Thunder.Dbf
+//   ProjectThunder :: Thunder.Dbf
 //   Keeping a FoxPro .cdx (and compact .idx) right while the table changes underneath it.
 //
 //   A leaf, 512 bytes:                                      key bytes grow down from the end

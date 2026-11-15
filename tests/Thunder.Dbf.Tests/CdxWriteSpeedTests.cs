@@ -1,4 +1,4 @@
-﻿//   write 1: lock, check everything, change, remember (length, counter)
+//   write 1: lock, check everything, change, remember (length, counter)
 //   write 2: lock, (length, counter) as we left them?  yes -> change   no -> check everything again
 //
 //   ProjectThunder :: Thunder.Dbf tests
@@ -157,11 +157,26 @@ public sealed partial class CdxWriteTests
         using var table = OpenShared(dbf);
         table.WatchFolder();
         Assert.True(table.WatchesFolder);
-        // macOS can deliver notices for the files Copy just made after the watcher starts. They come in
-        // order, so once a marker made now has been reported, none of those can arrive later.
+        // macOS can deliver notices for the files Copy just made after the watcher starts, and can
+        // report one file more than once (CI saw the marker below reported again after it was seen).
+        // So the folder is let settle: every notice is answered with a write, which looks and clears
+        // it, until a second goes by with none.
         File.WriteAllText(Path.Combine(_dir.FullName, "settle.txt"), "");
         Assert.True(SpinWait.SpinUntil(() => table.FolderLookPending, TimeSpan.FromSeconds(10)), "the watcher never reported the marker");
         var template = table.Read(0).Values.ToArray();
+        var settling = 4000;
+        var quiet = System.Diagnostics.Stopwatch.StartNew();
+        var deadline = System.Diagnostics.Stopwatch.StartNew();
+        while (quiet.Elapsed < TimeSpan.FromSeconds(1))
+        {
+            Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(30), $"the folder never went quiet; last notice: {table.LastFolderNotice}");
+            if (table.FolderLookPending)
+            {
+                table.Append(Call(template, settling++, contact: 1, subject: "settling"));
+                quiet.Restart();
+            }
+            Thread.Sleep(50);
+        }
         table.Append(Call(template, 5000, contact: 1, subject: "looks once"));
         table.Append(Call(template, 5001, contact: 1, subject: "nothing to look for"));
         Assert.False(table.FolderLookPending, $"the watcher reported: {table.LastFolderNotice}");
